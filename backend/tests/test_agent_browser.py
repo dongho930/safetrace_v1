@@ -267,3 +267,30 @@ def test_low_confidence_action_status_follows_threat(settings, testpages, threat
     cid = str(uuid.uuid4())
     final = investigate(cid, f"{BASE}/benign/", settings, lambda e: None, decider=LowConfidence())
     assert (final["status"], final["reason"]) == (status, "low_confidence_action")
+
+
+@pytest.fixture
+def slow_testpages():
+    """페이지 응답이 1.2초씩 느린 시험 서버(/smish/ 만). 느린 사이트에서 새 창·이동을 놓치지 않는지 본다."""
+    import server  # testpages/server.py
+
+    srv, rec = server.start(8901, smish_delay=1.2)
+    yield rec
+    srv.shutdown()
+
+
+def test_long_smishing_flow(settings, slow_testpages):
+    """긴 스미싱 시나리오(시연용, 느린 응답): 팝업 닫기 → 도메인 경유 → 숨은 안내 → 새 창 → 앱 설치 유도 → 카드 입력 화면."""
+    testpages = slow_testpages
+    settings.max_steps = 15
+    settings.test_allowlist = ["127.0.0.1:8901", "localhost:8901"]
+    _, final, chain, _ = run("http://127.0.0.1:8901/smish/", settings, testpages)
+    paths = [urlsplit(r["data"]["url"]).path for r in chain if r["kind"] == "observe"]
+    for p in ("/smish/track.html", "/smish/address.html", "/smish/notice.html", "/smish/carrier.html",
+              "/smish/app.html", "/smish/guide.html", "/smish/fee.html"):
+        assert p in paths, (p, paths)
+    assert any(r["kind"] == "new_window" for r in chain)
+    assert "localhost" in final["candidates"]  # 127.0.0.1 → localhost 경유 도메인
+    app = next(r["data"] for r in chain if r["kind"] == "observe" and r["data"]["url"].split("?")[0].endswith("app.html"))
+    assert any(f.startswith("download") for f in app["forbidden"])  # apk 링크는 선택지에서 빠짐
+    assert_no_forbidden(chain, testpages)

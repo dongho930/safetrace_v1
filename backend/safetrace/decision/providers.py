@@ -144,7 +144,9 @@ class RuleProvider:
                 elif _NAV_NOISE.search(label):
                     s = 0.02
                 elif _PROGRESS.search(label):
-                    s, progress = 1.0, True
+                    # 진행 버튼이 여럿이면(통신사 선택 등) 첫 번째만 높게 줘서 확신도가 쪼개지지 않게 한다
+                    s = 0.15 if progress else 1.0
+                    progress = True
                 else:
                     s = 0.1
             elif key == "close_popup":

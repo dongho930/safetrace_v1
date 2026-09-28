@@ -2,6 +2,9 @@
 FROM python:3.13-slim AS base
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 RUN useradd --create-home --uid 10001 app
+# 빌드 중 PyPI 응답이 느릴 때 pip 가 15초 만에 포기하지 않게(빌드 때만 쓰는 ARG)
+ARG PIP_DEFAULT_TIMEOUT=60
+ARG PIP_RETRIES=8
 WORKDIR /app
 COPY pyproject.toml ./
 COPY safetrace ./safetrace

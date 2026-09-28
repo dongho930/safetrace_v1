@@ -2,6 +2,9 @@
 FROM mcr.microsoft.com/playwright/python:v1.63.0-noble
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
+# 빌드 중 PyPI 응답이 느릴 때 pip 가 15초 만에 포기하지 않게(빌드 때만 쓰는 ARG)
+ARG PIP_DEFAULT_TIMEOUT=60
+ARG PIP_RETRIES=8
 # 한국어 OCR 인식 모델(해시 확인 후 이미지에 포함). 조사 중에는 외부에서 모델을 받지 않는다.
 # 코드보다 먼저 받아 빌드 캐시를 유지한다.
 COPY --from=tools fetch_ocr_model.py /tmp/

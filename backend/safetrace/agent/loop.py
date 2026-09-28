@@ -267,21 +267,21 @@ class AgentRun:
     async def _click(self, ctx: BrowserContext, page: Page, eid: str) -> tuple[Page, str]:
         """클릭하고 (현재 페이지, 결과)를 돌려준다. 결과: ok | failed | no_effect"""
         loc = page.locator(f"[{self.attr}='{eid}']").first
-        new_pages: list[Page] = []
-
-        def on_page(pg: Page):
-            new_pages.append(pg)
-
         before = (page.url, await self._text_digest(page))
-        ctx.on("page", on_page)
+        pages_before = set(ctx.pages)
         failed = False
         try:
             await loc.click(timeout=5000, no_wait_after=False)
         except (PWError, PWTimeout) as e:
             failed = True
             self._record("action_error", {"element": eid, "error": type(e).__name__})
-        await asyncio.sleep(0.8)
-        ctx.remove_listener("page", on_page)
+        # 느린 사이트: 새 창은 첫 응답이 와야 잡히고 이동도 늦게 시작한다. 주소가 바뀌거나 새 창이 생길 때까지 최대 3초
+        new_pages: list[Page] = []
+        for _ in range(12):
+            await asyncio.sleep(0.25)
+            new_pages = [pg for pg in ctx.pages if pg not in pages_before]
+            if new_pages or page.url != before[0] or await self._text_digest(page) != before[1]:
+                break
         if new_pages:
             np = new_pages[-1]
             await self._settle(np)
