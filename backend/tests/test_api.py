@@ -122,6 +122,10 @@ def test_live_websocket_streams_frames(client, testpages):
         assert e.value.code == 1000
     assert len(frames) >= 10, len(frames)
     assert all(f[:3] == bytes([0xFF, 0xD8, 0xFF]) for f in frames)  # JPEG
+    # 라이브 끝 신호 뒤에 최종 상태(Safe Browsing 등)가 기록되므로 이벤트 스트림으로 끝까지 기다린다
+    with client.stream("GET", f"/api/cases/{cid}/events", headers=h(VIEWER)) as st:
+        for _ in st.iter_lines():
+            pass
     assert client.get(f"/api/cases/{cid}", headers=h(VIEWER)).json()["status"] in {"COMPLETED", "REVIEW_REQUIRED"}
     # 끝난 사건은 라이브 없이 바로 닫힌다
     with client.websocket_connect(f"/api/cases/{cid}/live") as ws:
