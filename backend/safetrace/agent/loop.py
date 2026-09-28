@@ -137,12 +137,20 @@ class AgentRun:
                    "files": list(rec["files"].keys()), "hash": rec["hash"]})
         return rec["seq"]
 
-    async def _screenshot(self, page: Page, label: str) -> str | None:
+    async def _screenshot(self, page: Page, label: str, full: bool = False) -> str | None:
+        """full=True 면 페이지 전체(세로 screenshot_max_height 까지), 아니면 보이는 창만."""
         self._shot += 1
         name = f"s{self._shot:03d}_{label}.png"
         try:
-            png = await page.screenshot(timeout=8000, animations="disabled")
-        except (PWError, PWTimeout):
+            if full:
+                vw, h = await page.evaluate(
+                    "() => [window.innerWidth, Math.max(document.documentElement.scrollHeight,"
+                    " document.body ? document.body.scrollHeight : 0)]")
+                clip = {"x": 0, "y": 0, "width": int(vw), "height": max(1, min(int(h), self.s.screenshot_max_height))}
+                png = await page.screenshot(timeout=15000, animations="disabled", full_page=True, clip=clip)
+            else:
+                png = await page.screenshot(timeout=8000, animations="disabled")
+        except (PWError, PWTimeout, TypeError, ValueError):
             return None
         self.ev.file_path(name).write_bytes(png)
         return name
@@ -233,7 +241,7 @@ class AgentRun:
         text = mask_pii(raw.get("text", ""))[:4000]
         state = PageState(step=step, url=page.url[:2048], title=mask_pii(raw.get("title", ""))[:200], text=text,
                           candidates=chosen, has_popup=bool(raw.get("popup")), history=self.history[-30:])
-        shot = await self._screenshot(page, "observe")
+        shot = await self._screenshot(page, "observe", full=True)
         text_hash = hashlib.sha256(raw.get("text", "").encode()).hexdigest()
         seq = self._record("observe", {
             "step": step, "url": page.url[:2048], "title": state.title,
@@ -498,7 +506,7 @@ class AgentRun:
 
         self.result.steps = step
         self.result.final_url = page.url[:2048]
-        final = await self._screenshot(page, "final")
+        final = await self._screenshot(page, "final", full=True)
         self._record("finish", {"reason": self.result.finish_reason, "final_url": self.result.final_url,
                                 "nav_chain": self.result.nav_chain[:50],
                                 "blocked_requests": self.result.blocked_requests},

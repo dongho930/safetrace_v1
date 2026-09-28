@@ -764,6 +764,8 @@ function Evidence({ c, id, running }: { c: CaseOut | null; id: string; running: 
 // 증거 파일은 인증 헤더가 필요하므로 blob URL 로 보여 준다
 function Media({ caseId, name, kind }: { caseId: string; name: string; kind: "img" | "video" }) {
   const [src, setSrc] = useState("");
+  // 페이지 전체 캡처처럼 세로로 긴 이미지는 폭에 맞춰 세로 스크롤로 보여 준다(작게 줄이면 읽을 수 없음)
+  const [tall, setTall] = useState(false);
   useEffect(() => {
     let alive = true;
     let u = "";
@@ -782,8 +784,21 @@ function Media({ caseId, name, kind }: { caseId: string; name: string; kind: "im
   if (!src) return <span className="muted small">불러오는 중…</span>;
   if (kind === "video") return <video src={src} controls />;
   return (
-    <a className="screen-fit" href={src} target="_blank" rel="noopener noreferrer" title="원본 크기로 보기 (새 탭)">
-      <img src={src} alt={`증거 화면 ${name}`} />
-    </a>
+    <div className={tall ? "screen-scroll" : "screen-fit"} tabIndex={tall ? 0 : undefined} aria-label={tall ? "페이지 전체 화면 (세로 스크롤)" : undefined}>
+      <a href={src} target="_blank" rel="noopener noreferrer" title="원본 크기로 보기 (새 탭)">
+        <img
+          src={src}
+          alt={`증거 화면 ${name}`}
+          onLoad={(e) => {
+            const img = e.currentTarget;
+            const box = img.closest(".screen-body");
+            if (!box) return;
+            // 칸 폭에 맞췄을 때 칸 높이를 넘으면 스크롤 방식
+            const shown = (img.naturalHeight / img.naturalWidth) * Math.min(box.clientWidth, img.naturalWidth);
+            setTall(shown > box.clientHeight * 1.05);
+          }}
+        />
+      </a>
+    </div>
   );
 }

@@ -294,3 +294,23 @@ def test_long_smishing_flow(settings, slow_testpages):
     app = next(r["data"] for r in chain if r["kind"] == "observe" and r["data"]["url"].split("?")[0].endswith("app.html"))
     assert any(f.startswith("download") for f in app["forbidden"])  # apk 링크는 선택지에서 빠짐
     assert_no_forbidden(chain, testpages)
+
+
+def _png_size(path):
+    b = path.read_bytes()[16:24]
+    return int.from_bytes(b[:4], "big"), int.from_bytes(b[4:], "big")
+
+
+def test_observe_screenshot_is_full_page_and_capped(settings, testpages):
+    """관찰 화면은 페이지 전체를 캡처하고(보이는 창 800px 보다 김), 설정한 최대 높이에서 자른다."""
+    cid, final, chain, _ = run(f"{BASE}/smish/guide.html", settings, testpages)
+    obs = next(r for r in chain if r["kind"] == "observe")
+    w, h = _png_size(settings.evidence_dir / cid / "files" / next(iter(obs["files"])))
+    assert w == 1280 and h > 800, (w, h)
+
+    settings.screenshot_max_height = 900
+    cid, final, chain, _ = run(f"{BASE}/smish/guide.html", settings, testpages)
+    obs = next(r for r in chain if r["kind"] == "observe")
+    assert _png_size(settings.evidence_dir / cid / "files" / next(iter(obs["files"])))[1] == 900
+    act = next(r for r in chain if r["kind"] == "action")  # 클릭 전후는 보이는 창만
+    assert all(_png_size(settings.evidence_dir / cid / "files" / f)[1] == 800 for f in act["files"])

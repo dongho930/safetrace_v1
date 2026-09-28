@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     ocr_enabled: bool = True
     # 브라우저: 봇에게 다른 화면을 보여주거나 막는 사이트(클로킹)가 많아, 전체 Chromium 의 새 헤드리스 모드와
     # 실행 중인 버전에 맞춘 일반 User-Agent 를 쓴다. 비우면 Playwright 기본(headless shell, HeadlessChrome UA).
+    # 관찰·마지막 화면은 페이지 전체를 캡처한다(숨은 계좌·양식이 아래쪽에 있는 경우가 많음). 너무 긴 페이지는 이 높이에서 자른다
+    screenshot_max_height: int = 6000
     browser_channel: str = "chromium"
     browser_user_agent: str = "auto"  # auto | 직접 지정 문자열 | 빈 문자열(기본값 사용)
 
