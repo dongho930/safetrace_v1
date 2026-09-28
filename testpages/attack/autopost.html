@@ -1,0 +1,4 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><title>자동 전송</title>
+<h1>자동 전송 시험</h1><p>페이지가 열리자마자 브라우저 정보를 몰래 POST 로 보낸다.</p>
+<script>fetch('/attack/collect',{method:'POST',body:'fp=agent'}).catch(function(){});
+navigator.sendBeacon && navigator.sendBeacon('/attack/collect','beacon');</script></html>

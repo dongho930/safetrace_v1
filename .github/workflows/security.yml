@@ -1,0 +1,51 @@
+name: security-ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults: {run: {working-directory: backend}}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with: {python-version: "3.13"}
+      - run: pip install -e ".[ocr,dev]"
+      - run: python -m playwright install --with-deps chromium
+      - name: tests (단위 + 브라우저 통합)
+        run: pytest -q
+      - name: bandit
+        run: bandit -r safetrace -ll
+      - name: pip-audit
+        run: pip-audit --skip-editable
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults: {run: {working-directory: frontend}}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with: {node-version: "24"}
+      - run: npm ci
+      - run: npm run build
+      - run: npm audit --audit-level=high
+
+  semgrep:
+    runs-on: ubuntu-latest
+    container: {image: semgrep/semgrep}
+    steps:
+      - uses: actions/checkout@v5
+      - run: semgrep scan --config p/python --config p/react --config p/secrets --error --exclude testpages
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with: {fetch-depth: 0}
+      - uses: gitleaks/gitleaks-action@v2
+        env: {GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"}

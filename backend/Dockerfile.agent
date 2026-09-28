@@ -1,0 +1,9 @@
+# 에이전트 워커: Playwright 공식 이미지(Chromium 포함) + 로컬 OCR. 비 root 로 실행.
+FROM mcr.microsoft.com/playwright/python:v1.63.0-noble
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+COPY pyproject.toml ./
+COPY safetrace ./safetrace
+RUN pip install --no-cache-dir ".[ocr]" && rm -rf /root/.cache
+USER pwuser
+CMD ["python", "-m", "safetrace.agent.worker"]

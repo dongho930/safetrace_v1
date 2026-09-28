@@ -1,0 +1,15 @@
+.env
+backend/.env
+.venv/
+__pycache__/
+*.pyc
+var/
+node_modules/
+frontend/dist/
+*.log
+*.egg-info/
+*.tsbuildinfo
+.pytest_cache/
+# 대회 문서(공개 저장소에 올리지 않음)
+*.docx
+*.pdf

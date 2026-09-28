@@ -1,0 +1,35 @@
+[project]
+name = "safetrace"
+version = "0.1.0"
+description = "AI 브라우저 에이전트 기반 위협 의심 사이트 조사·공공 심의 지원 시스템"
+requires-python = ">=3.13"
+dependencies = [
+  "fastapi==0.141.1",
+  "uvicorn==0.52.4",
+  "pydantic==2.13.5",
+  "pydantic-settings==2.15.0",
+  "httpx==0.28.1",
+  "sqlalchemy==2.0.52",
+  "psycopg[binary]==3.3.5",
+  "redis==8.1.0",
+  "playwright==1.63.0",
+  "argon2-cffi>=25.1",
+]
+
+[project.optional-dependencies]
+ocr = ["rapidocr_onnxruntime==1.2.3"]
+dev = ["pytest==8.3.3", "bandit", "pip-audit"]  # semgrep 은 CI 컨테이너에서 실행
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["safetrace*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["browser: Chromium 이 필요한 통합 시험"]
+
+[tool.bandit]
+exclude_dirs = ["tests"]
