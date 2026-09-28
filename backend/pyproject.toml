@@ -18,7 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 ocr = ["rapidocr_onnxruntime==1.2.3"]
-dev = ["pytest==8.3.3", "bandit", "pip-audit"]  # semgrep 은 CI 컨테이너에서 실행
+dev = ["pytest==9.1.1", "bandit", "pip-audit"]  # semgrep 은 CI 컨테이너에서 실행
 
 [build-system]
 requires = ["setuptools>=75"]
