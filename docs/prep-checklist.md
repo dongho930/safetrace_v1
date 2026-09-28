@@ -49,7 +49,7 @@
 
 ## 5. 로컬 보안 점검 (2026-09-28)
 
-- 시험: `pytest` **125개 통과**(09-28 브라우저 설정 시험 추가 후)(단위 + 실제 Chromium 통합)
+- 시험: `pytest` **127개 통과**(09-28 행동 확신도 처리 시험 추가 후)(단위 + 실제 Chromium 통합)
 - Bandit: Medium·High **0건** (Low 2건: 예외 무시 구문)
 - pip-audit: 알려진 취약점 **0건**
 - npm audit: **0건**
@@ -135,7 +135,7 @@
 
 Docker(실제 Jev): gamble → `deposit.html` 도달, illegal_gambling 0.93, 증거 검증 통과.
 
-남은 검토: 정상 페이지에서도 행동 확신도가 0.45 미만이면 `REVIEW_REQUIRED` 가 된다. 탐색 확신도가 낮은 것과 위협 판단이 불확실한 것은 다르므로, 행동 확신도 부족은 탐색만 끝내고 상태는 위협 판단에 맡길지 결정 필요.
+결정(2026-09-28): 행동 확신도가 0.45 미만이면 **탐색만 멈추고**(`low_confidence_action`), 최종 상태는 위협 판단에 맡긴다(위협 확신 부족 hold 면 REVIEW_REQUIRED, 아니면 COMPLETED). 시험 `test_low_confidence_action_status_follows_threat`.
 
 ## 10. 정상 사이트 17건 재확인과 에이전트 브라우저 설정 (2026-09-28)
 
@@ -162,4 +162,4 @@ Docker(실제 Jev): gamble → `deposit.html` 도달, illegal_gambling 0.93, 증
 - 어떤 브라우저·User-Agent 로 조사했는지 `browser` 증거로 남긴다.
 - Docker(검문 프록시 경유) 확인: 쿠팡 200·benign 0.92, 대한항공 200·benign 0.75, 도박 시나리오 입금 화면 도달 유지.
 
-남은 검토: 쿠팡 조사는 위협 판단이 benign 0.92 인데도 행동 확신도 부족(`low_confidence_action`)으로 REVIEW_REQUIRED 가 됐다(9절 남은 검토와 같은 문제).
+쿠팡처럼 위협 판단이 확실한 정상 사이트가 행동 확신도 부족만으로 REVIEW_REQUIRED 가 되던 문제는 9절 결정으로 해결.

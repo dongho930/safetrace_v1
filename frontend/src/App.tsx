@@ -58,6 +58,11 @@ const KIND_LABEL: Record<string, string> = {
 const REASON_LABEL: Record<string, string> = {
   unreachable_reputation_match: "접속 불가 · Safe Browsing 위험 일치",
   goto_failed: "최초 접속 실패",
+  low_confidence_action: "다음 행동 확신 부족으로 탐색 종료",
+  loop_detected: "같은 화면 반복으로 탐색 종료",
+  agent_finished: "에이전트가 조사 완료 판단",
+  step_budget: "최대 단계 도달",
+  time_budget: "최대 시간 도달",
 };
 const NET_CATEGORY_LABEL: Record<string, string> = {
   dns_failure: "도메인 없음(DNS)",

@@ -247,3 +247,23 @@ def test_popup_covered_button_marked(settings, testpages):
     opts = action_options(PageState(step=1, url="http://x.example/", title="", text="",
                                     candidates=[Candidate(**start)], has_popup=True))
     assert "가려져" in opts[f"click_{start['id']}"]
+
+
+@pytest.mark.parametrize("threat_prob, hold, status", [(0.92, False, "COMPLETED"), (0.40, True, "REVIEW_REQUIRED")])
+def test_low_confidence_action_status_follows_threat(settings, testpages, threat_prob, hold, status):
+    """행동 확신도 부족은 탐색만 멈추고, 최종 상태는 위협 판단(hold)이 정한다."""
+    from safetrace.decision.schema import ActionDecision, ActionKind, Threat, ThreatDecision
+
+    class LowConfidence:
+        def action(self, state):
+            return ActionDecision(choice="scroll", probabilities={"scroll": 0.3, "finish": 0.25}, model="t",
+                                  provider="t", latency_ms=0, action=ActionKind.SCROLL)
+
+        def threat(self, req):
+            return ThreatDecision(choice="benign", probabilities={"benign": threat_prob}, model="t", provider="t",
+                                  latency_ms=0, threat=Threat.BENIGN, hold=hold)
+
+    testpages.clear()
+    cid = str(uuid.uuid4())
+    final = investigate(cid, f"{BASE}/benign/", settings, lambda e: None, decider=LowConfidence())
+    assert (final["status"], final["reason"]) == (status, "low_confidence_action")

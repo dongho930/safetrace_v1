@@ -430,7 +430,9 @@ class AgentRun:
                 "observe_seq": obs.evidence_seq,
             })
             if prob < self.s.action_min_prob:
-                self.result.status, self.result.finish_reason = "REVIEW_REQUIRED", "low_confidence_action"
+                # 다음 행동을 확신하지 못하면 탐색만 멈춘다. 담당자 검토 여부는 위협 판단(확신 부족 시 hold)에 맡긴다:
+                # 탐색 확신도가 낮은 것과 위협 판단이 불확실한 것은 다르다.
+                self.result.status, self.result.finish_reason = "COMPLETED", "low_confidence_action"
                 break
             if decision.action == ActionKind.FINISH:
                 self.result.status, self.result.finish_reason = "COMPLETED", "agent_finished"
