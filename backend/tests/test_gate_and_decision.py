@@ -187,3 +187,36 @@ def test_only_finish_left_skips_model():
                    history=["scroll_no_effect", "back_no_effect"])
     d = Engine([Boom()], 0.45, 0.6).decide_action(ActionRequest(state=st))
     assert d.choice == "finish" and d.provider == "exhausted"
+
+
+def test_live_sink_keeps_30fps_with_jittery_frames(monkeypatch):
+    """프레임이 30fps 근처로 들쑥날쑥 와도(31~36ms 간격) 발행이 크게 줄지 않는다."""
+    import random
+
+    from safetrace import live
+
+    class Pub:
+        def __init__(self):
+            self.n = 0
+
+        def watching(self, case_id):
+            return True
+
+        def publish(self, case_id, jpeg):
+            self.n += 1
+
+        def end(self, case_id):
+            pass
+
+    clock = [100.0]
+    monkeypatch.setattr(live.time, "monotonic", lambda: clock[0])
+    sink = live.LiveSink(Pub(), "c", max_fps=30)
+    offered = []
+    monkeypatch.setattr(sink, "_offer", lambda f: offered.append(f))
+    rnd = random.Random(1)
+    for _ in range(300):  # 약 10초
+        clock[0] += rnd.uniform(0.031, 0.036)
+        sink.on_frame(b"x")
+    seconds = clock[0] - 100.0
+    assert len(offered) / seconds >= 27, len(offered) / seconds
+    sink.close()

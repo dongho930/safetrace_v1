@@ -48,7 +48,8 @@ class Settings(BaseSettings):
     egress_proxy: str | None = None  # 예: http://egress:3128
     resolver_url: str | None = None  # 격리망에서 1차 IP 확인용 DNS 조회. 예: http://egress:3129
     record_video: bool = True
-    record_fps: int = 15  # 조사 녹화 프레임 수(화면 전송 JPEG 90 → VP8 품질 우선)
+    record_fps: int = 30  # 조사 녹화 프레임 수(화면 전송 JPEG 80 → VP8 품질 우선)
+    live_max_fps: int = 30  # 콘솔 실시간 화면(보는 사람이 있을 때만 전송)
     ffmpeg_path: str = ""  # 비우면 PATH·Playwright 가 받아 둔 ffmpeg 를 찾는다. 없으면 Playwright 내장 녹화
     ocr_enabled: bool = True
     # 브라우저: 봇에게 다른 화면을 보여주거나 막는 사이트(클로킹)가 많아, 전체 Chromium 의 새 헤드리스 모드와

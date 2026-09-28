@@ -453,6 +453,10 @@ function Investigation({
   const browser = events.find((e) => e.kind === "browser")?.data as { version?: string } | undefined;
   const lastUrl = [...events].reverse().find((e) => e.kind === "observe")?.data.url as string | undefined;
   const [view, setView] = useState<"shot" | "video">("shot");
+  // 조사 중에는 라이브 영상(최대 30fps)을 먼저 시도하고, 끝나거나 안 되면 증거 스크린샷으로
+  const [liveState, setLiveState] = useState<"trying" | "off">("trying");
+  const [liveFps, setLiveFps] = useState(0);
+  const showLive = running && liveState === "trying";
   const total = Math.max(MAX_STEPS, steps);
 
   return (
@@ -500,10 +504,13 @@ function Investigation({
                 REC
               </span>
             )}
+            {showLive && liveFps > 0 && <span className="live-fps">LIVE · {liveFps}fps</span>}
             <span>격리 브라우저{browser?.version ? ` · Chromium ${browser.version.split(".")[0]}` : ""} · 검문 프록시 경유</span>
           </div>
           <div className="screen-body">
-            {view === "video" && recording ? (
+            {showLive ? (
+              <LiveVideo caseId={id} onFps={setLiveFps} onEnd={() => setLiveState("off")} fallback={shot ? <LiveScreen caseId={id} name={shot} /> : null} />
+            ) : view === "video" && recording ? (
               <Recording caseId={id} name={recording} />
             ) : shot ? (
               <LiveScreen caseId={id} name={shot} />
@@ -801,6 +808,89 @@ function Recording({ caseId, name }: { caseId: string; name: string }) {
     };
   }, [caseId, name]);
   return src ? <video src={src} controls /> : <span className="muted small">불러오는 중…</span>;
+}
+
+// 라이브 영상: 에이전트 화면 전송 프레임을 WebSocket 으로 받아 canvas 에 그린다(보기용, 증거 아님).
+// 디코드가 밀리면 최신 프레임만 그린다. 첫 프레임이 오기 전·연결이 안 될 때는 fallback(단계별 화면)을 보여 준다.
+function LiveVideo({
+  caseId,
+  onFps,
+  onEnd,
+  fallback,
+}: {
+  caseId: string;
+  onFps: (fps: number) => void;
+  onEnd: () => void;
+  fallback: React.ReactNode;
+}) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const [hasFrame, setHasFrame] = useState(false);
+  const cb = useRef({ onFps, onEnd });
+  cb.current = { onFps, onEnd };
+
+  useEffect(() => {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/api/cases/${encodeURIComponent(caseId)}/live`);
+    ws.binaryType = "blob";
+    let alive = true;
+    let got = false;
+    let count = 0;
+    let drawing = false;
+    let pending: Blob | null = null;
+    const draw = async (b: Blob) => {
+      drawing = true;
+      try {
+        const bmp = await createImageBitmap(b); // 메인 스레드 밖에서 디코드
+        const c = canvas.current;
+        if (c && alive) c.getContext("2d")?.drawImage(bmp, 0, 0, c.width, c.height);
+        bmp.close();
+      } catch {
+        /* 깨진 프레임은 건너뛴다 */
+      }
+      drawing = false;
+      if (pending && alive) {
+        const next = pending;
+        pending = null;
+        void draw(next);
+      }
+    };
+    const tick = setInterval(() => {
+      cb.current.onFps(count);
+      count = 0;
+    }, 1000);
+    const noFrame = setTimeout(() => {
+      if (!got && alive) cb.current.onEnd(); // 라이브를 못 받으면 단계별 화면으로
+    }, 8000);
+    ws.onopen = () => ws.send(JSON.stringify({ token: getToken() }));
+    ws.onmessage = (e) => {
+      count += 1;
+      if (!got) {
+        got = true;
+        setHasFrame(true);
+      }
+      if (drawing) pending = e.data as Blob;
+      else void draw(e.data as Blob);
+    };
+    ws.onclose = () => {
+      if (alive) cb.current.onEnd();
+    };
+    return () => {
+      alive = false;
+      clearInterval(tick);
+      clearTimeout(noFrame);
+      cb.current.onFps(0);
+      ws.close();
+    };
+  }, [caseId]);
+
+  return (
+    <>
+      {!hasFrame && fallback}
+      <div className={hasFrame ? "live-wrap" : "live-wrap hidden"}>
+        <canvas ref={canvas} width={1280} height={800} className="live-canvas" aria-label="조사 중인 격리 브라우저 실시간 화면" />
+      </div>
+    </>
+  );
 }
 
 // 실시간 화면: 새 화면을 다 받아 그릴 준비가 끝날 때까지 이전 화면을 그대로 두고(이중 버퍼) 교차 페이드로 바꾼다.

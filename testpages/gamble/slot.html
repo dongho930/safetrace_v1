@@ -1,0 +1,22 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><title>WIN SLOT</title><link rel="stylesheet" href="/_style.css">
+<!-- 움직이는 화면(라이브 영상 프레임 측정용): 도박 사이트에 흔한 슬롯 회전·전광판 배너 -->
+<style>
+.reel{display:flex;gap:12px;margin:24px 0}
+.reel div{width:120px;height:120px;border-radius:12px;background:#111;color:#ffd54a;font:700 64px/120px sans-serif;text-align:center;overflow:hidden;position:relative}
+.reel span{position:absolute;left:0;right:0;animation:spin .6s linear infinite}
+.reel div:nth-child(2) span{animation-duration:.45s}.reel div:nth-child(3) span{animation-duration:.7s}
+@keyframes spin{from{transform:translateY(-100%)}to{transform:translateY(100%)}}
+.ticker{white-space:nowrap;overflow:hidden;background:#b00020;color:#fff;padding:8px 0}
+.ticker p{display:inline-block;margin:0;animation:tick 8s linear infinite}
+@keyframes tick{from{transform:translateX(100%)}to{transform:translateX(-100%)}}
+</style>
+<div class="ticker"><p>★ 실시간 당첨 ★ kim*** 님 3,200,000원 환전 완료 · lee*** 님 잭팟 12,000,000원 · 첫충 20% 매충 10% ★</p></div>
+<h1>WIN SLOT 777</h1>
+<div class="reel"><div><span>7</span></div><div><span>★</span></div><div><span>7</span></div></div>
+<p><a class="btn" id="next" href="/gamble/deposit.html">지금 충전하고 시작</a></p>
+<script>
+// 게임 1~6 을 차례로 보여 준 뒤 충전 화면으로(움직이는 화면이 오래 이어지게)
+var n = +(new URLSearchParams(location.search).get('n') || 1);
+document.querySelector('h1').textContent = 'WIN SLOT 777 · 게임 ' + n;
+if (n < 6) { var a = document.getElementById('next'); a.href = '/gamble/slot.html?n=' + (n + 1); a.textContent = '다음 게임 보기'; }
+</script></html>

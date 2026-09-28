@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
@@ -25,6 +25,11 @@ from sqlalchemy.exc import IntegrityError
 
 from ..config import get_settings
 from ..evidence import Head, Signer, verify_case
+from ..live import CHANNEL as LIVE_CHANNEL
+from ..live import END as LIVE_END
+from ..live import WATCH_KEY as LIVE_WATCH_KEY
+from ..live import WATCH_TTL_S as LIVE_WATCH_TTL_S
+from ..live import LocalLive
 from ..masking import mask_secrets
 from ..netguard import BlockedURL, parse_url
 from ..preview import preview_image
@@ -58,15 +63,22 @@ class Principal(BaseModel):
     role: str
 
 
-def auth(authorization: Annotated[str, Header()] = "") -> Principal:
-    scheme, _, token = authorization.partition(" ")
-    if scheme.lower() != "bearer" or not token:
-        raise HTTPException(401, "unauthorized", headers={"WWW-Authenticate": "Bearer"})
+def _principal(token: str) -> Principal | None:
+    if not token:
+        return None
     digest = hashlib.sha256(token.encode()).hexdigest()
     for known, (role, name) in TOKENS.items():
         if hmac.compare_digest(known, digest):
             return Principal(name=name, role=role)
-    raise HTTPException(401, "unauthorized", headers={"WWW-Authenticate": "Bearer"})
+    return None
+
+
+def auth(authorization: Annotated[str, Header()] = "") -> Principal:
+    scheme, _, token = authorization.partition(" ")
+    p = _principal(token) if scheme.lower() == "bearer" else None
+    if p is None:
+        raise HTTPException(401, "unauthorized", headers={"WWW-Authenticate": "Bearer"})
+    return p
 
 
 def need(role: str):
@@ -79,6 +91,7 @@ def need(role: str):
 
 
 # ── 작업 실행: Redis(운영) 또는 스레드(개발) ─────────────────────
+_live_local = LocalLive()  # 개발 모드: 같은 프로세스의 에이전트 스레드 → WebSocket
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent")
 _redis = None
 if settings.redis_url:
@@ -96,7 +109,7 @@ def enqueue(case_id: str, url: str):
 
     def job():
         try:
-            investigate(case_id, url, settings, lambda ev: store.add_event(case_id, ev))
+            investigate(case_id, url, settings, lambda ev: store.add_event(case_id, ev), live=_live_local)
         except Exception as e:
             log.exception("inline investigation failed")
             store.add_event(case_id, {"type": "status", "status": "FAILED", "reason": f"error:{type(e).__name__}"})
@@ -275,6 +288,94 @@ def case_file(case_id: str, name: str, p: Annotated[Principal, Depends(need("vie
         return Response(data, media_type=media, headers=headers)
     media = "image/png" if name.endswith(".png") else "video/webm"
     return FileResponse(path, media_type=media, headers=headers)
+
+
+@app.websocket("/api/cases/{case_id}/live")
+async def case_live(ws: WebSocket, case_id: str):
+    """실시간 화면(보기용, 증거 아님). 브라우저 WebSocket 은 인증 헤더를 못 붙이고 주소의 토큰은 접속 기록에 남으므로,
+    연결 뒤 첫 메시지 {"token": ...} 로 인증한다. 이후 서버는 JPEG 프레임(바이너리)만 보낸다."""
+    await ws.accept()
+    try:
+        msg = await asyncio.wait_for(ws.receive_json(), 5)
+        p = _principal(str(msg.get("token", ""))) if isinstance(msg, dict) else None
+    except (TimeoutError, ValueError, WebSocketDisconnect):
+        p = None
+    if p is None or ROLES[p.role] < ROLES["viewer"]:
+        await ws.close(code=4401)
+        return
+    try:
+        c = _get_case(case_id)
+    except HTTPException:
+        await ws.close(code=4404)
+        return
+    if c.status in TERMINAL:  # 이미 끝난 사건은 라이브가 없다(증거 스크린샷·녹화로 본다)
+        await ws.close(code=1000)
+        return
+    store.audit(p.name, "live.watch", case_id)
+
+    def finished() -> bool:
+        try:
+            return _get_case(case_id).status in TERMINAL
+        except HTTPException:
+            return True
+
+    async def until_client_leaves():
+        try:
+            while True:
+                await ws.receive()
+        except (WebSocketDisconnect, RuntimeError):
+            return
+
+    async def forward_local():
+        async with _live_local.subscribe(case_id) as q:
+            while True:
+                try:
+                    frame = await asyncio.wait_for(q.get(), 5)
+                except TimeoutError:
+                    if await asyncio.to_thread(finished):  # 끝 신호 없이 끝난 경우 대비
+                        return
+                    continue
+                if frame == LIVE_END:
+                    return
+                await ws.send_bytes(frame)
+
+    async def forward_redis():
+        import redis.asyncio as aioredis  # noqa: PLC0415
+
+        r = aioredis.from_url(settings.redis_url)
+        ps = r.pubsub()
+        await ps.subscribe(LIVE_CHANNEL.format(case_id))
+
+        async def keep_watching():  # 에이전트는 이 표시가 있을 때만 프레임을 보낸다
+            while True:
+                await r.set(LIVE_WATCH_KEY.format(case_id), "1", ex=LIVE_WATCH_TTL_S)
+                await asyncio.sleep(2)
+
+        watch = asyncio.create_task(keep_watching())
+        try:
+            while True:
+                m = await ps.get_message(ignore_subscribe_messages=True, timeout=5)
+                if m is None:
+                    if await asyncio.to_thread(finished):  # 끝 신호 없이 끝난 경우 대비
+                        return
+                    continue
+                if m["data"] == LIVE_END:
+                    return
+                await ws.send_bytes(m["data"])
+        finally:
+            watch.cancel()
+            await ps.aclose()
+            await r.aclose()
+
+    leave = asyncio.create_task(until_client_leaves())
+    fwd = asyncio.create_task(forward_redis() if _redis is not None else forward_local())
+    done, pending = await asyncio.wait({leave, fwd}, return_when=asyncio.FIRST_COMPLETED)
+    for t in pending:
+        t.cancel()
+    try:
+        await ws.close()
+    except RuntimeError:
+        pass
 
 
 @app.post("/api/cases/{case_id}/verify")

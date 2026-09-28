@@ -170,6 +170,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .frame-img.under { position: absolute; top: 0; left: 0; z-index: 0; pointer-events: none; }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 /* 아래에 더 있음: 스크롤 칸 맨 아래에 붙는 얇은 그라데이션 띠(마스크보다 가볍다) */
+/* 라이브 영상: 창 한 화면(1.6:1)을 칸에 맞춘다 */
+.live-wrap { position: absolute; inset: 0; display: grid; place-items: start center; }
+.live-wrap.hidden { visibility: hidden; }
+.live-canvas { display: block; width: min(100%, 160cqh); height: auto; }
+.live-fps { margin-left: auto; color: var(--blue-ink); }
 .more-hint { position: sticky; bottom: 0; height: 48px; margin-top: -48px; background: linear-gradient(to bottom, transparent, #0a1120); pointer-events: none; }
 .open-orig { position: absolute; right: 12px; bottom: 12px; padding: 6px 10px; font-size: 12px; opacity: 0.85; }
 .open-orig:hover { opacity: 1; }

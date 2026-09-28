@@ -12,6 +12,7 @@ from ..config import Settings
 from ..decision.client import Decider, HttpDecider, LocalDecider
 from ..decision.engine import Engine, build_providers
 from ..evidence import EvidenceWriter, Signer
+from ..live import LivePublisher, LiveSink
 from ..netguard import remote_resolver
 from ..safebrowsing import lookup
 from .loop import AgentRun
@@ -33,13 +34,18 @@ def make_decider(s: Settings) -> Decider:
 
 
 def investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], None],
-                decider: Decider | None = None, resolver=None) -> dict:
+                decider: Decider | None = None, resolver=None, live: LivePublisher | None = None) -> dict:
     writer = EvidenceWriter(s.evidence_dir, case_id, make_signer(s))
     emit({"type": "status", "status": "RUNNING", "reason": None})
     if resolver is None and s.resolver_url:
         resolver = remote_resolver(s.resolver_url)
-    run = AgentRun(url, s, decider or make_decider(s), writer, emit, resolver=resolver)
-    result = asyncio.run(run.run())
+    sink = LiveSink(live, case_id, s.live_max_fps) if live else None
+    run = AgentRun(url, s, decider or make_decider(s), writer, emit, resolver=resolver, live=sink)
+    try:
+        result = asyncio.run(run.run())
+    finally:
+        if sink:
+            sink.close()
 
     # Safe Browsing: 시작·경유·최종 URL 조회. 결과도 증거로 남긴다.
     # 격리망에서는 이 조회도 검문 프록시를 거친다
