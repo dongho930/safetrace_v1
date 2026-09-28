@@ -51,7 +51,24 @@ const KIND_LABEL: Record<string, string> = {
   recording: "녹화",
   safebrowsing: "Safe Browsing",
   unreachable: "접속 불가",
+  escalation: "담당자 검토로 전환",
   error: "오류",
+};
+const REASON_LABEL: Record<string, string> = {
+  unreachable_reputation_match: "접속 불가 · Safe Browsing 위험 일치",
+  goto_failed: "최초 접속 실패",
+};
+const NET_CATEGORY_LABEL: Record<string, string> = {
+  dns_failure: "도메인 없음(DNS)",
+  connection_refused: "연결 거부",
+  connection_dropped: "응답 없이 연결 끊김",
+  timeout: "시간 초과",
+  egress_refused: "검문 프록시 거부 또는 상대 연결 실패",
+  egress_unavailable: "검문 프록시 연결 실패",
+  blocked_by_policy: "정책 차단",
+  network_unreachable: "네트워크 도달 불가",
+  tls_error: "인증서·TLS 오류",
+  other: "기타",
 };
 const TERMINAL = new Set(["COMPLETED", "REVIEW_REQUIRED", "FAILED", "UNREACHABLE", "BLOCKED"]);
 
@@ -228,7 +245,9 @@ function CaseView({ id }: { id: string }) {
           <div className="meta">
             <span className={`badge s-${st}`}>{STATUS_LABEL[st] ?? st}</span>
             {live && <span className="live">● 실시간</span>}
-            {c?.finish_reason && <span className="muted">종료 사유: {c.finish_reason}</span>}
+            {c?.finish_reason && (
+              <span className="muted">종료 사유: {REASON_LABEL[c.finish_reason] ?? c.finish_reason}</span>
+            )}
           </div>
         </div>
         <div className="actions">
@@ -414,6 +433,19 @@ function EventLine({
     body = <>{THREAT_LABEL[String(data.threat)]}</>;
   } else if (e.kind === "safebrowsing") {
     body = <>{String(data.status)}</>;
+  } else if (e.kind === "unreachable") {
+    body = (
+      <>
+        {NET_CATEGORY_LABEL[String(data.category)] ?? String(data.error)}{" "}
+        {data.net_error ? <span className="muted">({String(data.net_error)})</span> : null}
+      </>
+    );
+  } else if (e.kind === "escalation") {
+    body = (
+      <span className="forbid">
+        Safe Browsing {(data.threat_types as string[] | undefined)?.join(", ")} — 페이지 증거 없음, 위협 유형 미확정
+      </span>
+    );
   }
   return (
     <div className={`ev k-${e.kind}${e.kind === "gate" && !data.allowed ? " blocked" : ""}`}>

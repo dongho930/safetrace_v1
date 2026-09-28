@@ -49,7 +49,7 @@
 
 ## 5. 로컬 보안 점검 (2026-09-28)
 
-- 시험: `pytest` **107개 통과**(09-28 한국어 OCR 시험 추가 후)(단위 + 실제 Chromium 통합)
+- 시험: `pytest` **119개 통과**(09-28 접속 불가 전환 시험 추가 후)(단위 + 실제 Chromium 통합)
 - Bandit: Medium·High **0건** (Low 2건: 예외 무시 구문)
 - pip-audit: 알려진 취약점 **0건**
 - npm audit: **0건**
@@ -90,4 +90,16 @@
 
 평문 HTTP 피싱 시험 URL은 **이 PC의 네트워크에서** 연결이 끊긴다(Windows 에서 프록시 없이 curl 해도 같음. 백신 웹 보호나 통신사 필터로 추정). SafeTrace 문제가 아니며, 페이지를 열지 못해도 Safe Browsing 결과는 증거로 남는다.
 
-후속 검토: 페이지를 열지 못했는데 Safe Browsing 이 일치하면 UNREACHABLE 대신 담당자 검토로 올릴지, 페이지 열기 실패 사유(`unreachable.error`)를 더 구체적으로 남길지.
+### 접속 불가 + 평판 일치 → 담당자 검토 (2026-09-28 반영)
+
+| 페이지 열림 | Safe Browsing | 상태 |
+|---|---|---|
+| 실패 | match | **REVIEW_REQUIRED** (`unreachable_reputation_match`), 증거에 `escalation` 기록, 위협 유형은 확정하지 않음(threat 없음) |
+| 실패 | no_match / error / not_configured | UNREACHABLE (`goto_failed`) |
+| 성공 | 무관 | 기존대로(Jev 판단·확신도) |
+
+- 최초 접속 실패 사유를 `unreachable` 증거에 `net_error`(Chromium `ERR_*` 코드)와 `category`(dns_failure, connection_refused, connection_dropped, timeout, egress_refused, tls_error 등)로 남긴다. 오류 문구 전체는 URL 이 섞일 수 있어 남기지 않는다.
+- 시험: `test_goto_error.py`(분류), `test_unreachable_escalates_only_on_reputation_match`(match 일 때만 전환)
+- Docker 확인: `http://testsafebrowsing.appspot.com/s/phishing.html` → REVIEW_REQUIRED, `connection_dropped (ERR_EMPTY_RESPONSE)`, 증거 검증 통과
+- 참고: 존재하지 않는 도메인은 접속 전 1차 IP 확인에서 `BLOCKED (ssrf:dns_failure)` 로 끝나 이 규칙을 타지 않는다(기존 동작).
+- Safe Browsing Lookup API v4 는 약관상 비상업 용도. 실제 기관 도입 시 Google Web Risk API 로 교체 가능(같은 조회 형태).

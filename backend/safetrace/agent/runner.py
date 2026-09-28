@@ -48,8 +48,18 @@ def investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], None
     rec = writer.append("safebrowsing", sb)
     emit({"type": "evidence", "seq": rec["seq"], "kind": "safebrowsing", "data": sb, "files": [], "hash": rec["hash"]})
 
+    # 페이지는 못 열었지만 평판 DB 가 위험 URL 로 표시한 경우: 사건을 묻지 않고 담당자 검토로 올린다.
+    # 근거가 외부 평판 하나뿐이므로 위협 유형은 확정하지 않는다(threat 없음).
+    status, reason = result.status, result.finish_reason
+    if status == "UNREACHABLE" and sb.get("status") == "match":
+        status, reason = "REVIEW_REQUIRED", "unreachable_reputation_match"
+        esc = {"from": result.status, "to": status, "reason": reason,
+               "threat_types": sorted({m["threat_type"] for m in sb["matches"]})}
+        rec = writer.append("escalation", esc)
+        emit({"type": "evidence", "seq": rec["seq"], "kind": "escalation", "data": esc, "files": [], "hash": rec["hash"]})
+
     final = {
-        "type": "status", "status": result.status, "reason": result.finish_reason, "threat": result.threat,
+        "type": "status", "status": status, "reason": reason, "threat": result.threat,
         "final_url": result.final_url, "candidates": result.candidates_found, "safebrowsing": sb,
         "head": {"seq": writer.head.seq, "hash": writer.head.hash},
     }

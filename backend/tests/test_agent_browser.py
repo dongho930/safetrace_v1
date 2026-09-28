@@ -196,3 +196,30 @@ def test_tampered_evidence_detected_end_to_end(settings, testpages):
     (settings.evidence_dir / cid / "files" / shot).write_bytes(b"edited")
     res = verify_case(settings.evidence_dir, cid, make_signer(settings), head)
     assert not res.ok and any("file_modified" in e for e in res.errors)
+
+
+# ── 접속 불가 + 평판 일치 → 담당자 검토 ─────────────────────
+CLOSED = "127.0.0.1:8909"  # 아무것도 듣지 않는 포트(시험 허용 목록에만 넣음)
+
+
+@pytest.mark.parametrize("sb, status, reason", [
+    ({"status": "match", "matches": [{"url": f"http://{CLOSED}/", "threat_type": "SOCIAL_ENGINEERING"}]},
+     "REVIEW_REQUIRED", "unreachable_reputation_match"),
+    ({"status": "no_match", "matches": []}, "UNREACHABLE", "goto_failed"),
+    ({"status": "not_configured", "matches": []}, "UNREACHABLE", "goto_failed"),
+])
+def test_unreachable_escalates_only_on_reputation_match(settings, testpages, monkeypatch, sb, status, reason):
+    from safetrace.agent import runner
+
+    monkeypatch.setattr(runner, "lookup", lambda *a, **k: sb)
+    settings.test_allowlist = [*settings.test_allowlist, CLOSED]
+    _, final, chain, _ = run(f"http://{CLOSED}/", settings, testpages)
+    assert (final["status"], final["reason"]) == (status, reason)
+    assert final["threat"] is None  # 평판만으로 위협 유형을 확정하지 않는다
+    unreachable = next(r for r in chain if r["kind"] == "unreachable")["data"]
+    assert unreachable["net_error"] == "ERR_CONNECTION_REFUSED" and unreachable["category"] == "connection_refused"
+    esc = [r for r in chain if r["kind"] == "escalation"]
+    if status == "REVIEW_REQUIRED":
+        assert esc and esc[0]["data"]["threat_types"] == ["SOCIAL_ENGINEERING"]
+    else:
+        assert not esc

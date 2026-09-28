@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import secrets
 import shutil
 import time
@@ -31,6 +32,40 @@ from .observe import CLOSE_POPUP_JS, COLLECT_JS, READ_ONE_JS
 from .ocr import get_ocr
 
 log = logging.getLogger("safetrace.agent")
+
+# 최초 접속 실패 사유. Chromium 의 net::ERR_* 코드만 남긴다(오류 문구 전체는 URL 등이 섞일 수 있어 남기지 않음).
+_NET_ERR = re.compile(r"net::(ERR_[A-Z0-9_]+)")
+_NET_CATEGORY = {
+    "ERR_NAME_NOT_RESOLVED": "dns_failure",
+    "ERR_NAME_RESOLUTION_FAILED": "dns_failure",
+    "ERR_CONNECTION_REFUSED": "connection_refused",
+    "ERR_CONNECTION_RESET": "connection_dropped",
+    "ERR_CONNECTION_CLOSED": "connection_dropped",
+    "ERR_EMPTY_RESPONSE": "connection_dropped",
+    "ERR_CONNECTION_TIMED_OUT": "timeout",
+    "ERR_TIMED_OUT": "timeout",
+    "ERR_TUNNEL_CONNECTION_FAILED": "egress_refused",   # 검문 프록시가 거부했거나 상대에 연결 못 함
+    "ERR_PROXY_CONNECTION_FAILED": "egress_unavailable",
+    "ERR_BLOCKED_BY_CLIENT": "blocked_by_policy",       # netguard 가 요청을 막음
+    "ERR_ADDRESS_UNREACHABLE": "network_unreachable",
+    "ERR_INTERNET_DISCONNECTED": "network_unreachable",
+}
+
+
+def classify_goto_error(e: Exception) -> dict:
+    """최초 접속 실패를 '사이트가 내려감'과 '우리를 막음'을 구분할 수 있는 분류로 바꾼다."""
+    if isinstance(e, PWTimeout):
+        return {"error": type(e).__name__, "net_error": None, "category": "timeout"}
+    m = _NET_ERR.search(str(e))
+    code = m.group(1) if m else None
+    if code is None:
+        category = "other"
+    elif code.startswith(("ERR_SSL_", "ERR_CERT_")):
+        category = "tls_error"
+    else:
+        category = _NET_CATEGORY.get(code, "other")
+    return {"error": type(e).__name__, "net_error": code, "category": category}
+
 
 Emit = Callable[[dict], None]
 _ALLOWED_METHODS = {"GET", "HEAD"}
@@ -307,7 +342,7 @@ class AgentRun:
         try:
             resp = await page.goto(self.start_url, timeout=self.s.nav_timeout_ms, wait_until="domcontentloaded")
         except (PWError, PWTimeout) as e:
-            self._record("unreachable", {"error": type(e).__name__})
+            self._record("unreachable", classify_goto_error(e))
             self.result.status, self.result.finish_reason = "UNREACHABLE", "goto_failed"
             return
         if resp is not None:
