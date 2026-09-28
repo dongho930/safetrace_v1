@@ -7,7 +7,7 @@
 | 항목 | 구현 위치 | 검증 |
 |---|---|---|
 | 실시간 조사 화면(녹화 포함) | `frontend/src/App.tsx`, `api/main.py` `/events`(SSE), Playwright 영상 녹화 → `recording.webm` | `test_api.py::test_case_flow_sse_and_verify`, 실제 콘솔 화면 확인 |
-| Safe Browsing 조회 | `safetrace/safebrowsing.py` (v4 Lookup, 키는 헤더로 전송, "일치 없음 ≠ 정상") | `test_safebrowsing.py` (키가 없으면 `not_configured`) |
+| Safe Browsing 조회 | `safetrace/safebrowsing.py` (v4 Lookup, 키는 헤더로 전송, "일치 없음 ≠ 정상") | `test_safebrowsing.py` + 2026-09-28 실제 키 확인: Google 시험 URL 피싱→`SOCIAL_ENGINEERING`, 악성→`MALWARE`, example.com→`no_match`. Docker 에서 검문 프록시 경유 조회 확인 |
 | 격리 네트워크·검문 프록시 | `docker-compose.yml`(core / sandbox(internal) / outside), `safetrace/proxy/egress.py` | `test_egress_proxy.py`, example.com 을 프록시 경유로 실제 조사 |
 | 내부망 접근 차단(SSRF) | 1차 `netguard.py`(이동 전 IP 확인 + 모든 요청 가로채기), 2차 프록시(접속 시점 재해석) | `test_netguard.py`, `test_agent_browser.py::test_internal_*`, `test_start_url_private_blocked` |
 | 증거 해시 체인·HMAC 서명 | `safetrace/evidence.py` | `test_evidence.py` (변조·삭제·순서 변경·끝부분 절단·키 없이 다시 계산 모두 탐지) |
@@ -57,7 +57,7 @@
 
 ## 6. 아직 하지 않은 것 (정직한 현황)
 
-- Safe Browsing 실제 키 조회, OpenRouter 경로는 키·모델을 받은 뒤 확인해야 한다.
+- OpenRouter 경로는 키·모델을 받은 뒤 확인해야 한다.
 
 ## 7. Docker Compose 전체 기동 (2026-09-28)
 
@@ -79,3 +79,15 @@
 
 남은 관찰: 실제 Jev 는 도박 시나리오에서 입금 화면 전 단계(`casino.html`)에서 반복 감지로 끝났다(규칙 판단기 시험에서는 입금 화면까지 도달). 에이전트 탐색 전략 조정 대상.
 - 담당자 판정 화면·RBAC 세분화(Argon2id 계정)·검토 패키지(PDF/JSON)는 1주차 범위다. 지금은 API 토큰 + 역할(viewer/investigator/reviewer/admin)로만 인증한다.
+
+## 8. Safe Browsing 실제 조회 (2026-09-28)
+
+| 조사 URL | 상태 | Safe Browsing | Jev |
+|---|---|---|---|
+| `https://testsafebrowsing.appspot.com/s/phishing.html` | COMPLETED | match · SOCIAL_ENGINEERING | phishing 0.99 |
+| `https://example.com/` | REVIEW_REQUIRED | no_match | benign 0.99 |
+| `http://testsafebrowsing.appspot.com/s/phishing.html` | UNREACHABLE | match · SOCIAL_ENGINEERING | (페이지 못 엶) |
+
+평문 HTTP 피싱 시험 URL은 **이 PC의 네트워크에서** 연결이 끊긴다(Windows 에서 프록시 없이 curl 해도 같음. 백신 웹 보호나 통신사 필터로 추정). SafeTrace 문제가 아니며, 페이지를 열지 못해도 Safe Browsing 결과는 증거로 남는다.
+
+후속 검토: 페이지를 열지 못했는데 Safe Browsing 이 일치하면 UNREACHABLE 대신 담당자 검토로 올릴지, 페이지 열기 실패 사유(`unreachable.error`)를 더 구체적으로 남길지.
