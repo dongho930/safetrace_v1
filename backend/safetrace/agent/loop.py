@@ -30,6 +30,7 @@ from ..evidence import EvidenceWriter
 from ..masking import mask_pii
 from .gate import Budget, ElementInfo, SafetyGate, classify_forbidden
 from .observe import CLOSE_POPUP_JS, COLLECT_JS, READ_ONE_JS
+from .recorder import ScreencastRecorder, find_ffmpeg
 from .ocr import get_ocr
 
 log = logging.getLogger("safetrace.agent")
@@ -125,6 +126,7 @@ class AgentRun:
         self.attr = "data-st-" + secrets.token_hex(4)
         self.result = RunResult(status="RUNNING", finish_reason="")
         self.history: list[str] = []
+        self.rec: ScreencastRecorder | None = None
         self.page_summaries: list[str] = []
         self.summary_evidence: list[int] = []
         self._shot = 0
@@ -143,11 +145,17 @@ class AgentRun:
         name = f"s{self._shot:03d}_{label}.png"
         try:
             if full:
+                if self.rec:
+                    self.rec.pause()  # 페이지 전체 캡처 중에는 창 크기가 잠시 바뀌어 녹화 프레임이 어긋난다
                 vw, h = await page.evaluate(
                     "() => [window.innerWidth, Math.max(document.documentElement.scrollHeight,"
                     " document.body ? document.body.scrollHeight : 0)]")
                 clip = {"x": 0, "y": 0, "width": int(vw), "height": max(1, min(int(h), self.s.screenshot_max_height))}
-                png = await page.screenshot(timeout=15000, animations="disabled", full_page=True, clip=clip)
+                try:
+                    png = await page.screenshot(timeout=15000, animations="disabled", full_page=True, clip=clip)
+                finally:
+                    if self.rec:
+                        self.rec.resume()
             else:
                 png = await page.screenshot(timeout=8000, animations="disabled")
         except (PWError, PWTimeout, TypeError, ValueError):
@@ -294,6 +302,8 @@ class AgentRun:
             np = new_pages[-1]
             await self._settle(np)
             self._record("new_window", {"url": np.url[:2048], "adopted": True})
+            if self.rec:
+                await self.rec.switch(np)  # 녹화도 새 창을 따라간다
             return np, "ok"
         await self._settle(page)
         if failed:
@@ -358,14 +368,24 @@ class AgentRun:
             )
             if ua:
                 ctx_kw["user_agent"] = ua
-            if self.s.record_video:
+            ffmpeg = find_ffmpeg(self.s.ffmpeg_path) if self.s.record_video else None
+            if self.s.record_video and not ffmpeg:
+                # ffmpeg 가 없으면 Playwright 내장 녹화(창 크기 그대로)
                 ctx_kw["record_video_dir"] = str(video_tmp)
-                ctx_kw["record_video_size"] = {"width": 960, "height": 600}
+                ctx_kw["record_video_size"] = {"width": 1280, "height": 800}
             ctx = await browser.new_context(**ctx_kw)
             await ctx.route("**/*", self._on_route)
             ctx.on("page", lambda pg: pg.on("dialog", self._on_dialog))
             page = await ctx.new_page()
             page.on("dialog", self._on_dialog)
+            rec_info = None
+            if ffmpeg:
+                self.rec = ScreencastRecorder(ffmpeg, self.ev.dir / "recording.tmp.webm", fps=self.s.record_fps)
+                try:
+                    await self.rec.start(page)
+                except (OSError, PWError) as e:
+                    log.warning("recorder unavailable: %s", type(e).__name__)
+                    self.rec = None
             try:
                 await self._main_loop(ctx, page)
             except Exception as e:  # 실패는 삼키지 않고 기록 후 보류 처리
@@ -373,9 +393,14 @@ class AgentRun:
                 self._record("error", {"error": type(e).__name__})
                 self.result.status, self.result.finish_reason = "FAILED", f"error:{type(e).__name__}"
             finally:
+                if self.rec:
+                    rec_info = await self.rec.stop()
                 await ctx.close()
                 await browser.close()
-        self._save_video(video_tmp)
+        if self.rec:
+            self._save_recording(self.ev.dir / "recording.tmp.webm", rec_info)
+        else:
+            self._save_video(video_tmp)
         await asyncio.to_thread(self._judge)
         return self.result
 
@@ -522,6 +547,14 @@ class AgentRun:
             if h and h != start_host and h not in hosts:
                 hosts.append(h)
         self.result.candidates_found = hosts[:20]
+
+    def _save_recording(self, tmp: Path, info: dict | None):
+        if info and tmp.exists():
+            name = "recording.webm"
+            shutil.move(str(tmp), self.ev.file_path(name))
+            self._record("recording", info, [name])
+        else:
+            tmp.unlink(missing_ok=True)
 
     def _save_video(self, tmp: Path):
         if not tmp.exists():
