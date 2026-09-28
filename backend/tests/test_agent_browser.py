@@ -314,3 +314,28 @@ def test_observe_screenshot_is_full_page_and_capped(settings, testpages):
     assert _png_size(settings.evidence_dir / cid / "files" / next(iter(obs["files"])))[1] == 900
     act = next(r for r in chain if r["kind"] == "action")  # 클릭 전후는 보이는 창만
     assert all(_png_size(settings.evidence_dir / cid / "files" / f)[1] == 800 for f in act["files"])
+
+
+def test_recording_is_full_size_and_follows_new_window(settings, testpages):
+    """조사 녹화: 1280×800 그대로, 새 창으로 옮겨도 한 영상에 이어서 담긴다(화면 전송 → ffmpeg)."""
+    from safetrace.agent.recorder import find_ffmpeg
+
+    if not find_ffmpeg():
+        pytest.skip("ffmpeg not available")
+    settings.record_video = True
+    settings.max_steps = 15
+    cid, final, chain, _ = run(f"{BASE}/smish/", settings, testpages)
+    rec = next(r for r in chain if r["kind"] == "recording")
+    assert rec["data"]["source"] == "cdp-screencast"
+    assert (rec["data"]["width"], rec["data"]["height"]) == (1280, 800)
+    assert any(r["kind"] == "new_window" for r in chain)
+    path = settings.evidence_dir / cid / "files" / "recording.webm"
+    assert path.stat().st_size > 10_000
+    # 프레임 수 ≈ 조사 시간 × fps (새 창 이후에도 계속 기록됨)
+    from datetime import datetime
+
+    ts = lambda kind: datetime.fromisoformat(next(r for r in chain if r["kind"] == kind)["ts"])  # noqa: E731
+    seconds = (ts("finish") - ts("start")).total_seconds()
+    assert rec["data"]["frames"] >= seconds * settings.record_fps * 0.6, (rec["data"], seconds)
+    verify = verify_case(settings.evidence_dir, cid, make_signer(settings), None)
+    assert verify.ok, verify.errors

@@ -166,15 +166,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .screen-scroll { position: absolute; inset: 0; overflow-y: auto; overscroll-behavior: contain; }
 .frame { position: relative; width: min(100%, 160cqh); margin: 0 auto; }
 .frame-img { display: block; width: 100%; height: auto; }
-.frame-img.enter { animation: fade-in 220ms ease-out both; }
-.frame-img.leave { position: absolute; top: 0; left: 0; animation: fade-out 220ms ease-out both; pointer-events: none; }
+.frame-img.enter { position: relative; z-index: 1; animation: fade-in 220ms ease-out both; }
+.frame-img.under { position: absolute; top: 0; left: 0; z-index: 0; pointer-events: none; }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
-@keyframes fade-out { from { opacity: 1; } to { opacity: 0; } }
 /* 아래에 더 있음: 스크롤 칸 맨 아래에 붙는 얇은 그라데이션 띠(마스크보다 가볍다) */
 .more-hint { position: sticky; bottom: 0; height: 48px; margin-top: -48px; background: linear-gradient(to bottom, transparent, #0a1120); pointer-events: none; }
 .open-orig { position: absolute; right: 12px; bottom: 12px; padding: 6px 10px; font-size: 12px; opacity: 0.85; }
 .open-orig:hover { opacity: 1; }
-@media (prefers-reduced-motion: reduce) { .frame-img.enter, .frame-img.leave { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .frame-img.enter { animation: none; } }
 .stage-tabs { display: flex; gap: 6px; }
 .log { border-top: 1px solid var(--line-soft); padding: 14px 18px; display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow-y: auto; }
 .log-head { display: flex; justify-content: space-between; align-items: center; }

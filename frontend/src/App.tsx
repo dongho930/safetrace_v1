@@ -885,9 +885,10 @@ function LiveScreen({ caseId, name }: { caseId: string; name: string }) {
   return (
     <>
       <div ref={box} className="screen-scroll" tabIndex={0} aria-label="조사 화면 (길면 세로 스크롤)" onScroll={measure}>
+        {/* 이전 화면은 불투명하게 아래에 두고 새 화면만 위에서 나타나게 한다(둘 다 반투명해지면 어두운 바탕이 비쳐 깜빡임) */}
         <div className="frame">
+          {prev && <img key={prev.url} className="frame-img under" src={prev.url} alt="" aria-hidden="true" />}
           <img key={cur.url} className="frame-img enter" src={cur.url} alt={`증거 화면 ${cur.name}`} onLoad={measure} />
-          {prev && <img key={prev.url} className="frame-img leave" src={prev.url} alt="" aria-hidden="true" />}
         </div>
         {!atEnd && <div className="more-hint" aria-hidden="true" />}
       </div>
