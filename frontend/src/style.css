@@ -91,7 +91,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .panel {
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4), 0 18px 40px -24px rgba(0, 140, 255, 0.28);
-  backdrop-filter: blur(14px);
+  /* 배경 흐림(backdrop-filter)은 쓰지 않는다: 바탕이 거의 단색이라 차이가 없고 다시 그릴 때마다 무겁다 */
 }
 .sunken { background: var(--sunken); border: 1px solid var(--line-soft); border-radius: var(--radius-sm); }
 
@@ -160,16 +160,21 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .screen { flex: 1; min-height: 0; border-radius: var(--radius-sm); border: 1px solid rgba(110, 170, 255, 0.14); overflow: hidden; display: flex; flex-direction: column; }
 .screen-bar { display: flex; align-items: center; gap: 8px; padding: 7px 12px; font-family: var(--mono); font-size: 11px; color: var(--faint); background: rgba(6, 10, 18, 0.9); }
 .screen-bar .rec { color: var(--red); display: inline-flex; align-items: center; gap: 6px; }
-/* 스크린샷·녹화는 칸 크기와 상관없이 전체가 보이게 맞춘다(잘리지 않음, 남는 곳은 여백) */
-.screen-body { flex: 1; min-height: 120px; position: relative; display: grid; place-items: center; background: #0a1120; }
-.screen-fit { position: absolute; inset: 0; display: block; }
-.screen-fit img, .screen-body video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
-.screen-fit:hover img { outline: 1px solid rgba(94, 200, 255, 0.35); outline-offset: -1px; }
-/* 세로로 긴 전체 페이지 캡처: 폭에 맞추고(원본보다 키우지 않음) 세로로 스크롤 */
-.screen-scroll { position: absolute; inset: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 48px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 48px), transparent); }
-.screen-scroll.at-end { -webkit-mask-image: none; mask-image: none; }
-.screen-scroll a { display: block; }
-.screen-scroll img { display: block; width: 100%; max-width: max-content; height: auto; margin: 0 auto; }
+/* 조사 화면: 폭에 맞추되 창 한 화면(1280×800 = 1.6:1)이 칸 높이에 들어가게, 더 긴 페이지 전체 캡처는 세로 스크롤 */
+.screen-body { flex: 1; min-height: 120px; position: relative; display: grid; place-items: center; background: #0a1120; container-type: size; }
+.screen-body video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
+.screen-scroll { position: absolute; inset: 0; overflow-y: auto; overscroll-behavior: contain; }
+.frame { position: relative; width: min(100%, 160cqh); margin: 0 auto; }
+.frame-img { display: block; width: 100%; height: auto; }
+.frame-img.enter { animation: fade-in 220ms ease-out both; }
+.frame-img.leave { position: absolute; top: 0; left: 0; animation: fade-out 220ms ease-out both; pointer-events: none; }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fade-out { from { opacity: 1; } to { opacity: 0; } }
+/* 아래에 더 있음: 스크롤 칸 맨 아래에 붙는 얇은 그라데이션 띠(마스크보다 가볍다) */
+.more-hint { position: sticky; bottom: 0; height: 48px; margin-top: -48px; background: linear-gradient(to bottom, transparent, #0a1120); pointer-events: none; }
+.open-orig { position: absolute; right: 12px; bottom: 12px; padding: 6px 10px; font-size: 12px; opacity: 0.85; }
+.open-orig:hover { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .frame-img.enter, .frame-img.leave { animation: none; } }
 .stage-tabs { display: flex; gap: 6px; }
 .log { border-top: 1px solid var(--line-soft); padding: 14px 18px; display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow-y: auto; }
 .log-head { display: flex; justify-content: space-between; align-items: center; }

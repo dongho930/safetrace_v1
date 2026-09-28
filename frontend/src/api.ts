@@ -78,8 +78,10 @@ export const verifyCase = (id: string) =>
   });
 
 // 증거 파일은 인증 헤더가 필요하므로 blob 으로 받아 object URL 로 보여준다
-export async function fileUrl(caseId: string, name: string): Promise<string> {
-  const r = await fetch(`/api/cases/${encodeURIComponent(caseId)}/files/${encodeURIComponent(name)}`, {
+// preview=true 면 화면 표시용으로 줄인 이미지(증거 아님). 원본 확인·검증은 preview 없이
+export async function fileUrl(caseId: string, name: string, preview = false): Promise<string> {
+  const q = preview ? "?preview=1" : "";
+  const r = await fetch(`/api/cases/${encodeURIComponent(caseId)}/files/${encodeURIComponent(name)}${q}`, {
     headers: { Authorization: `Bearer ${getToken()}` },
   });
   if (!r.ok) throw new ApiError(r.status, "파일을 불러오지 못함");

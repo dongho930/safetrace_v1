@@ -18,7 +18,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -27,6 +27,7 @@ from ..config import get_settings
 from ..evidence import Head, Signer, verify_case
 from ..masking import mask_secrets
 from ..netguard import BlockedURL, parse_url
+from ..preview import preview_image
 from ..store import Case, Store
 
 log = logging.getLogger("safetrace.api")
@@ -259,15 +260,21 @@ async def case_events(case_id: str, p: Annotated[Principal, Depends(need("viewer
 
 
 @app.get("/api/cases/{case_id}/files/{name}")
-def case_file(case_id: str, name: str, p: Annotated[Principal, Depends(need("viewer"))]):
+def case_file(case_id: str, name: str, p: Annotated[Principal, Depends(need("viewer"))], preview: bool = False):
     _get_case(case_id)
     if not _FILE_NAME.match(name):
         raise HTTPException(404, "not found")
     path = settings.evidence_dir / case_id / "files" / name
     if not path.is_file():
         raise HTTPException(404, "not found")
+    # 증거 파일은 한 번 쓰이면 바뀌지 않는다(바뀌면 검증 실패) → 브라우저가 캐시해도 된다(인증 필요하므로 private)
+    headers = {"Content-Security-Policy": "sandbox; default-src 'none'", "Cache-Control": "private, max-age=3600"}
+    if preview and name.endswith(".png"):
+        # 화면 표시용 JPEG(증거 아님). 원본은 preview 없이 요청
+        data, media = preview_image(path)
+        return Response(data, media_type=media, headers=headers)
     media = "image/png" if name.endswith(".png") else "video/webm"
-    return FileResponse(path, media_type=media, headers={"Content-Security-Policy": "sandbox; default-src 'none'"})
+    return FileResponse(path, media_type=media, headers=headers)
 
 
 @app.post("/api/cases/{case_id}/verify")

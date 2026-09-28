@@ -68,6 +68,11 @@ def test_case_flow_sse_and_verify(client, testpages):
     assert img.status_code == 200 and img.headers["content-type"] == "image/png"
     assert client.get(f"/api/cases/{cid}/files/..%2Fchain.jsonl", headers=h(VIEWER)).status_code == 404
     assert client.get(f"/api/cases/{cid}/files/recording.webm", headers=h(VIEWER)).status_code == 200
+    # 표시용 미리보기: 원본보다 크지 않음(단순 화면은 원본 PNG 그대로), 원본 PNG 는 바뀌지 않음
+    pv = client.get(f"/api/cases/{cid}/files/{shot}?preview=1", headers=h(VIEWER))
+    assert pv.status_code == 200 and pv.headers["content-type"] in {"image/jpeg", "image/png"}
+    assert len(pv.content) <= len(img.content)
+    assert client.get(f"/api/cases/{cid}/files/{shot}", headers=h(VIEWER)).content == img.content
 
     v = client.post(f"/api/cases/{cid}/verify", headers=h(VIEWER)).json()
     assert v["ok"], v

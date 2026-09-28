@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type AgentEvent,
   ApiError,
@@ -395,7 +395,7 @@ function EmptyWorkspace() {
 }
 
 // ── 선택한 사건: 가운데(조사) + 오른쪽(판단·증거) ─────────────────
-function Workspace({ id }: { id: string }) {
+const Workspace = memo(function Workspace({ id }: { id: string }) {
   const [c, setC] = useState<CaseOut | null>(null);
   const [events, setEvents] = useState<EvidenceEvent[]>([]);
   const [status, setStatus] = useState("");
@@ -430,7 +430,7 @@ function Workspace({ id }: { id: string }) {
       <SidePanel c={c} id={id} running={running} />
     </>
   );
-}
+});
 
 function Investigation({
   c,
@@ -446,8 +446,9 @@ function Investigation({
   id: string;
 }) {
   const steps = events.filter((e) => e.kind === "observe").length;
-  const lastShot = [...events].reverse().find((e) => e.files.some((f) => f.endsWith(".png")));
-  const shot = lastShot?.files.filter((f) => f.endsWith(".png")).pop();
+  // 실시간 화면에는 관찰·마지막 화면(페이지 전체)만 보여 준다. 클릭 직전·직후 화면은 행동 기록에 남아 있다
+  const lastShot = [...events].reverse().find((e) => (e.kind === "observe" || e.kind === "finish") && e.files.some((f) => f.endsWith(".png")));
+  const shot = lastShot?.files.find((f) => f.endsWith(".png"));
   const recording = events.find((e) => e.kind === "recording")?.files[0];
   const browser = events.find((e) => e.kind === "browser")?.data as { version?: string } | undefined;
   const lastUrl = [...events].reverse().find((e) => e.kind === "observe")?.data.url as string | undefined;
@@ -503,9 +504,9 @@ function Investigation({
           </div>
           <div className="screen-body">
             {view === "video" && recording ? (
-              <Media caseId={id} name={recording} kind="video" />
+              <Recording caseId={id} name={recording} />
             ) : shot ? (
-              <Media caseId={id} name={shot} kind="img" />
+              <LiveScreen caseId={id} name={shot} />
             ) : (
               <span className="muted small">{running ? "첫 화면을 기다리는 중…" : "화면 기록 없음"}</span>
             )}
@@ -781,11 +782,9 @@ function Evidence({ c, id, running }: { c: CaseOut | null; id: string; running: 
 }
 
 // 증거 파일은 인증 헤더가 필요하므로 blob URL 로 보여 준다
-function Media({ caseId, name, kind }: { caseId: string; name: string; kind: "img" | "video" }) {
+// 조사 녹화(영상)
+function Recording({ caseId, name }: { caseId: string; name: string }) {
   const [src, setSrc] = useState("");
-  // 페이지 전체 캡처처럼 세로로 긴 이미지는 폭에 맞춰 세로 스크롤로 보여 준다(작게 줄이면 읽을 수 없음)
-  const [tall, setTall] = useState(false);
-  const [atEnd, setAtEnd] = useState(false);
   useEffect(() => {
     let alive = true;
     let u = "";
@@ -801,32 +800,100 @@ function Media({ caseId, name, kind }: { caseId: string; name: string; kind: "im
       if (u) URL.revokeObjectURL(u);
     };
   }, [caseId, name]);
-  if (!src) return <span className="muted small">불러오는 중…</span>;
-  if (kind === "video") return <video src={src} controls />;
+  return src ? <video src={src} controls /> : <span className="muted small">불러오는 중…</span>;
+}
+
+// 실시간 화면: 새 화면을 다 받아 그릴 준비가 끝날 때까지 이전 화면을 그대로 두고(이중 버퍼) 교차 페이드로 바꾼다.
+// 표시 방식은 한 가지: 폭에 맞추되 창 한 화면(1280×800 비율)이 칸 높이에 들어가게, 더 길면 세로 스크롤.
+type Frame = { url: string; name: string };
+function LiveScreen({ caseId, name }: { caseId: string; name: string }) {
+  const [cur, setCur] = useState<Frame | null>(null);
+  const [prev, setPrev] = useState<Frame | null>(null);
+  const [atEnd, setAtEnd] = useState(true);
+  const curRef = useRef<Frame | null>(null);
+  const prevRef = useRef<Frame | null>(null);
+  const box = useRef<HTMLDivElement>(null);
+
+  const measure = useCallback(() => {
+    const el = box.current;
+    if (el) setAtEnd(el.scrollTop + el.clientHeight >= el.scrollHeight - 2);
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      let url = "";
+      try {
+        url = await fileUrl(caseId, name, true);
+        const img = new Image();
+        img.src = url;
+        await img.decode().catch(() => undefined);
+      } catch {
+        return; // 못 받으면 이전 화면 유지
+      }
+      if (!alive) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      if (prevRef.current) URL.revokeObjectURL(prevRef.current.url);
+      prevRef.current = curRef.current;
+      curRef.current = { url, name };
+      setPrev(prevRef.current);
+      setCur(curRef.current);
+      box.current?.scrollTo({ top: 0, behavior: "smooth" });
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [caseId, name]);
+
+  // 교차 페이드가 끝나면 이전 화면을 치운다
+  useEffect(() => {
+    if (!prev) return;
+    const t = setTimeout(() => {
+      if (prevRef.current === prev) {
+        URL.revokeObjectURL(prev.url);
+        prevRef.current = null;
+        setPrev(null);
+      }
+    }, 260);
+    return () => clearTimeout(t);
+  }, [prev]);
+
+  useEffect(
+    () => () => {
+      for (const f of [curRef.current, prevRef.current]) if (f) URL.revokeObjectURL(f.url);
+    },
+    [],
+  );
+
+  const openOriginal = async () => {
+    if (!cur) return;
+    const w = window.open("", "_blank"); // 클릭 순간에 열어야 팝업 차단에 걸리지 않는다
+    if (!w) return;
+    w.opener = null;
+    try {
+      const u = await fileUrl(caseId, cur.name);
+      w.location.href = u;
+      setTimeout(() => URL.revokeObjectURL(u), 60_000);
+    } catch {
+      w.close();
+    }
+  };
+
+  if (!cur) return <span className="muted small">화면을 불러오는 중…</span>;
   return (
-    <div
-      className={tall ? `screen-scroll${atEnd ? " at-end" : ""}` : "screen-fit"}
-      tabIndex={tall ? 0 : undefined}
-      aria-label={tall ? "페이지 전체 화면 (세로 스크롤)" : undefined}
-      onScroll={(e) => {
-        const el = e.currentTarget;
-        setAtEnd(el.scrollTop + el.clientHeight >= el.scrollHeight - 2);
-      }}
-    >
-      <a href={src} target="_blank" rel="noopener noreferrer" title="원본 크기로 보기 (새 탭)">
-        <img
-          src={src}
-          alt={`증거 화면 ${name}`}
-          onLoad={(e) => {
-            const img = e.currentTarget;
-            const box = img.closest(".screen-body");
-            if (!box) return;
-            // 칸 폭에 맞췄을 때 칸 높이를 넘으면 스크롤 방식
-            const shown = (img.naturalHeight / img.naturalWidth) * Math.min(box.clientWidth, img.naturalWidth);
-            setTall(shown > box.clientHeight * 1.05);
-          }}
-        />
-      </a>
-    </div>
+    <>
+      <div ref={box} className="screen-scroll" tabIndex={0} aria-label="조사 화면 (길면 세로 스크롤)" onScroll={measure}>
+        <div className="frame">
+          <img key={cur.url} className="frame-img enter" src={cur.url} alt={`증거 화면 ${cur.name}`} onLoad={measure} />
+          {prev && <img key={prev.url} className="frame-img leave" src={prev.url} alt="" aria-hidden="true" />}
+        </div>
+        {!atEnd && <div className="more-hint" aria-hidden="true" />}
+      </div>
+      <button type="button" className="btn btn-ghost open-orig" onClick={openOriginal} title="원본 PNG 를 새 탭에서 보기">
+        원본
+      </button>
+    </>
   );
 }
