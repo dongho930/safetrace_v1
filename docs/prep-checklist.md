@@ -11,7 +11,7 @@
 | 격리 네트워크·검문 프록시 | `docker-compose.yml`(core / sandbox(internal) / outside), `safetrace/proxy/egress.py` | `test_egress_proxy.py`, example.com 을 프록시 경유로 실제 조사 |
 | 내부망 접근 차단(SSRF) | 1차 `netguard.py`(이동 전 IP 확인 + 모든 요청 가로채기), 2차 프록시(접속 시점 재해석) | `test_netguard.py`, `test_agent_browser.py::test_internal_*`, `test_start_url_private_blocked` |
 | 증거 해시 체인·HMAC 서명 | `safetrace/evidence.py` | `test_evidence.py` (변조·삭제·순서 변경·끝부분 절단·키 없이 다시 계산 모두 탐지) |
-| 정상 사이트 자료 | `data/normal_sites.csv` (9개 분야 162개), `tools/check_normal_sites.py` | 2026-09-28 단순 HTTP 요청으로 **145/162 접속**(`data/normal_sites_checked.csv`). 403 9건은 봇 차단으로 보이며 실제 브라우저 접속은 아직 확인하지 않음. 연결 실패·시간 초과 8건은 주소 재확인 필요 |
+| 정상 사이트 자료 | `data/normal_sites.csv` (9개 분야 162개), `tools/check_normal_sites.py`, `tools/check_normal_sites_browser.py` | **162/162 접속 확인**(2026-09-28). 단순 HTTP 145/162 → 실패 17건을 에이전트와 같은 브라우저 설정으로 재확인해 17/17(주소 5건 교체, 10절) |
 
 ## 2. 10/5까지 구현하기로 한 항목
 
@@ -49,7 +49,7 @@
 
 ## 5. 로컬 보안 점검 (2026-09-28)
 
-- 시험: `pytest` **124개 통과**(09-28 탐색 개선 시험 추가 후)(단위 + 실제 Chromium 통합)
+- 시험: `pytest` **125개 통과**(09-28 브라우저 설정 시험 추가 후)(단위 + 실제 Chromium 통합)
 - Bandit: Medium·High **0건** (Low 2건: 예외 무시 구문)
 - pip-audit: 알려진 취약점 **0건**
 - npm audit: **0건**
@@ -136,3 +136,30 @@
 Docker(실제 Jev): gamble → `deposit.html` 도달, illegal_gambling 0.93, 증거 검증 통과.
 
 남은 검토: 정상 페이지에서도 행동 확신도가 0.45 미만이면 `REVIEW_REQUIRED` 가 된다. 탐색 확신도가 낮은 것과 위협 판단이 불확실한 것은 다르므로, 행동 확신도 부족은 탐색만 끝내고 상태는 위협 판단에 맡길지 결정 필요.
+
+## 10. 정상 사이트 17건 재확인과 에이전트 브라우저 설정 (2026-09-28)
+
+단순 HTTP 요청에서 실패한 17건을 실제 Chromium 으로 다시 열었다(`tools/check_normal_sites_browser.py` → `data/normal_sites_browser_checked.csv`, 사이트당 페이지 열기 1회, 클릭 없음).
+
+| 분류 | 사이트 | 원인 | 조치 |
+|---|---|---|---|
+| 브라우저로는 정상 | KISA, 한화생명, 현대해상 | 단순 HTTP 클라이언트 연결 문제 | 그대로 |
+| 봇 차단 | 쿠팡, G마켓, 옥션, SSG닷컴, 오늘의집, 이마트, 올리브영(403), DHL·대한항공(HTTP2 오류) | 헤드리스 브라우저 탐지 | **에이전트 브라우저 설정 변경**(아래) 후 모두 200 |
+| 주소 변경 | 한국전력공사 | `home.kepco.co.kr` 는 '접속 지연 안내' 페이지 | `www.kepco.co.kr` |
+| 주소 변경 | 합동택배 | `www.` 인증서 불일치 | `hdexp.co.kr` |
+| 주소 변경 | 일양로지스 | `.com` 서버 오류(500) | `www.ilyanglogis.co.kr` |
+| 교체 | 경찰민원24 | `minwon.police.go.kr` 시간 초과 지속 | 경찰청 교통민원24(이파인) `www.efine.go.kr` (과태료 사칭 문자 대조군) |
+| 교체 | 위메프 | 인증서 오류(서비스 종료) | GS SHOP `www.gsshop.com` |
+
+결과: **17/17 접속**, 목록 162개 전체 접속 가능.
+
+### 에이전트 브라우저 설정 (중요)
+
+봇 차단 사이트는 User-Agent 만 바꾸거나 새 헤드리스 모드만 써서는 여전히 막혔고, **둘을 함께** 써야 열렸다. 실제 불법·사기 사이트도 봇에게 다른 화면을 보여주거나 막는 경우(클로킹)가 많아 조사 능력에 직접 영향을 준다.
+
+- `ST_BROWSER_CHANNEL=chromium`: 전체 Chromium 의 새 헤드리스 모드(기본값)
+- `ST_BROWSER_USER_AGENT=auto`: 실행 중인 Chromium 주 버전에 맞춘 일반 Chrome User-Agent(운영체제 표기는 실제 OS)
+- 어떤 브라우저·User-Agent 로 조사했는지 `browser` 증거로 남긴다.
+- Docker(검문 프록시 경유) 확인: 쿠팡 200·benign 0.92, 대한항공 200·benign 0.75, 도박 시나리오 입금 화면 도달 유지.
+
+남은 검토: 쿠팡 조사는 위협 판단이 benign 0.92 인데도 행동 확신도 부족(`low_confidence_action`)으로 REVIEW_REQUIRED 가 됐다(9절 남은 검토와 같은 문제).

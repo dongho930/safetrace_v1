@@ -13,7 +13,7 @@ category,name,url,status,final_url,error
 공공,한국인터넷진흥원,https://www.kisa.or.kr/,,,ConnectError
 공공,보호나라,https://www.boho.or.kr/,200,https://www.boho.or.kr/,
 공공,경찰청,https://www.police.go.kr/,200,https://www.police.go.kr/,
-공공,경찰민원24,https://minwon.police.go.kr/,,,ReadTimeout
+공공,경찰청 교통민원24(이파인),https://www.efine.go.kr/,,,ReadTimeout
 공공,국가법령정보센터,https://www.law.go.kr/,200,https://www.law.go.kr/,
 공공,대법원 전자소송,https://ecfs.scourt.go.kr/,200,https://ecfs.scourt.go.kr/,
 공공,금융감독원,https://www.fss.or.kr/,200,https://www.fss.or.kr/fss/main/main.do?menuNo=200000,
@@ -27,7 +27,7 @@ category,name,url,status,final_url,error
 공공,개인정보보호위원회,https://www.pipc.go.kr/,200,https://pipc.go.kr/np/,
 공공,질병관리청,https://www.kdca.go.kr/,200,https://www.kdca.go.kr/,
 공공,식품의약품안전처,https://www.mfds.go.kr/,200,https://www.mfds.go.kr/index.do,
-공공,한국전력공사,https://home.kepco.co.kr/,,,ReadTimeout
+공공,한국전력공사,https://www.kepco.co.kr/,,,ReadTimeout
 공공,한국도로공사,https://www.ex.co.kr/,200,https://www.ex.co.kr/,
 공공,코레일,https://www.letskorail.com/,200,https://www.korail.com/,
 공공,한국토지주택공사,https://www.lh.or.kr/,200,https://www.lh.or.kr/,
@@ -102,7 +102,7 @@ category,name,url,status,final_url,error
 쇼핑,YES24,https://www.yes24.com/,200,https://www.yes24.com/Main/default.aspx,
 쇼핑,알라딘,https://www.aladin.co.kr/,200,https://www.aladin.co.kr/home/welcome.aspx,
 쇼핑,인터파크,https://www.interpark.com/,200,https://nol.yanolja.com/,
-쇼핑,위메프,https://www.wemakeprice.com/,,,ConnectError
+쇼핑,GS SHOP,https://www.gsshop.com/,,,ConnectError
 쇼핑,번개장터,https://m.bunjang.co.kr/,200,https://m.bunjang.co.kr/,
 쇼핑,당근,https://www.daangn.com/,200,https://www.daangn.com/kr/,
 쇼핑,다나와,https://www.danawa.com/,200,https://www.danawa.com/,
@@ -116,8 +116,8 @@ category,name,url,status,final_url,error
 택배,우체국택배,https://service.epost.go.kr/,200,https://service.epost.go.kr/,
 택배,경동택배,https://kdexp.com/,200,https://kdexp.com/,
 택배,대신택배,https://www.ds3211.co.kr/,200,https://www.ds3211.co.kr/,
-택배,합동택배,https://www.hdexp.co.kr/,,,ConnectError
-택배,일양로지스,https://www.ilyanglogis.com/,500,https://www.ilyanglogis.com/,
+택배,합동택배,https://hdexp.co.kr/,,,ConnectError
+택배,일양로지스,https://www.ilyanglogis.co.kr/,500,https://www.ilyanglogis.com/,
 택배,DHL 코리아,https://www.dhl.com/kr-ko/home.html,,,ReadTimeout
 택배,FedEx 코리아,https://www.fedex.com/ko-kr/home.html,200,https://www.fedex.com/ko-kr/home.html,
 택배,UPS 코리아,https://www.ups.com/kr/ko/Home.page,200,https://www.ups.com/kr/ko/Home.page,

@@ -36,6 +36,7 @@ const THREAT_LABEL: Record<string, string> = {
 };
 const KIND_LABEL: Record<string, string> = {
   start: "조사 시작",
+  browser: "브라우저",
   navigation: "최초 접속",
   observe: "관찰",
   decision: "Jev 행동 선택",
@@ -433,6 +434,8 @@ function EventLine({
     body = <>{THREAT_LABEL[String(data.threat)]}</>;
   } else if (e.kind === "safebrowsing") {
     body = <>{String(data.status)}</>;
+  } else if (e.kind === "browser") {
+    body = <span className="muted">Chromium {String(data.version)} · {String(data.user_agent)}</span>;
   } else if (e.kind === "unreachable") {
     body = (
       <>

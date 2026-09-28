@@ -12,6 +12,7 @@ import logging
 import re
 import secrets
 import shutil
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -69,6 +70,16 @@ def classify_goto_error(e: Exception) -> dict:
 
 Emit = Callable[[dict], None]
 _ALLOWED_METHODS = {"GET", "HEAD"}
+def browser_user_agent(setting: str, version: str) -> str:
+    """'auto' 면 실행 중인 Chromium 주 버전에 맞춘 일반 Chrome User-Agent(운영체제 표기는 실제 OS 따름)."""
+    if setting != "auto":
+        return setting
+    major = version.split(".")[0]
+    platform = {"win32": "Windows NT 10.0; Win64; x64", "darwin": "Macintosh; Intel Mac OS X 10_15_7"}.get(
+        sys.platform, "X11; Linux x86_64")
+    return f"Mozilla/5.0 ({platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36"
+
+
 _CHROMIUM_ARGS = [
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--webrtc-ip-handling-policy=disable_non_proxied_udp",
@@ -323,14 +334,22 @@ class AgentRun:
         video_tmp = self.ev.dir / "video_tmp"
         async with async_playwright() as p:
             launch = {"headless": True, "args": _CHROMIUM_ARGS}
+            if self.s.browser_channel:
+                launch["channel"] = self.s.browser_channel
             if self.s.egress_proxy:
                 launch["proxy"] = {"server": self.s.egress_proxy}
             browser: Browser = await p.chromium.launch(**launch)
+            ua = browser_user_agent(self.s.browser_user_agent, browser.version)
+            # 어떤 브라우저·User-Agent 로 조사했는지 증거에 남긴다(재현·설명용)
+            self._record("browser", {"version": browser.version, "channel": self.s.browser_channel or "default",
+                                     "user_agent": ua or "default"})
             ctx_kw = dict(
                 viewport={"width": 1280, "height": 800}, locale="ko-KR", timezone_id="Asia/Seoul",
                 accept_downloads=False, service_workers="block", java_script_enabled=True,
                 ignore_https_errors=True, permissions=[],
             )
+            if ua:
+                ctx_kw["user_agent"] = ua
             if self.s.record_video:
                 ctx_kw["record_video_dir"] = str(video_tmp)
                 ctx_kw["record_video_size"] = {"width": 960, "height": 600}

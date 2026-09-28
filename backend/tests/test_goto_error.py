@@ -23,3 +23,12 @@ def test_classify(msg, code, category):
 
 def test_timeout():
     assert classify_goto_error(PWTimeout("Timeout 15000ms exceeded."))["category"] == "timeout"
+
+
+def test_browser_user_agent():
+    from safetrace.agent.loop import browser_user_agent
+
+    ua = browser_user_agent("auto", "153.0.8010.12")
+    assert "Chrome/153.0.0.0" in ua and "Headless" not in ua
+    assert browser_user_agent("", "153.0") == ""
+    assert browser_user_agent("custom-ua", "153.0") == "custom-ua"

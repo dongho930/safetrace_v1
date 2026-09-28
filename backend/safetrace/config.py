@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     resolver_url: str | None = None  # 격리망에서 1차 IP 확인용 DNS 조회. 예: http://egress:3129
     record_video: bool = True
     ocr_enabled: bool = True
+    # 브라우저: 봇에게 다른 화면을 보여주거나 막는 사이트(클로킹)가 많아, 전체 Chromium 의 새 헤드리스 모드와
+    # 실행 중인 버전에 맞춘 일반 User-Agent 를 쓴다. 비우면 Playwright 기본(headless shell, HeadlessChrome UA).
+    browser_channel: str = "chromium"
+    browser_user_agent: str = "auto"  # auto | 직접 지정 문자열 | 빈 문자열(기본값 사용)
 
     # SSRF: 허용 포트, 시험용 허용 목록(host:port). 운영에서는 비워 둔다.
     allowed_ports: list[int] = Field(default_factory=lambda: [80, 443])
