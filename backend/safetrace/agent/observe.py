@@ -45,7 +45,14 @@ COLLECT_JS = r"""
       imgOnly: !(el.innerText || '').trim() && !!(el.querySelector && el.querySelector('img')) || tag === 'img',
       inView: r.bottom > 0 && r.top < vh && r.right > 0 && r.left < vw,
       area: Math.round(r.width * r.height),
+      covered: false,
     };
+    // 가려짐: 화면 안에 있는데 중심점의 맨 위 요소가 자기(또는 자손·조상)가 아니면 다른 레이어(팝업 등)에 덮인 것
+    if (info.inView) {
+      const cx = Math.min(Math.max(r.left + r.width / 2, 0), vw - 1), cy = Math.min(Math.max(r.top + r.height / 2, 0), vh - 1);
+      const top = document.elementFromPoint(cx, cy);
+      info.covered = !!top && top !== el && !el.contains(top) && !top.contains(el);
+    }
     if (isInputLike) { inputs.push(info); }
     const id = 'e' + (n++);
     el.setAttribute(attr, id);

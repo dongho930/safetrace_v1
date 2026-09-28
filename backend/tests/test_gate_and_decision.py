@@ -144,3 +144,46 @@ def test_masking():
     for raw in ["900101-1234567", "010-1234-5678", "a.b@c.co.kr", "123-456-789012"]:
         assert raw not in t
     assert "sk-abc" not in mask_secrets('api_key="sk-abc" x')
+
+
+def test_scroll_not_offered_after_no_effect():
+    from safetrace.decision.schema import PageState, action_options
+
+    base = dict(step=2, url="http://x.example/", title="", text="", candidates=[], has_popup=False)
+    assert "scroll" in action_options(PageState(**base, history=["scroll"]))
+    assert "scroll" not in action_options(PageState(**base, history=["scroll_no_effect"]))
+    # 효과 없던 행동들 사이에 실패한 클릭이 끼어도 계속 빠지고, 화면을 바꾼 행동 뒤에는 다시 나온다
+    o = action_options(PageState(**base, history=["scroll_no_effect", "click_failed:e1:x", "back_no_effect"]))
+    assert "scroll" not in o and "back" not in o and "finish" in o
+    o = action_options(PageState(**base, history=["scroll_no_effect", "click:e1:다음"]))
+    assert "scroll" in o and "back" in o
+
+
+def test_blocked_or_failed_click_not_reoffered_until_page_changes():
+    from safetrace.decision.schema import Candidate, PageState, action_options
+
+    cands = [Candidate(id="e0", tag="a", text="관리자 콘솔로 이동"), Candidate(id="e1", tag="a", text="다음")]
+    base = dict(step=1, url="http://x.example/", title="", text="", candidates=cands, has_popup=False)
+    o = action_options(PageState(**base, history=["blocked:e0:관리자 콘솔로 이동"]))
+    assert "click_e0" not in o and "click_e1" in o
+    o = action_options(PageState(**base, history=["click_failed:e1:다음", "scroll_no_effect"]))
+    assert "click_e1" not in o and "scroll" not in o
+    # 화면을 바꾼 행동 뒤에는 다시 고를 수 있다
+    o = action_options(PageState(**base, history=["blocked:e0:관리자 콘솔로 이동", "click:e1:다음"]))
+    assert "click_e0" in o
+
+
+def test_only_finish_left_skips_model():
+    from safetrace.decision.engine import Engine
+    from safetrace.decision.schema import ActionRequest, PageState
+
+    class Boom:
+        name = "boom"
+
+        def choose(self, *a):
+            raise AssertionError("model must not be called")
+
+    st = PageState(step=3, url="http://x.example/", title="", text="", candidates=[], has_popup=False,
+                   history=["scroll_no_effect", "back_no_effect"])
+    d = Engine([Boom()], 0.45, 0.6).decide_action(ActionRequest(state=st))
+    assert d.choice == "finish" and d.provider == "exhausted"

@@ -51,6 +51,7 @@ class Candidate(BaseModel):
     tag: str = Field(max_length=16)
     text: str = Field(max_length=120)
     href_host: str | None = Field(default=None, max_length=253)
+    covered: bool = False  # 팝업 등 다른 레이어에 가려져 지금은 누를 수 없음
 
 
 class PageState(BaseModel):
@@ -104,18 +105,42 @@ class ThreatDecision(Decision):
     hold: bool  # 확신 부족이면 True → REVIEW_REQUIRED
 
 
+def _exhausted_actions(history: list[str]) -> set[str]:
+    """기록을 뒤에서부터 보며, 화면을 바꾼 행동이 나오기 전까지 효과 없던 행동을 모은다.
+
+    scroll·back 은 그 이름으로, 막혔거나 실패·효과 없던 클릭은 "click:<버튼 글자>" 로 담는다
+    (요소 id 는 관찰마다 새로 붙으므로 글자로 비교한다).
+    """
+    dead: set[str] = set()
+    for h in reversed(history):
+        if h in ("scroll_no_effect", "back_no_effect"):
+            dead.add(h.removesuffix("_no_effect"))
+        elif h.startswith(("click_failed:", "click_no_effect:", "blocked:")):
+            dead.add("click:" + h.split(":", 2)[2])
+        else:
+            break
+    return dead
+
+
 def action_options(state: PageState) -> dict[str, str]:
     """Jev choice 질문의 선택지. 여기 없는 행동은 고를 수 없다."""
     opts: dict[str, str] = {}
+    dead = _exhausted_actions(state.history)
     for c in state.candidates:
+        if c.text and f"click:{c.text[:40]}" in dead:
+            continue
         label = c.text or "(텍스트 없음)"
         if c.href_host:
             label += f" → {c.href_host}"
+        if c.covered:
+            label += " (다른 레이어에 가려져 지금은 누를 수 없음)"
         opts[f"click_{c.id}"] = f"클릭: [{c.tag}] {label}"
-    opts["scroll"] = "화면을 아래로 스크롤해 더 본다"
+    # 마지막 화면 변화 뒤에 효과가 없었던 스크롤·뒤로 가기는 다시 내놓지 않는다: 같은 행동 반복 방지
+    if "scroll" not in dead:
+        opts["scroll"] = "화면을 아래로 스크롤해 더 본다"
     if state.has_popup:
         opts["close_popup"] = "떠 있는 팝업·레이어를 닫는다"
-    if state.step > 0:
+    if state.step > 0 and "back" not in dead:
         opts["back"] = "이전 화면으로 돌아간다"
     opts["finish"] = "입금·개인정보 입력 화면 등 핵심 화면에 도달했거나 더 볼 것이 없어 조사를 끝낸다"
     return opts

@@ -223,3 +223,27 @@ def test_unreachable_escalates_only_on_reputation_match(settings, testpages, mon
         assert esc and esc[0]["data"]["threat_types"] == ["SOCIAL_ENGINEERING"]
     else:
         assert not esc
+
+
+def test_unreadable_image_button_not_offered(settings, testpages):
+    """OCR 로 글자를 읽지 못한 이미지 버튼(여기서는 OCR 꺼짐)은 선택지에 오르지 않는다: 이미지 '결제' 버튼 대비."""
+    settings.ocr_enabled = False
+    _, final, chain, _ = run(f"{BASE}/imgbtn/ko.html", settings, testpages)
+    first = next(r for r in chain if r["kind"] == "observe")
+    assert first["data"]["candidates"] == []
+    assert sum(f.startswith("unreadable_image") for f in first["data"]["forbidden"]) == 2
+    assert_no_forbidden(chain, testpages)
+
+
+def test_popup_covered_button_marked(settings, testpages):
+    """팝업에 가려진 버튼은 covered 로 표시되고, Jev 선택지 문구에도 드러난다."""
+    from safetrace.decision.schema import Candidate, PageState, action_options
+
+    _, final, chain, _ = run(f"{BASE}/gamble/", settings, testpages)
+    casino = next(r["data"] for r in chain if r["kind"] == "observe" and r["data"]["url"].endswith("casino.html"))
+    start = next(c for c in casino["candidates"] if "게임 시작" in c["text"])
+    close = next(c for c in casino["candidates"] if "닫기" in c["text"])
+    assert start["covered"] is True and close["covered"] is False
+    opts = action_options(PageState(step=1, url="http://x.example/", title="", text="",
+                                    candidates=[Candidate(**start)], has_popup=True))
+    assert "가려져" in opts[f"click_{start['id']}"]

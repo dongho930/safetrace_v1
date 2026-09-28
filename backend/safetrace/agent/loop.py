@@ -24,7 +24,7 @@ from playwright.async_api import TimeoutError as PWTimeout
 
 from ..config import Settings
 from ..decision.client import Decider, DecisionUnavailable
-from ..decision.schema import ActionKind, Candidate, PageState, ThreatRequest
+from ..decision.schema import ActionKind, Candidate, PageState, ThreatRequest, action_options
 from ..evidence import EvidenceWriter
 from ..masking import mask_pii
 from .gate import Budget, ElementInfo, SafetyGate, classify_forbidden
@@ -190,7 +190,6 @@ class AgentRun:
                 forbidden.append(f"{reason}:{info.type or info.tag}:{mask_pii(label)}")
                 continue
             text = info.text
-            text_src = "dom"
             if not text and item.get("imgOnly") and ocr and ocr.available:
                 try:
                     loc = page.locator(f"[{self.attr}='{eid}']").first
@@ -198,7 +197,6 @@ class AgentRun:
                         loc = loc.locator("img").first  # 인라인 <a> 박스는 이미지보다 작게 잘릴 수 있음
                     png = await loc.screenshot(timeout=3000)
                     text = await asyncio.to_thread(ocr.read, png)
-                    text_src = "ocr"
                 except (PWError, PWTimeout):
                     text = ""
                 if text:
@@ -208,12 +206,16 @@ class AgentRun:
                     if reason:
                         forbidden.append(f"{reason}:ocr:{mask_pii(text[:30])}")
                         continue
+            if not text and item.get("imgOnly"):
+                # 글자를 읽을 수 없는 이미지 버튼(OCR 없음·인식 실패)은 무엇인지 모르므로 누르지 않는다.
+                # 이미지로 된 '결제' 버튼이 빈 이름으로 선택지에 오르는 것을 막는다.
+                forbidden.append(f"unreadable_image:{info.tag}")
+                continue
             infos[eid] = info
             host = urlsplit(info.href).hostname if info.href.startswith("http") else None
             prio = (0 if item.get("inView") else 1, -int(item.get("area") or 0))
-            cands.append((prio, Candidate(id=eid, tag=info.tag[:16], text=mask_pii(text)[:120] or
-                                          ("(이미지)" if text_src == "dom" and item.get("imgOnly") else ""),
-                                          href_host=host)))
+            cands.append((prio, Candidate(id=eid, tag=info.tag[:16], text=mask_pii(text)[:120],
+                                          href_host=host, covered=bool(item.get("covered")))))
         cands.sort(key=lambda x: x[0])
         chosen = [c for _, c in cands[: self.s.max_candidates]]
         infos = {c.id: infos[c.id] for c in chosen}
@@ -228,7 +230,10 @@ class AgentRun:
             "forbidden": forbidden[:50], "has_popup": state.has_popup,
             "text_excerpt": text[:1500], "text_sha256": text_hash,
         }, [shot] if shot else [])
-        key = hashlib.sha256((page.url + "|" + "|".join(c.text for c in chosen)).encode()).hexdigest()
+        # 같은 화면 판정: URL·버튼 글자에 '남은 선택지'까지 넣는다. 효과 없던 행동이 빠져 선택지가 줄면 다른 상태로 보고
+        # (줄어들기만 하므로 끝이 있다), 페이지를 오가는 진짜 반복은 그대로 잡는다.
+        opts = "|".join(sorted(action_options(state)))
+        key = hashlib.sha256((page.url + "|" + "|".join(c.text for c in chosen) + "#" + opts).encode()).hexdigest()
         return _Observation(state, infos, forbidden, seq, key)
 
     # ── 실행 ──────────────────────────────────────────
@@ -248,17 +253,21 @@ class AgentRun:
         except (PWError, PWTimeout):
             pass
 
-    async def _click(self, ctx: BrowserContext, page: Page, eid: str) -> Page:
+    async def _click(self, ctx: BrowserContext, page: Page, eid: str) -> tuple[Page, str]:
+        """클릭하고 (현재 페이지, 결과)를 돌려준다. 결과: ok | failed | no_effect"""
         loc = page.locator(f"[{self.attr}='{eid}']").first
         new_pages: list[Page] = []
 
         def on_page(pg: Page):
             new_pages.append(pg)
 
+        before = (page.url, await self._text_digest(page))
         ctx.on("page", on_page)
+        failed = False
         try:
             await loc.click(timeout=5000, no_wait_after=False)
         except (PWError, PWTimeout) as e:
+            failed = True
             self._record("action_error", {"element": eid, "error": type(e).__name__})
         await asyncio.sleep(0.8)
         ctx.remove_listener("page", on_page)
@@ -266,9 +275,26 @@ class AgentRun:
             np = new_pages[-1]
             await self._settle(np)
             self._record("new_window", {"url": np.url[:2048], "adopted": True})
-            return np
+            return np, "ok"
         await self._settle(page)
-        return page
+        if failed:
+            return page, "failed"
+        if (page.url, await self._text_digest(page)) == before:
+            return page, "no_effect"
+        return page, "ok"
+
+    async def _scroll_y(self, page: Page) -> float:
+        try:
+            return float(await page.evaluate("() => window.scrollY"))
+        except (PWError, TypeError, ValueError):
+            return -1.0
+
+    async def _text_digest(self, page: Page) -> str:
+        try:
+            t = await page.evaluate("() => document.body ? document.body.innerText : ''")
+        except PWError:
+            return ""
+        return hashlib.sha256(str(t).encode()).hexdigest()
 
     async def _close_popup(self, page: Page, offered: set[str], obs: _Observation) -> str:
         try:
@@ -405,31 +431,45 @@ class AgentRun:
                     self.budget.steps += 1
                     step += 1
                     continue
-                page = await self._click(ctx, page, decision.element_id)
+                page, click_result = await self._click(ctx, page, decision.element_id)
                 if page not in tracked:
                     tracked.append(page)
                     page.on("framenavigated", track)
-                outcome = f"click:{decision.element_id}"
+                outcome = f"click:{decision.element_id}" + ("" if click_result == "ok" else f":{click_result}")
             elif decision.action == ActionKind.SCROLL:
+                y0 = await self._scroll_y(page)
                 await page.mouse.wheel(0, 700)
                 await asyncio.sleep(0.5)
-                outcome = "scroll"
+                outcome = "scroll" if await self._scroll_y(page) != y0 else "scroll_no_effect"  # 더 내려갈 곳 없음
             elif decision.action == ActionKind.CLOSE_POPUP:
                 outcome = "close_popup:" + await self._close_popup(page, offered, obs)
             elif decision.action == ActionKind.BACK:
+                url0 = page.url
                 try:
                     await page.go_back(timeout=self.s.nav_timeout_ms)
                 except (PWError, PWTimeout):
                     pass
                 await self._settle(page)
                 outcome = "back"
+                if not page.url.startswith(("http://", "https://")):
+                    # 시작 페이지에서 뒤로 가면 about:blank 로 사이트를 벗어난다: 되돌리고 효과 없음으로 기록
+                    try:
+                        await page.go_forward(timeout=self.s.nav_timeout_ms)
+                    except (PWError, PWTimeout):
+                        pass
+                    await self._settle(page)
+                    outcome = "back_no_effect"
+                elif page.url == url0:
+                    outcome = "back_no_effect"
             after = await self._screenshot(page, "after")
             self._record("action", {"step": step, "action": decision.action.value, "element": decision.element_id,
                                     "result_url": page.url[:2048], "outcome": outcome},
                          [f for f in (before, after) if f])
             if decision.action == ActionKind.CLICK:
+                # 실패·효과 없음도 그대로 알려 같은 행동을 되풀이하지 않게 한다
                 label = next((c.text for c in obs.state.candidates if c.id == decision.element_id), "")
-                self.history.append(f"click:{decision.element_id}:{label[:40]}")
+                prefix = {"ok": "click", "failed": "click_failed", "no_effect": "click_no_effect"}[click_result]
+                self.history.append(f"{prefix}:{decision.element_id}:{label[:40]}")
             else:
                 self.history.append(outcome)
             self.budget.steps += 1

@@ -132,7 +132,7 @@ class RuleProvider:
     def _action(self, state: dict, options: dict[str, str]) -> ChoiceResult:
         history: list[str] = state.get("agent_history", [])
         # 이미 눌렀거나 게이트가 막은 요소(텍스트 기준)는 다시 고르지 않는다
-        clicked = {h.split(":", 2)[2] for h in history if h.startswith(("click:", "blocked:")) and h.count(":") >= 2}
+        clicked = {h.split(":", 2)[2] for h in history if h.startswith(("click:", "click_failed:", "click_no_effect:", "blocked:")) and h.count(":") >= 2}
         scores: dict[str, float] = {}
         progress = False
         for key, label in options.items():
