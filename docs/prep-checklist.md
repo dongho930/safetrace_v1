@@ -18,7 +18,7 @@
 | 항목 | 구현 위치 | 상태 |
 |---|---|---|
 | AI 브라우저 에이전트 루프(관찰·Jev 행동 선택·안전 게이트·실행) | `safetrace/agent/loop.py`, `observe.py`, `gate.py` | 완료 |
-| Jev 연동(행동 선택·위협 판단) | `safetrace/decision/` — TypeSafe `POST /v1/systemone` choice 질문, OpenRouter 경로 전환, 규칙 기반 대체 판단기 | TypeSafe 실제 키로 확인(2026-09-28, `tools/jev_smoke.py`): 행동 선택 262ms, 위협 판단 `illegal_gambling` 0.98. OpenRouter 경로는 키가 없어 미확인 |
+| Jev 연동(행동 선택·위협 판단) | `safetrace/decision/` — TypeSafe `POST /v1/systemone` choice 질문, OpenRouter 경로 전환, 규칙 기반 대체 판단기 | TypeSafe 실제 키로 확인(2026-09-28, `tools/jev_smoke.py`): 행동 선택 262ms, 위협 판단 `illegal_gambling` 0.98. OpenRouter 경로도 확인(`typesafe/jev-1.13-20260917`, 11절) |
 | 로컬 OCR | `safetrace/agent/ocr.py` (RapidOCR, 서버 안에서만 처리) | 한국어 인식 모델(PP-OCRv5) 적용: 로컬·Docker 모두 한글 이미지 버튼 인식, 이미지 결제 버튼 제외 확인(`docs/ocr.md`, `test_korean_image_button_ocr`) |
 
 ## 3. 기획서의 사전준비 완료 기준
@@ -57,7 +57,6 @@
 
 ## 6. 아직 하지 않은 것 (정직한 현황)
 
-- OpenRouter 경로는 키·모델을 받은 뒤 확인해야 한다.
 
 ## 7. Docker Compose 전체 기동 (2026-09-28)
 
@@ -163,3 +162,11 @@ Docker(실제 Jev): gamble → `deposit.html` 도달, illegal_gambling 0.93, 증
 - Docker(검문 프록시 경유) 확인: 쿠팡 200·benign 0.92, 대한항공 200·benign 0.75, 도박 시나리오 입금 화면 도달 유지.
 
 쿠팡처럼 위협 판단이 확실한 정상 사이트가 행동 확신도 부족만으로 REVIEW_REQUIRED 가 되던 문제는 9절 결정으로 해결.
+
+## 11. OpenRouter 예비 경로 (2026-09-28)
+
+- `tools/jev_smoke.py --openrouter`: 행동 선택 click_e0 0.98(562ms), 위협 판단 illegal_gambling 0.98(259ms), 응답 모델 `typesafe/jev-1.13-20260917`.
+- **장애 전환 시험(Docker)**: 판단 서비스에만 잘못된 TypeSafe 키를 넣어 기동 → TypeSafe `http 401` 후 OpenRouter 로 넘어감. 도박 시나리오 입금 화면 도달, 판단 7건 모두 `provider: jev_openrouter`, 위협 판단 illegal_gambling 0.97. 시험 뒤 원래 키로 되돌림.
+- 발급·적용 방법: `docs/openrouter.md`
+
+**사전준비 단계 항목 모두 완료.**
