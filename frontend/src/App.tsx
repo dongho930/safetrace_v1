@@ -97,6 +97,24 @@ function Icon({ name }: { name: keyof typeof ICONS }) {
   );
 }
 
+// 1440×900 기준 디자인을 창 크기에 맞춰 통째로 비례 확대·축소한다(QHD 에서 커지고, 작은 노트북에서 작아짐).
+// 너무 작아지면(0.8 미만) 더 줄이지 않고 스크롤, 좁은 화면(900px 미만)은 확대·축소 없이 세로로 쌓는다.
+const BASE_W = 1440;
+const BASE_H = 900;
+function fitZoom() {
+  if (window.innerWidth < 900) return 1;
+  return Math.min(Math.max(Math.min(window.innerWidth / BASE_W, window.innerHeight / BASE_H), 0.8), 2);
+}
+function useFitZoom() {
+  const [z, setZ] = useState(fitZoom);
+  useEffect(() => {
+    const on = () => setZ(fitZoom());
+    window.addEventListener("resize", on);
+    return () => window.removeEventListener("resize", on);
+  }, []);
+  return { zoom: z, width: `calc(100vw / ${z})`, height: `calc(100vh / ${z})` };
+}
+
 const fmtTime = (iso: string) => new Date(iso).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false });
 const pct = (v: number) => v.toFixed(2);
 
@@ -106,6 +124,7 @@ export default function App() {
   const [cases, setCases] = useState<CaseOut[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const fit = useFitZoom();
 
   const refresh = useCallback(async () => {
     try {
@@ -127,10 +146,10 @@ export default function App() {
     return () => clearInterval(t);
   }, [token, refresh]);
 
-  if (!token) return <Login onLogin={(t) => (setToken(t), setTok(t))} />;
+  if (!token) return <Login fit={fit} onLogin={(t) => (setToken(t), setTok(t))} />;
 
   return (
-    <div className="app">
+    <div className="app" style={fit}>
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">
@@ -165,10 +184,10 @@ export default function App() {
   );
 }
 
-function Login({ onLogin }: { onLogin: (t: string) => void }) {
+function Login({ fit, onLogin }: { fit: React.CSSProperties; onLogin: (t: string) => void }) {
   const [t, setT] = useState("");
   return (
-    <div className="login">
+    <div className="login" style={fit}>
       <div className="panel login-card">
         <div className="brand">
           <span className="brand-mark">
@@ -766,6 +785,7 @@ function Media({ caseId, name, kind }: { caseId: string; name: string; kind: "im
   const [src, setSrc] = useState("");
   // 페이지 전체 캡처처럼 세로로 긴 이미지는 폭에 맞춰 세로 스크롤로 보여 준다(작게 줄이면 읽을 수 없음)
   const [tall, setTall] = useState(false);
+  const [atEnd, setAtEnd] = useState(false);
   useEffect(() => {
     let alive = true;
     let u = "";
@@ -784,7 +804,15 @@ function Media({ caseId, name, kind }: { caseId: string; name: string; kind: "im
   if (!src) return <span className="muted small">불러오는 중…</span>;
   if (kind === "video") return <video src={src} controls />;
   return (
-    <div className={tall ? "screen-scroll" : "screen-fit"} tabIndex={tall ? 0 : undefined} aria-label={tall ? "페이지 전체 화면 (세로 스크롤)" : undefined}>
+    <div
+      className={tall ? `screen-scroll${atEnd ? " at-end" : ""}` : "screen-fit"}
+      tabIndex={tall ? 0 : undefined}
+      aria-label={tall ? "페이지 전체 화면 (세로 스크롤)" : undefined}
+      onScroll={(e) => {
+        const el = e.currentTarget;
+        setAtEnd(el.scrollTop + el.clientHeight >= el.scrollHeight - 2);
+      }}
+    >
       <a href={src} target="_blank" rel="noopener noreferrer" title="원본 크기로 보기 (새 탭)">
         <img
           src={src}
