@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   type AgentEvent,
   ApiError,
@@ -21,39 +21,28 @@ const STATUS_LABEL: Record<string, string> = {
   QUEUED: "대기",
   RUNNING: "조사 중",
   COMPLETED: "조사 완료",
-  REVIEW_REQUIRED: "담당자 검토 필요",
+  REVIEW_REQUIRED: "검토 필요",
   FAILED: "실패",
   UNREACHABLE: "접속 불가",
   BLOCKED: "차단(정책)",
 };
+// 색만으로 구분하지 않도록 상태마다 기호를 붙인다
+const STATUS_GLYPH: Record<string, string> = {
+  QUEUED: "●",
+  RUNNING: "●",
+  COMPLETED: "○",
+  REVIEW_REQUIRED: "▲",
+  FAILED: "×",
+  UNREACHABLE: "×",
+  BLOCKED: "×",
+};
 const THREAT_LABEL: Record<string, string> = {
   phishing: "피싱",
   scam: "사기",
-  illegal_gambling: "불법 도박 의심",
-  malware: "악성코드",
+  illegal_gambling: "불법 도박",
+  malware: "악성 앱",
   benign: "정상",
   unknown: "판단 불가",
-};
-const KIND_LABEL: Record<string, string> = {
-  start: "조사 시작",
-  browser: "브라우저",
-  navigation: "최초 접속",
-  observe: "관찰",
-  decision: "Jev 행동 선택",
-  gate: "안전 게이트",
-  action: "실행",
-  blocked_request: "요청 차단",
-  dialog: "대화상자 자동 닫기",
-  new_window: "새 창",
-  action_error: "실행 오류",
-  decision_error: "판단 실패",
-  finish: "조사 종료",
-  threat: "Jev 위협 판단",
-  recording: "녹화",
-  safebrowsing: "Safe Browsing",
-  unreachable: "접속 불가",
-  escalation: "담당자 검토로 전환",
-  error: "오류",
 };
 const REASON_LABEL: Record<string, string> = {
   unreachable_reputation_match: "접속 불가 · Safe Browsing 위험 일치",
@@ -63,6 +52,7 @@ const REASON_LABEL: Record<string, string> = {
   agent_finished: "에이전트가 조사 완료 판단",
   step_budget: "최대 단계 도달",
   time_budget: "최대 시간 도달",
+  threat_decision_unavailable: "위협 판단 불가(판단 서비스 장애)",
 };
 const NET_CATEGORY_LABEL: Record<string, string> = {
   dns_failure: "도메인 없음(DNS)",
@@ -77,7 +67,40 @@ const NET_CATEGORY_LABEL: Record<string, string> = {
   other: "기타",
 };
 const TERMINAL = new Set(["COMPLETED", "REVIEW_REQUIRED", "FAILED", "UNREACHABLE", "BLOCKED"]);
+const MAX_STEPS = 15; // 에이전트 기본 예산(ST_MAX_STEPS)
 
+// ── 아이콘(선 굵기 1.6 한 가지 스타일) ─────────────────────
+const ICONS: Record<string, string[]> = {
+  shield: ["M12 2.8 5 5.6v5.6c0 4.4 3 8.3 7 9.6 4-1.3 7-5.2 7-9.6V5.6l-7-2.8Z", "M8.6 12h1.8l1.3-2.6 1.8 5.2 1.3-2.6h.8"],
+  shieldCheck: ["M12 2.8 5 5.6v5.6c0 4.4 3 8.3 7 9.6 4-1.3 7-5.2 7-9.6V5.6l-7-2.8Z", "m9 12 2 2 4-4"],
+  alert: ["M12 3.5 21 19.5H3L12 3.5Z", "M12 10v4M12 17h.01"],
+  clock: ["M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17Z", "M12 7.5V12l3 2"],
+  check: ["M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17Z", "m8.5 12 2.5 2.5 4.5-5"],
+  stack: ["M12 3 3 7.5 12 12l9-4.5L12 3Z", "m3 12 9 4.5 9-4.5M3 16.5 12 21l9-4.5"],
+  ban: ["M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17Z", "m6 6 12 12"],
+  lock: ["M7 10.5h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2Z", "M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3"],
+  cursor: ["m5 3 14 8-6 1.5L10 19 5 3Z"],
+  window: ["M5.5 5.5h11a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2h-11a2 2 0 0 1-2-2v-11a2 2 0 0 1 2-2Z", "M9.5 3.5h9a2 2 0 0 1 2 2v9"],
+  eye: ["M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12Z", "M12 9.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z"],
+  brain: ["M9 4.5a3 3 0 0 0-3 3v.5a3 3 0 0 0-1.5 5.5A3 3 0 0 0 9 19.5h.5V4.5H9Z", "M15 4.5a3 3 0 0 1 3 3v.5a3 3 0 0 1 1.5 5.5 3 3 0 0 1-4.5 6h-.5V4.5h.5Z"],
+  flag: ["M5 21V4.5M5 4.5h11l-2 4 2 4H5"],
+  globe: ["M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17Z", "M3.5 12h17M12 3.5c2.5 2.5 3.5 5.5 3.5 8.5s-1 6-3.5 8.5c-2.5-2.5-3.5-5.5-3.5-8.5s1-6 3.5-8.5Z"],
+  x: ["M5.5 4h13a1.5 1.5 0 0 1 1.5 1.5v13a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18.5v-13A1.5 1.5 0 0 1 5.5 4Z", "m9 9 6 6M15 9l-6 6"],
+};
+function Icon({ name }: { name: keyof typeof ICONS }) {
+  return (
+    <svg className="icon" viewBox="0 0 24 24" aria-hidden="true">
+      {ICONS[name].map((d) => (
+        <path key={d} d={d} />
+      ))}
+    </svg>
+  );
+}
+
+const fmtTime = (iso: string) => new Date(iso).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false });
+const pct = (v: number) => v.toFixed(2);
+
+// ── 앱 ─────────────────────────────────────────────
 export default function App() {
   const [token, setTok] = useState(getToken());
   const [cases, setCases] = useState<CaseOut[]>([]);
@@ -107,37 +130,37 @@ export default function App() {
   if (!token) return <Login onLogin={(t) => (setToken(t), setTok(t))} />;
 
   return (
-    <div className="layout">
-      <aside className="side">
-        <header className="brand">
-          <span className="logo">SafeTrace</span>
-          <button className="link" onClick={() => (clearToken(), setTok(""))}>
-            로그아웃
-          </button>
-        </header>
-        <NewCase
+    <div className="app">
+      <header className="topbar">
+        <div className="brand">
+          <span className="brand-mark">
+            <Icon name="shield" />
+          </span>
+          <span className="brand-name">SafeTrace</span>
+          <span className="chip">SOC</span>
+        </div>
+        <span className="muted small">위협 의심 사이트 조사 콘솔</span>
+        <div className="spacer" />
+        <button type="button" className="btn btn-ghost" onClick={() => (clearToken(), setTok(""))}>
+          로그아웃
+        </button>
+      </header>
+
+      <Kpis cases={cases} />
+
+      <div className="cols">
+        <Queue
+          cases={cases}
+          selected={selected}
+          error={error}
+          onSelect={setSelected}
           onCreated={(c) => {
             setSelected(c.id);
             refresh();
           }}
         />
-        {error && <p className="err">{error}</p>}
-        <ul className="cases">
-          {cases.map((c) => (
-            <li key={c.id}>
-              <button className={c.id === selected ? "case active" : "case"} onClick={() => setSelected(c.id)}>
-                <span className={`badge s-${c.status}`}>{STATUS_LABEL[c.status] ?? c.status}</span>
-                <span className="url">{c.url}</span>
-                {c.threat && <span className="threat-mini">{THREAT_LABEL[c.threat.threat]}</span>}
-              </button>
-            </li>
-          ))}
-          {cases.length === 0 && <li className="muted">접수된 사건이 없습니다.</li>}
-        </ul>
-      </aside>
-      <main className="main">
-        {selected ? <CaseView key={selected} id={selected} /> : <Empty />}
-      </main>
+        {selected ? <Workspace key={selected} id={selected} /> : <EmptyWorkspace />}
+      </div>
     </div>
   );
 }
@@ -146,19 +169,151 @@ function Login({ onLogin }: { onLogin: (t: string) => void }) {
   const [t, setT] = useState("");
   return (
     <div className="login">
-      <h1>SafeTrace 조사 콘솔</h1>
-      <p className="muted">발급받은 API 토큰을 입력하세요. 토큰은 이 탭에만 보관됩니다.</p>
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (t.trim()) onLogin(t.trim());
-        }}
-      >
-        <input type="password" value={t} onChange={(e) => setT(e.target.value)} placeholder="API 토큰" autoFocus />
-        <button type="submit">접속</button>
-      </form>
+      <div className="panel login-card">
+        <div className="brand">
+          <span className="brand-mark">
+            <Icon name="shield" />
+          </span>
+          <span className="brand-name">SafeTrace</span>
+          <span className="chip">SOC</span>
+        </div>
+        <h1>조사 콘솔 접속</h1>
+        <p className="muted small">발급받은 API 토큰을 입력하세요. 토큰은 이 탭에만 보관됩니다.</p>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (t.trim()) onLogin(t.trim());
+          }}
+        >
+          <label className="sr" htmlFor="token">
+            API 토큰
+          </label>
+          <input id="token" className="field" type="password" value={t} onChange={(e) => setT(e.target.value)} placeholder="API 토큰" autoFocus />
+          <button type="submit" className="btn btn-primary">
+            접속
+          </button>
+        </form>
+      </div>
     </div>
   );
+}
+
+// ── 지표: 사건 목록에서 계산한 값만 보여 준다 ─────────────────
+function Kpis({ cases }: { cases: CaseOut[] }) {
+  const n = (f: (c: CaseOut) => boolean) => cases.filter(f).length;
+  const items = [
+    { label: "검토 필요", value: n((c) => c.status === "REVIEW_REQUIRED"), icon: "alert", cls: "glow-orange" },
+    { label: "조사 중", value: n((c) => c.status === "RUNNING" || c.status === "QUEUED"), icon: "clock", cls: "glow-blue" },
+    { label: "조사 완료", value: n((c) => c.status === "COMPLETED"), icon: "check", cls: "" },
+    {
+      label: "위협 의심",
+      value: n((c) => !!c.threat && !["benign", "unknown"].includes(c.threat.threat)),
+      icon: "flag",
+      cls: "glow-orange",
+    },
+    { label: "접속 불가·차단", value: n((c) => ["UNREACHABLE", "BLOCKED", "FAILED"].includes(c.status)), icon: "ban", cls: "" },
+  ] as const;
+  return (
+    <section className="kpis" aria-label="현황">
+      {items.map((k) => (
+        <div key={k.label} className="panel kpi">
+          <div className="kpi-head">
+            <span className="lbl">{k.label}</span>
+            <span className={`kpi-icon ${k.cls}`}>
+              <Icon name={k.icon} />
+            </span>
+          </div>
+          <span className={`kpi-val ${k.cls}`}>{k.value}</span>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+// ── 왼쪽: 사건 대기열 ─────────────────────────────────
+function Queue({
+  cases,
+  selected,
+  error,
+  onSelect,
+  onCreated,
+}: {
+  cases: CaseOut[];
+  selected: string | null;
+  error: string;
+  onSelect: (id: string) => void;
+  onCreated: (c: CaseOut) => void;
+}) {
+  const [filter, setFilter] = useState<"all" | "review">("all");
+  const [adding, setAdding] = useState(false);
+  const review = cases.filter((c) => c.status === "REVIEW_REQUIRED");
+  const shown = filter === "review" ? review : cases;
+  return (
+    <aside className="panel queue" aria-label="사건 대기열">
+      <div className="queue-head">
+        <h2>사건 대기열</h2>
+        <button type="button" className="btn btn-primary" aria-expanded={adding} onClick={() => setAdding((v) => !v)}>
+          {adding ? "닫기" : "+ URL 접수"}
+        </button>
+      </div>
+      {adding && (
+        <NewCase
+          onCreated={(c) => {
+            setAdding(false);
+            onCreated(c);
+          }}
+        />
+      )}
+      <div className="filters" role="group" aria-label="필터">
+        <button type="button" className="chip chip-filter" aria-pressed={filter === "all"} onClick={() => setFilter("all")}>
+          전체 {cases.length}
+        </button>
+        <button type="button" className="chip chip-filter warn-chip" aria-pressed={filter === "review"} onClick={() => setFilter("review")}>
+          검토 필요 {review.length}
+        </button>
+      </div>
+      {error && <p className="err" style={{ padding: "0 16px 8px" }}>{error}</p>}
+      <ul className="list">
+        {shown.map((c) => (
+          <li key={c.id}>
+            <button type="button" className="item" aria-current={c.id === selected} onClick={() => onSelect(c.id)}>
+              <span className="item-top">
+                <StatusChip c={c} />
+                <span className="mono faint small">{fmtTime(c.created_at)}</span>
+              </span>
+              <span className="item-url">{c.url}</span>
+              <span className="item-sub">{caseSummary(c)}</span>
+            </button>
+          </li>
+        ))}
+        {shown.length === 0 && <li className="muted small" style={{ padding: 12 }}>해당하는 사건이 없습니다.</li>}
+      </ul>
+    </aside>
+  );
+}
+
+function StatusChip({ c }: { c: CaseOut }) {
+  // 위협으로 판단돼 조사가 끝난 사건은 위협 유형을 위험색으로 보여 준다
+  if (c.status === "COMPLETED" && c.threat && !["benign", "unknown"].includes(c.threat.threat)) {
+    return (
+      <span className="chip st-threat">
+        ■ {THREAT_LABEL[c.threat.threat] ?? c.threat.threat} {pct(c.threat.probability)}
+      </span>
+    );
+  }
+  return (
+    <span className={`chip st-${c.status}`}>
+      {STATUS_GLYPH[c.status] ?? "●"} {STATUS_LABEL[c.status] ?? c.status}
+    </span>
+  );
+}
+
+function caseSummary(c: CaseOut): string {
+  if (c.status === "RUNNING" || c.status === "QUEUED") return "에이전트가 조사하는 중";
+  const parts: string[] = [];
+  if (c.threat) parts.push(`${THREAT_LABEL[c.threat.threat] ?? c.threat.threat} ${pct(c.threat.probability)}`);
+  if (c.finish_reason) parts.push(REASON_LABEL[c.finish_reason] ?? c.finish_reason);
+  return parts.join(" · ") || "-";
 }
 
 function NewCase({ onCreated }: { onCreated: (c: CaseOut) => void }) {
@@ -183,15 +338,20 @@ function NewCase({ onCreated }: { onCreated: (c: CaseOut) => void }) {
         }
       }}
     >
-      <label>신고 URL 접수</label>
-      <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://..." maxLength={2048} required />
-      <div className="row">
-        <select value={source} onChange={(e) => setSource(e.target.value)}>
+      <label className="sr" htmlFor="new-url">
+        신고 URL
+      </label>
+      <input id="new-url" className="field mono" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://…" maxLength={2048} required autoFocus />
+      <div className="new-row">
+        <label className="sr" htmlFor="new-source">
+          출처
+        </label>
+        <select id="new-source" className="field" value={source} onChange={(e) => setSource(e.target.value)}>
           <option value="report">신고</option>
           <option value="kisa">KISA 피싱 URL</option>
           <option value="test">시험 페이지</option>
         </select>
-        <button type="submit" disabled={busy}>
+        <button type="submit" className="btn btn-primary" disabled={busy}>
           {busy ? "접수 중…" : "조사 시작"}
         </button>
       </div>
@@ -200,24 +360,27 @@ function NewCase({ onCreated }: { onCreated: (c: CaseOut) => void }) {
   );
 }
 
-function Empty() {
+function EmptyWorkspace() {
   return (
-    <div className="empty">
-      <h2>사건을 선택하거나 새 URL을 접수하세요</h2>
-      <p className="muted">
-        AI 에이전트가 격리 브라우저에서 버튼을 눌러 가며 숨겨진 화면까지 조사합니다. 입력·제출·결제·다운로드는 코드가
-        막으며, 모든 행동과 화면은 서명된 증거로 남습니다. 최종 판정은 담당자가 합니다.
-      </p>
-    </div>
+    <>
+      <main className="panel empty">
+        <h2>사건을 선택하거나 새 URL을 접수하세요</h2>
+        <p className="muted">
+          AI 에이전트가 격리 브라우저에서 버튼을 눌러 가며 숨겨진 화면까지 조사합니다. 입력·제출·결제·다운로드는 코드가
+          막으며, 모든 행동과 화면은 서명된 증거로 남습니다. 최종 판정은 담당자가 합니다.
+        </p>
+      </main>
+      <aside className="side" aria-label="판단과 증거" />
+    </>
   );
 }
 
-function CaseView({ id }: { id: string }) {
+// ── 선택한 사건: 가운데(조사) + 오른쪽(판단·증거) ─────────────────
+function Workspace({ id }: { id: string }) {
   const [c, setC] = useState<CaseOut | null>(null);
   const [events, setEvents] = useState<EvidenceEvent[]>([]);
-  const [status, setStatus] = useState<string>("");
+  const [status, setStatus] = useState("");
   const [live, setLive] = useState(false);
-  const [verify, setVerify] = useState<{ ok: boolean; records: number; errors: string[] } | null>(null);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -239,278 +402,383 @@ function CaseView({ id }: { id: string }) {
     return () => ac.abort();
   }, [id]);
 
-  const steps = useMemo(() => groupSteps(events), [events]);
-  const recording = events.find((e) => e.kind === "recording")?.files[0];
+  const sorted = useMemo(() => [...events].sort((a, b) => a.seq - b.seq), [events]);
   const st = status || c?.status || "";
-
+  const running = st === "RUNNING" || st === "QUEUED" || (!st && live);
   return (
-    <div className="caseview">
-      <section className="head">
-        <div>
-          <div className="url-big">{c?.url}</div>
-          <div className="meta">
-            <span className={`badge s-${st}`}>{STATUS_LABEL[st] ?? st}</span>
-            {live && <span className="live">● 실시간</span>}
-            {c?.finish_reason && (
-              <span className="muted">종료 사유: {REASON_LABEL[c.finish_reason] ?? c.finish_reason}</span>
-            )}
-          </div>
-        </div>
-        <div className="actions">
-          <button
-            onClick={async () => {
-              try {
-                setVerify(await verifyCase(id));
-              } catch (e) {
-                setVerify({ ok: false, records: 0, errors: [e instanceof Error ? e.message : "검증 실패"] });
-              }
-            }}
-          >
-            증거 무결성 검증
-          </button>
-        </div>
-      </section>
-
-      {verify && (
-        <div className={verify.ok ? "verify ok" : "verify bad"}>
-          {verify.ok
-            ? `✔ 증거 ${verify.records}건 해시 체인·서명 검증 통과`
-            : `✖ 검증 실패: ${verify.errors.slice(0, 5).join(", ")}`}
-        </div>
-      )}
-
-      {c?.threat && <ThreatCard c={c} />}
-
-      {recording && <Video caseId={id} name={recording} />}
-
-      <section className="timeline">
-        <h3>에이전트 행동 기록</h3>
-        {steps.map((g, i) => (
-          <StepCard key={i} caseId={id} items={g} />
-        ))}
-        {steps.length === 0 && <p className="muted">기록을 기다리는 중…</p>}
-      </section>
-    </div>
+    <>
+      <Investigation c={c} events={sorted} status={st} running={running} id={id} />
+      <SidePanel c={c} id={id} running={running} />
+    </>
   );
 }
 
-function groupSteps(events: EvidenceEvent[]): EvidenceEvent[][] {
-  const out: EvidenceEvent[][] = [];
-  for (const e of [...events].sort((a, b) => a.seq - b.seq)) {
-    if (e.kind === "observe" || out.length === 0) out.push([e]);
-    else out[out.length - 1].push(e);
-  }
-  return out;
-}
+function Investigation({
+  c,
+  events,
+  status,
+  running,
+  id,
+}: {
+  c: CaseOut | null;
+  events: EvidenceEvent[];
+  status: string;
+  running: boolean;
+  id: string;
+}) {
+  const steps = events.filter((e) => e.kind === "observe").length;
+  const lastShot = [...events].reverse().find((e) => e.files.some((f) => f.endsWith(".png")));
+  const shot = lastShot?.files.filter((f) => f.endsWith(".png")).pop();
+  const recording = events.find((e) => e.kind === "recording")?.files[0];
+  const browser = events.find((e) => e.kind === "browser")?.data as { version?: string } | undefined;
+  const lastUrl = [...events].reverse().find((e) => e.kind === "observe")?.data.url as string | undefined;
+  const [view, setView] = useState<"shot" | "video">("shot");
+  const total = Math.max(MAX_STEPS, steps);
 
-function ThreatCard({ c }: { c: CaseOut }) {
-  const t = c.threat!;
-  const probs = Object.entries(t.probabilities).sort((a, b) => b[1] - a[1]);
   return (
-    <section className="card threat">
-      <div className="threat-head">
-        <div>
-          <div className="muted">AI 의견 (기술적 의심 유형, 법적 판단 아님)</div>
-          <div className="threat-name">
-            {THREAT_LABEL[t.threat] ?? t.threat} <span className="pct">{(t.probability * 100).toFixed(0)}%</span>
+    <main className="panel live" aria-label="조사 화면">
+      <div className="live-head">
+        {running ? (
+          <span className="chip st-RUNNING">
+            <span className="dot" />
+            LIVE
+          </span>
+        ) : (
+          <span className={`chip st-${status}`}>
+            {STATUS_GLYPH[status] ?? "●"} {STATUS_LABEL[status] ?? status}
+          </span>
+        )}
+        <h1 className="live-title">{c ? hostOf(c.url) : "불러오는 중"}</h1>
+        <span className="live-url">{lastUrl ?? c?.url}</span>
+        <div className="spacer" />
+        <div className="progress" role="img" aria-label={`${total}단계 중 ${steps}단계`}>
+          {Array.from({ length: total }, (_, i) => (
+            <span key={i} className={i < steps - 1 ? "on" : i === steps - 1 ? "now" : ""} />
+          ))}
+        </div>
+        <span className="mono muted small">
+          {String(steps).padStart(2, "0")}/{total}
+        </span>
+      </div>
+
+      <div className="stage">
+        {recording && !running && (
+          <div className="stage-tabs" role="group" aria-label="화면 전환">
+            <button type="button" className="chip chip-filter" aria-pressed={view === "shot"} onClick={() => setView("shot")}>
+              마지막 화면
+            </button>
+            <button type="button" className="chip chip-filter" aria-pressed={view === "video"} onClick={() => setView("video")}>
+              조사 녹화
+            </button>
+          </div>
+        )}
+        <div className="screen">
+          <div className="screen-bar">
+            {running && (
+              <span className="rec">
+                <span className="dot" />
+                REC
+              </span>
+            )}
+            <span>격리 브라우저{browser?.version ? ` · Chromium ${browser.version.split(".")[0]}` : ""} · 검문 프록시 경유</span>
+          </div>
+          <div className="screen-body">
+            {view === "video" && recording ? (
+              <Media caseId={id} name={recording} kind="video" />
+            ) : shot ? (
+              <Media caseId={id} name={shot} kind="img" />
+            ) : (
+              <span className="muted small">{running ? "첫 화면을 기다리는 중…" : "화면 기록 없음"}</span>
+            )}
           </div>
         </div>
-        {t.hold && <span className="badge s-REVIEW_REQUIRED">확신 부족 · 보류</span>}
       </div>
-      <Bars probs={probs.map(([k, v]) => [THREAT_LABEL[k] ?? k, v])} />
-      <div className="muted small">
-        판단 모델 {t.model} ({t.provider}) · 근거 증거 {t.evidence_seqs.map((s) => `EV-${s}`).join(", ")}
-      </div>
-      <div className="small">
-        Safe Browsing:{" "}
-        {c.safebrowsing?.status === "match"
-          ? c.safebrowsing.matches.map((m) => `${m.threat_type}`).join(", ")
-          : c.safebrowsing?.status === "no_match"
-            ? "일치 없음 (정상이라는 뜻은 아님)"
-            : (c.safebrowsing?.status ?? "-")}
-      </div>
-      {c.candidates && c.candidates.length > 0 && (
-        <div className="small">경유·연관 도메인 후보: {c.candidates.join(", ")}</div>
+
+      <section className="log" aria-label="에이전트 행동 기록">
+        <div className="log-head">
+          <h2 className="lbl">에이전트 행동 기록</h2>
+          <span className="mono faint small">증거 {events.length}건</span>
+        </div>
+        <EventLog events={events} />
+      </section>
+    </main>
+  );
+}
+
+function hostOf(u: string) {
+  try {
+    return new URL(u).host;
+  } catch {
+    return u;
+  }
+}
+
+// ── 행동 기록: 최신이 위. 통계·광고 전송 차단(페이지 이동이 아닌 POST 등)은 한 줄로 묶는다 ──
+type Line = { seq: number; icon: keyof typeof ICONS; tone: "" | "red" | "orange" | "teal"; text: React.ReactNode; end?: React.ReactNode; endTone?: string };
+
+function EventLog({ events }: { events: EvidenceEvent[] }) {
+  let candidates = new Map<string, string>(); // 직전 관찰의 클릭 후보(id → 글자)
+  const lines: Line[] = [];
+  const quiet: EvidenceEvent[] = [];
+  for (const e of events) {
+    const d = e.data as Record<string, unknown>;
+    if (e.kind === "observe") {
+      candidates = new Map(((d.candidates as { id: string; text: string }[]) ?? []).map((c) => [c.id, c.text]));
+      const nf = ((d.forbidden as string[]) ?? []).length;
+      lines.push({ seq: e.seq, icon: "eye", tone: "", text: <>관찰 · {String(d.title || d.url)}</>, end: nf ? <span className="bad">금지 {nf} 제외</span> : `후보 ${((d.candidates as unknown[]) ?? []).length}` });
+    } else if (e.kind === "decision") {
+      const choice = String(d.choice);
+      const eid = choice.startsWith("click_") ? choice.slice(6) : "";
+      const what = eid ? `“${candidates.get(eid) ?? eid}” 클릭` : ACTION_LABEL[choice] ?? choice;
+      lines.push({ seq: e.seq, icon: "brain", tone: "", text: <>Jev 선택 · {what}</>, end: pct(Number(d.probability)), endTone: "var(--blue-ink)" });
+    } else if (e.kind === "gate") {
+      if (!d.allowed) lines.push({ seq: e.seq, icon: "ban", tone: "red", text: <span className="bad">안전 게이트 차단 · {String(d.reason)}</span>, end: "차단", endTone: "var(--red-ink)" });
+    } else if (e.kind === "action") {
+      const out = String(d.outcome);
+      const noEffect = out.includes("no_effect") || out.includes("failed");
+      lines.push({ seq: e.seq, icon: "cursor", tone: noEffect ? "orange" : "", text: <>실행 · {out} → <span className="mono faint">{String(d.result_url)}</span></>, end: noEffect ? "효과 없음" : "통과", endTone: noEffect ? "var(--orange-ink)" : "var(--teal-ink)" });
+    } else if (e.kind === "blocked_request") {
+      if (d.navigation) lines.push({ seq: e.seq, icon: "ban", tone: "red", text: <span className="bad">페이지 이동 차단 · {String(d.reason)} <span className="mono">{String(d.url)}</span></span>, end: "차단", endTone: "var(--red-ink)" });
+      else quiet.push(e);
+    } else if (e.kind === "new_window") {
+      lines.push({ seq: e.seq, icon: "window", tone: "", text: <>새 창 채택 · <span className="mono">{String(d.url)}</span></> });
+    } else if (e.kind === "navigation") {
+      const redirects = (d.redirects as string[]) ?? [];
+      lines.push({ seq: e.seq, icon: "globe", tone: redirects.length ? "orange" : "", text: <>최초 접속 {String(d.status)}{redirects.length ? ` · 리다이렉트 ${redirects.length}회` : ""}</> });
+    } else if (e.kind === "dialog") {
+      lines.push({ seq: e.seq, icon: "x", tone: "", text: <>대화상자 자동 닫기 · {String(d.message)}</> });
+    } else if (e.kind === "unreachable") {
+      lines.push({ seq: e.seq, icon: "ban", tone: "red", text: <span className="bad">접속 불가 · {NET_CATEGORY_LABEL[String(d.category)] ?? String(d.error)}{d.net_error ? ` (${String(d.net_error)})` : ""}</span> });
+    } else if (e.kind === "escalation") {
+      lines.push({ seq: e.seq, icon: "alert", tone: "orange", text: <span className="warn">담당자 검토로 전환 · Safe Browsing {((d.threat_types as string[]) ?? []).join(", ")}</span> });
+    } else if (e.kind === "threat") {
+      lines.push({ seq: e.seq, icon: "flag", tone: d.threat === "benign" ? "teal" : "orange", text: <>위협 판단 · {THREAT_LABEL[String(d.threat)] ?? String(d.threat)}</>, end: pct(Number(d.probability)) });
+    } else if (e.kind === "safebrowsing") {
+      lines.push({ seq: e.seq, icon: "shieldCheck", tone: d.status === "match" ? "red" : "", text: <>Safe Browsing · {String(d.status)}</> });
+    } else if (e.kind === "finish") {
+      lines.push({ seq: e.seq, icon: "check", tone: "teal", text: <>탐색 종료 · {REASON_LABEL[String(d.reason)] ?? String(d.reason)}</> });
+    } else if (e.kind === "action_error" || e.kind === "decision_error" || e.kind === "threat_error") {
+      lines.push({ seq: e.seq, icon: "alert", tone: "orange", text: <span className="warn">{e.kind} · {String(d.error ?? "")}</span> });
+    }
+  }
+  lines.reverse();
+  if (lines.length === 0 && quiet.length === 0) return <p className="muted small">기록을 기다리는 중…</p>;
+  return (
+    <>
+      {quiet.length > 0 && (
+        <details className="fold">
+          <summary className="ev">
+            <span className="ev-icon">
+              <Icon name="stack" />
+            </span>
+            <span className="ev-seq">묶음</span>
+            <span className="ev-text muted">통계·광고 등 데이터 전송 차단 {quiet.length}건 (페이지 이동 아님 · 펼치기)</span>
+            <span className="ev-end faint">{quiet.length}</span>
+          </summary>
+          <div className="fold-body">
+            {quiet.map((e) => (
+              <span key={e.seq}>
+                EV-{e.seq} · {String(e.data.reason)} · {String(e.data.url)}
+              </span>
+            ))}
+          </div>
+        </details>
       )}
-      <p className="muted small">최종 판정은 담당자가 확정합니다. AI 는 판정을 확정할 수 없습니다.</p>
+      {lines.map((l) => (
+        <div key={l.seq} className="ev">
+          <span className={`ev-icon ${l.tone}`}>
+            <Icon name={l.icon} />
+          </span>
+          <span className="ev-seq">EV-{l.seq}</span>
+          <span className="ev-text">{l.text}</span>
+          <span className="ev-end" style={{ color: l.endTone }}>
+            {l.end}
+          </span>
+        </div>
+      ))}
+    </>
+  );
+}
+const ACTION_LABEL: Record<string, string> = { scroll: "스크롤", back: "뒤로 가기", close_popup: "팝업 닫기", finish: "조사 끝내기" };
+
+// ── 오른쪽: AI 의견 · 외부 평판·증거 · 판정 ───────────────────────
+function SidePanel({ c, id, running }: { c: CaseOut | null; id: string; running: boolean }) {
+  return (
+    <aside className="side" aria-label="판단과 증거">
+      <Opinion c={c} running={running} />
+      <Evidence c={c} id={id} running={running} />
+      <section className="panel card verdict" aria-label="담당자 판정">
+        <h2 className="panel-title">담당자 판정</h2>
+        <button type="button" className="btn btn-danger" disabled>
+          위협 확정
+        </button>
+        <div className="verdict-row">
+          <button type="button" className="btn btn-ghost" disabled>
+            정상
+          </button>
+          <button type="button" className="btn btn-ghost" disabled>
+            보류
+          </button>
+        </div>
+        <p className="faint small" style={{ margin: 0 }}>
+          판정 저장은 계정·권한 기능과 함께 제공 예정입니다. AI 는 판정을 확정하지 않습니다.
+        </p>
+      </section>
+    </aside>
+  );
+}
+
+function Opinion({ c, running }: { c: CaseOut | null; running: boolean }) {
+  const t = c?.threat;
+  if (!t) {
+    return (
+      <section className="panel card" aria-label="AI 의견">
+        <div className="card-head">
+          <h2 className="lbl">AI 의견</h2>
+          <span className="faint small">기술적 의심 유형 · 법적 판단 아님</span>
+        </div>
+        <p className="muted small" style={{ margin: 0 }}>
+          {running ? "조사가 끝나면 위협 판단이 표시됩니다." : "위협 판단 없음 (페이지를 열지 못했거나 판단 불가)"}
+        </p>
+      </section>
+    );
+  }
+  const risky = !["benign", "unknown"].includes(t.threat);
+  const color = t.threat === "benign" ? "var(--teal-ink)" : risky ? "var(--orange-ink)" : "var(--muted)";
+  const probs = Object.entries(t.probabilities).sort((a, b) => b[1] - a[1]).filter(([, v]) => v >= 0.01).slice(0, 4);
+  const R = 36;
+  const C = 2 * Math.PI * R;
+  return (
+    <section className="panel card" aria-label="AI 의견">
+      <div className="card-head">
+        <h2 className="lbl">AI 의견</h2>
+        <span className="faint small">기술적 의심 유형 · 법적 판단 아님</span>
+      </div>
+      <div className="opinion">
+        <svg width="80" height="80" viewBox="0 0 88 88" role="img" aria-label={`${THREAT_LABEL[t.threat] ?? t.threat} 확률 ${pct(t.probability)}`} style={{ color }}>
+          <circle cx="44" cy="44" r={R} fill="none" stroke="var(--track)" strokeWidth="7" />
+          <circle className="ring-fill" cx="44" cy="44" r={R} fill="none" stroke="currentColor" strokeWidth="7" strokeLinecap="round" strokeDasharray={`${C * t.probability} ${C}`} transform="rotate(-90 44 44)" />
+          <text x="44" y="50" textAnchor="middle" fontFamily="Geist Mono Variable, monospace" fontSize="18" fill="currentColor">
+            {pct(t.probability)}
+          </text>
+        </svg>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span className="opinion-name" style={{ color }}>
+            {THREAT_LABEL[t.threat] ?? t.threat}
+            {risky ? " 의심" : ""}
+          </span>
+          <span className="muted small">{t.hold ? "확신 부족 → 담당자 검토" : "판단 확신 기준 충족"}</span>
+          <span className="mono faint small">
+            {t.model} · 근거 {t.evidence_seqs.slice(-4).map((s) => `EV-${s}`).join(" ")}
+          </span>
+        </div>
+      </div>
+      <div className="bars" style={{ color }}>
+        {probs.map(([k, v], i) => (
+          <div className="bar" key={k}>
+            <span style={{ color: "var(--ink)" }}>{THREAT_LABEL[k] ?? k}</span>
+            <span className="bar-track">
+              <span className={i === 0 ? "bar-fill top" : "bar-fill"} style={{ width: `${Math.round(v * 100)}%` }} />
+            </span>
+            <span className="bar-val" style={{ color: "var(--ink)" }}>
+              {pct(v)}
+            </span>
+          </div>
+        ))}
+      </div>
     </section>
   );
 }
 
-function Bars({ probs }: { probs: [string, number][] }) {
+function Evidence({ c, id, running }: { c: CaseOut | null; id: string; running: boolean }) {
+  const [verify, setVerify] = useState<{ ok: boolean; records: number; errors: string[] } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const sb = c?.safebrowsing;
+  const sbText =
+    sb?.status === "match"
+      ? sb.matches.map((m) => m.threat_type).join(", ")
+      : sb?.status === "no_match"
+        ? "일치 없음"
+        : sb?.status === "not_configured"
+          ? "키 없음"
+          : (sb?.status ?? "-");
   return (
-    <div className="bars">
-      {probs.slice(0, 6).map(([k, v]) => (
-        <div className="bar" key={k}>
-          <span className="bar-label">{k}</span>
-          <span className="bar-track">
-            <span className="bar-fill" style={{ width: `${Math.round(v * 100)}%` }} />
-          </span>
-          <span className="bar-val">{(v * 100).toFixed(0)}%</span>
+    <section className="panel card" aria-label="외부 평판과 증거">
+      <h2 className="lbl">외부 평판 · 증거</h2>
+      <div className="tiles">
+        <div className="sunken tile">
+          <span className="muted">Safe Browsing</span>
+          <span className={`mono ${sb?.status === "match" ? "bad" : ""}`}>{sbText}</span>
         </div>
-      ))}
-    </div>
-  );
-}
-
-function StepCard({ caseId, items }: { caseId: string; items: EvidenceEvent[] }) {
-  const obs = items.find((e) => e.kind === "observe");
-  const d = (obs?.data ?? {}) as {
-    step?: number;
-    url?: string;
-    title?: string;
-    candidates?: { id: string; text: string; href_host?: string | null }[];
-    forbidden?: string[];
-  };
-  return (
-    <div className="card step">
-      {obs ? (
-        <div className="step-head">
-          <span className="step-no">STEP {d.step}</span>
-          <span className="step-url">{d.url}</span>
-          <span className="muted">EV-{obs.seq}</span>
-        </div>
-      ) : null}
-      <div className="step-body">
-        {obs && obs.files[0] && <Shot caseId={caseId} name={obs.files[0]} />}
-        <div className="step-events">
-          {obs && (
-            <div className="small">
-              <b>{d.title}</b> · 클릭 후보 {d.candidates?.length ?? 0}개
-              {d.forbidden && d.forbidden.length > 0 && (
-                <span className="forbid"> · 금지 요소 {d.forbidden.length}개 제외</span>
-              )}
-            </div>
-          )}
-          {items
-            .filter((e) => e.kind !== "observe")
-            .map((e) => (
-              <EventLine key={e.seq} caseId={caseId} e={e} candidates={d.candidates ?? []} />
-            ))}
+        <div className="sunken tile">
+          <span className="muted">경유 도메인</span>
+          <span className={`mono ${c?.candidates?.length ? "warn" : ""}`}>{c?.candidates?.length ? c.candidates.join(", ") : "없음"}</span>
         </div>
       </div>
-    </div>
-  );
-}
-
-function EventLine({
-  caseId,
-  e,
-  candidates,
-}: {
-  caseId: string;
-  e: EvidenceEvent;
-  candidates: { id: string; text: string }[];
-}) {
-  const data = e.data as Record<string, unknown>;
-  const label = KIND_LABEL[e.kind] ?? e.kind;
-  let body: React.ReactNode = null;
-  if (e.kind === "decision") {
-    const choice = String(data.choice);
-    const eid = choice.startsWith("click_") ? choice.slice(6) : "";
-    const text = candidates.find((c) => c.id === eid)?.text;
-    body = (
-      <>
-        <b>{eid ? `클릭 “${text ?? eid}”` : choice}</b> {(Number(data.probability) * 100).toFixed(0)}%{" "}
-        <span className="muted">
-          ({String(data.provider)} · {String(data.model)})
+      {sb?.status === "no_match" && <p className="faint small" style={{ margin: 0 }}>일치 없음은 정상이라는 뜻이 아닙니다.</p>}
+      <div className={`integrity ${verify ? (verify.ok ? "good" : "fail") : ""}`}>
+        <Icon name="lock" />
+        <span className="integrity-text">
+          {verify ? (
+            verify.ok ? (
+              <>
+                <span>해시 체인 · HMAC 서명 통과</span>
+                <span className="mono faint small">증거 {verify.records}건</span>
+              </>
+            ) : (
+              <>
+                <span>검증 실패</span>
+                <span className="mono small">{verify.errors.slice(0, 3).join(", ")}</span>
+              </>
+            )
+          ) : (
+            <>
+              <span style={{ color: "var(--ink)" }}>증거 무결성</span>
+              <span className="faint small">{running ? "조사가 끝나면 검증할 수 있습니다" : "검증 전"}</span>
+            </>
+          )}
         </span>
-      </>
-    );
-  } else if (e.kind === "gate") {
-    body = data.allowed ? <span className="ok">통과</span> : <span className="forbid">차단 — {String(data.reason)}</span>;
-  } else if (e.kind === "action") {
-    body = (
-      <>
-        {String(data.outcome)} → <span className="muted">{String(data.result_url)}</span>
-      </>
-    );
-  } else if (e.kind === "blocked_request") {
-    body = (
-      <span className="forbid">
-        {String(data.reason)} {String(data.url)}
-      </span>
-    );
-  } else if (e.kind === "finish") {
-    body = <>사유: {String(data.reason)}</>;
-  } else if (e.kind === "dialog") {
-    body = <span className="muted">{String(data.message)}</span>;
-  } else if (e.kind === "threat") {
-    body = <>{THREAT_LABEL[String(data.threat)]}</>;
-  } else if (e.kind === "safebrowsing") {
-    body = <>{String(data.status)}</>;
-  } else if (e.kind === "browser") {
-    body = <span className="muted">Chromium {String(data.version)} · {String(data.user_agent)}</span>;
-  } else if (e.kind === "unreachable") {
-    body = (
-      <>
-        {NET_CATEGORY_LABEL[String(data.category)] ?? String(data.error)}{" "}
-        {data.net_error ? <span className="muted">({String(data.net_error)})</span> : null}
-      </>
-    );
-  } else if (e.kind === "escalation") {
-    body = (
-      <span className="forbid">
-        Safe Browsing {(data.threat_types as string[] | undefined)?.join(", ")} — 페이지 증거 없음, 위협 유형 미확정
-      </span>
-    );
-  }
-  return (
-    <div className={`ev k-${e.kind}${e.kind === "gate" && !data.allowed ? " blocked" : ""}`}>
-      <span className="ev-kind">{label}</span> {body}
-      {e.kind === "action" && e.files.length > 1 && (
-        <div className="pair">
-          {e.files.map((f) => (
-            <Shot key={f} caseId={caseId} name={f} small />
-          ))}
-        </div>
-      )}
-    </div>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          style={{ padding: "7px 10px", fontSize: 12 }}
+          disabled={busy || running}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              setVerify(await verifyCase(id));
+            } catch (e) {
+              setVerify({ ok: false, records: 0, errors: [e instanceof Error ? e.message : "검증 실패"] });
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {verify ? "다시 검증" : "검증"}
+        </button>
+      </div>
+    </section>
   );
 }
 
-function Shot({ caseId, name, small }: { caseId: string; name: string; small?: boolean }) {
-  const [src, setSrc] = useState<string>("");
-  const ref = useRef<string>("");
-  useEffect(() => {
-    let alive = true;
-    fileUrl(caseId, name)
-      .then((u) => {
-        ref.current = u;
-        if (alive) setSrc(u);
-      })
-      .catch(() => undefined);
-    return () => {
-      alive = false;
-      if (ref.current) URL.revokeObjectURL(ref.current);
-    };
-  }, [caseId, name]);
-  if (!src) return <div className={small ? "shot small ph" : "shot ph"} />;
-  return (
-    <a href={src} target="_blank" rel="noopener noreferrer">
-      <img className={small ? "shot small" : "shot"} src={src} alt={`증거 화면 ${name}`} />
-    </a>
-  );
-}
-
-function Video({ caseId, name }: { caseId: string; name: string }) {
+// 증거 파일은 인증 헤더가 필요하므로 blob URL 로 보여 준다
+function Media({ caseId, name, kind }: { caseId: string; name: string; kind: "img" | "video" }) {
   const [src, setSrc] = useState("");
   useEffect(() => {
+    let alive = true;
     let u = "";
     fileUrl(caseId, name)
       .then((x) => {
         u = x;
-        setSrc(x);
+        if (alive) setSrc(x);
+        else URL.revokeObjectURL(x);
       })
       .catch(() => undefined);
     return () => {
+      alive = false;
       if (u) URL.revokeObjectURL(u);
     };
   }, [caseId, name]);
-  return (
-    <section className="card">
-      <h3>조사 녹화</h3>
-      {src ? <video src={src} controls className="video" /> : <p className="muted">불러오는 중…</p>}
-    </section>
-  );
+  if (!src) return <span className="muted small">불러오는 중…</span>;
+  return kind === "video" ? <video src={src} controls /> : <img src={src} alt={`증거 화면 ${name}`} />;
 }
