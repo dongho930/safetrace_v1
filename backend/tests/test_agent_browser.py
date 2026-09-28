@@ -7,6 +7,7 @@
 """
 
 import json
+import os
 import uuid
 from urllib.parse import urlsplit
 
@@ -92,6 +93,21 @@ def test_image_button_ocr(settings, testpages):
     first = next(r for r in chain if r["kind"] == "observe")
     assert any("ENTER" in c["text"].upper() for c in first["data"]["candidates"]), first["data"]["candidates"]
     assert any(r["kind"] == "observe" and r["data"]["url"].endswith("next.html") for r in chain)
+
+
+def test_korean_image_button_ocr(settings, testpages):
+    """한국어 OCR 모델(ST_OCR_REC_MODEL)이 있을 때: 한글 이미지 버튼을 읽고, 이미지 '결제' 버튼은 선택지에서 뺀다."""
+    from safetrace.agent.ocr import get_ocr
+
+    if not get_ocr().available or not os.environ.get("ST_OCR_REC_MODEL"):
+        pytest.skip("Korean OCR model not configured (tools/fetch_ocr_model.py)")
+    _, final, chain, _ = run(f"{BASE}/imgbtn/ko.html", settings, testpages)
+    first = next(r for r in chain if r["kind"] == "observe")
+    texts = [c["text"] for c in first["data"]["candidates"]]
+    assert any("다음" in t for t in texts), first["data"]
+    assert not any("결제" in t for t in texts), texts
+    assert any(r["kind"] == "observe" and r["data"]["url"].endswith("next.html") for r in chain)
+    assert_no_forbidden(chain, testpages)
 
 
 # ── 공격 시나리오 ────────────────────────────────────────

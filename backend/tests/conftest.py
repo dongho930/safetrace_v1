@@ -20,6 +20,10 @@ os.environ["ST_DECIDER_CHAIN"] = '["rules"]'
 os.environ["ST_TEST_ALLOWLIST"] = '["127.0.0.1:8900", "localhost:8900"]'
 os.environ["ST_RECORD_VIDEO"] = "true"
 os.environ["ST_DECISION_TOKEN"] = ""
+# 한국어 OCR 모델을 받아 두었으면(tools/fetch_ocr_model.py) 시험에서도 쓴다
+_KO_OCR = ROOT / "models" / "korean_PP-OCRv5_rec_mobile.onnx"
+if _KO_OCR.exists():
+    os.environ.setdefault("ST_OCR_REC_MODEL", str(_KO_OCR))
 
 TEST_PORT = 8900
 

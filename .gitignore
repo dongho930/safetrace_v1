@@ -13,3 +13,4 @@ frontend/dist/
 # 대회 문서(공개 저장소에 올리지 않음)
 *.docx
 *.pdf
+models/

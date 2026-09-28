@@ -19,7 +19,7 @@
 |---|---|---|
 | AI 브라우저 에이전트 루프(관찰·Jev 행동 선택·안전 게이트·실행) | `safetrace/agent/loop.py`, `observe.py`, `gate.py` | 완료 |
 | Jev 연동(행동 선택·위협 판단) | `safetrace/decision/` — TypeSafe `POST /v1/systemone` choice 질문, OpenRouter 경로 전환, 규칙 기반 대체 판단기 | TypeSafe 실제 키로 확인(2026-09-28, `tools/jev_smoke.py`): 행동 선택 262ms, 위협 판단 `illegal_gambling` 0.98. OpenRouter 경로는 키가 없어 미확인 |
-| 로컬 OCR | `safetrace/agent/ocr.py` (RapidOCR, 서버 안에서만 처리) | 영문 이미지 버튼 인식 시험 통과. **한국어 인식 모델은 별도 설치 필요**(`docs/ocr.md`) |
+| 로컬 OCR | `safetrace/agent/ocr.py` (RapidOCR, 서버 안에서만 처리) | 한국어 인식 모델(PP-OCRv5) 적용: 로컬·Docker 모두 한글 이미지 버튼 인식, 이미지 결제 버튼 제외 확인(`docs/ocr.md`, `test_korean_image_button_ocr`) |
 
 ## 3. 기획서의 사전준비 완료 기준
 
@@ -49,7 +49,7 @@
 
 ## 5. 로컬 보안 점검 (2026-09-28)
 
-- 시험: `pytest` **106개 통과**(단위 + 실제 Chromium 통합)
+- 시험: `pytest` **107개 통과**(09-28 한국어 OCR 시험 추가 후)(단위 + 실제 Chromium 통합)
 - Bandit: Medium·High **0건** (Low 2건: 예외 무시 구문)
 - pip-audit: 알려진 취약점 **0건**
 - npm audit: **0건**
@@ -57,7 +57,7 @@
 
 ## 6. 아직 하지 않은 것 (정직한 현황)
 
-- 한국어 OCR 모델, Safe Browsing 실제 키 조회, OpenRouter 경로는 키·모델을 받은 뒤 확인해야 한다.
+- Safe Browsing 실제 키 조회, OpenRouter 경로는 키·모델을 받은 뒤 확인해야 한다.
 
 ## 7. Docker Compose 전체 기동 (2026-09-28)
 

@@ -1,7 +1,7 @@
 """로컬 OCR: 글자가 이미지인 버튼을 서버 안에서 읽는다. 이미지를 외부로 보내지 않는다.
 
-기본은 RapidOCR(onnxruntime) 기본 모델(중·영). 한국어 인식은 ST_OCR_REC_MODEL / ST_OCR_REC_KEYS 로
-PaddleOCR 한국어 인식 모델(onnx)과 문자 사전을 지정해야 한다(docs/ocr.md 참고).
+기본은 RapidOCR(onnxruntime) 기본 모델(중·영). 한국어 인식은 ST_OCR_REC_MODEL 로 PaddleOCR PP-OCRv5
+한국어 인식 모델(onnx, 문자 사전이 메타데이터에 포함)을 지정한다(docs/ocr.md, tools/fetch_ocr_model.py).
 """
 
 from __future__ import annotations
@@ -22,10 +22,9 @@ class LocalOCR:
             from rapidocr_onnxruntime import RapidOCR  # noqa: PLC0415
 
             kwargs = {}
+            # rapidocr 1.2.x 는 문자 사전 경로 인자를 인식기에 넘기지 않으므로, 사전이 onnx 에 들어 있는 모델만 쓴다
             if os.environ.get("ST_OCR_REC_MODEL"):
                 kwargs["rec_model_path"] = os.environ["ST_OCR_REC_MODEL"]
-            if os.environ.get("ST_OCR_REC_KEYS"):
-                kwargs["rec_keys_path"] = os.environ["ST_OCR_REC_KEYS"]
             self._engine = RapidOCR(**kwargs)
             self.available = True
         except Exception as e:  # 모델·런타임이 없으면 OCR 없이 동작

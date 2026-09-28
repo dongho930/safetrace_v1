@@ -82,6 +82,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.agent
+      additional_contexts:
+        tools: ./tools   # 한국어 OCR 모델 받기 스크립트
     environment:
       ST_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       ST_DECISION_URL: http://decision:8100
