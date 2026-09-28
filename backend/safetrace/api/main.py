@@ -83,7 +83,7 @@ _redis = None
 if settings.redis_url:
     import redis as _redis_mod
 
-    _redis = _redis_mod.Redis.from_url(settings.redis_url, decode_responses=True)
+    _redis = _redis_mod.Redis.from_url(settings.redis_url, decode_responses=True, socket_timeout=30)  # XREADGROUP block(5초)보다 길게
 
 
 def enqueue(case_id: str, url: str):

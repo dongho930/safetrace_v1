@@ -1,4 +1,5 @@
 import json
+import secrets
 import time
 
 import pytest
@@ -40,13 +41,15 @@ def test_security_headers(client):
 
 
 def test_case_flow_sse_and_verify(client, testpages):
+    # 시험 DB 가 실행 사이에 남으므로 멱등 키를 실행마다 새로 만든다(지난 실행의 사건을 돌려받지 않게)
+    idem = "req-" + secrets.token_hex(8)
     r = client.post("/api/cases", json={"url": "http://127.0.0.1:8900/gamble/"},
-                    headers={**h(INVESTIGATOR), "Idempotency-Key": "req-1"})
+                    headers={**h(INVESTIGATOR), "Idempotency-Key": idem})
     assert r.status_code == 201
     cid = r.json()["id"]
     # 같은 멱등 키로 다시 요청하면 같은 사건
     r2 = client.post("/api/cases", json={"url": "http://127.0.0.1:8900/gamble/"},
-                     headers={**h(INVESTIGATOR), "Idempotency-Key": "req-1"})
+                     headers={**h(INVESTIGATOR), "Idempotency-Key": idem})
     assert r2.json()["id"] == cid
 
     events = []

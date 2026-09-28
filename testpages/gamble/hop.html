@@ -1,3 +1,4 @@
 <!doctype html><html lang="ko"><meta charset="utf-8"><title>잠시만 기다려 주세요</title>
 <p>비영리 안내 페이지로 이동 중입니다...</p>
-<script>setTimeout(function(){location.replace('http://localhost:8900/gamble/age.html')},300)</script></html>
+<!-- 다른 도메인으로 넘어가는 경유를 흉내 낸다: 로컬 127.0.0.1 → localhost, Docker testpages → testpages-alt(네트워크 별칭) -->
+<script>setTimeout(function(){var h=location.hostname==='127.0.0.1'?'localhost':'testpages-alt';location.replace('http://'+h+':'+location.port+'/gamble/age.html')},300)</script></html>

@@ -5,5 +5,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY safetrace ./safetrace
 RUN pip install --no-cache-dir ".[ocr]" && rm -rf /root/.cache
+# 증거 볼륨 마운트 지점: 새 named volume 이 이 소유권을 물려받는다
+RUN mkdir -p /evidence && chown pwuser:pwuser /evidence
 USER pwuser
 CMD ["python", "-m", "safetrace.agent.worker"]

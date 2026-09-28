@@ -2,7 +2,7 @@
 name = "safetrace"
 version = "0.1.0"
 description = "AI 브라우저 에이전트 기반 위협 의심 사이트 조사·공공 심의 지원 시스템"
-requires-python = ">=3.13"
+requires-python = ">=3.12"  # 에이전트 이미지(Playwright noble)가 3.12
 dependencies = [
   "fastapi==0.141.1",
   "uvicorn==0.52.4",

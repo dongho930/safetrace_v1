@@ -27,7 +27,7 @@ _CASE_ID = re.compile(r"^[a-f0-9\-]{36}$")
 def main():
     logging.basicConfig(level=logging.INFO)
     s = get_settings()
-    r = redis.Redis.from_url(s.redis_url, decode_responses=True)
+    r = redis.Redis.from_url(s.redis_url, decode_responses=True, socket_timeout=30)  # XREADGROUP block(5초)보다 길게
     try:
         r.xgroup_create(JOBS, GROUP, id="0", mkstream=True)
     except redis.ResponseError:
