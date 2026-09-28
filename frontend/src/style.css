@@ -96,7 +96,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .sunken { background: var(--sunken); border: 1px solid var(--line-soft); border-radius: var(--radius-sm); }
 
 /* 전체 틀 */
-.app { min-height: 820px; display: grid; grid-template-rows: 60px auto minmax(0, 1fr); gap: 16px; padding-bottom: 20px; }
+.app { min-height: 900px; display: grid; grid-template-rows: 60px auto minmax(0, 1fr); gap: 16px; padding-bottom: 20px; }
 .topbar {
   display: flex; align-items: center; gap: 16px; padding: 0 24px;
   border-bottom: 1px solid var(--line-soft); background: rgba(6, 10, 18, 0.75);
@@ -122,7 +122,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .glow-orange { color: var(--orange-ink); text-shadow: 0 0 18px rgba(255, 159, 67, 0.35); }
 .glow-teal { color: var(--teal-ink); text-shadow: 0 0 18px rgba(45, 212, 191, 0.35); }
 
-.cols { display: grid; grid-template-columns: 340px minmax(0, 1fr) 380px; gap: 16px; padding: 0 20px; min-height: 0; }
+.cols { display: grid; grid-template-columns: 400px minmax(0, 1fr) 440px; gap: 16px; padding: 0 20px; min-height: 0; }
 
 /* 왼쪽: 대기열 */
 .queue { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }

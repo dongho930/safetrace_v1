@@ -97,13 +97,13 @@ function Icon({ name }: { name: keyof typeof ICONS }) {
   );
 }
 
-// 1440×900 기준 디자인을 창 크기에 맞춰 통째로 비례 확대·축소한다(QHD 에서 커지고, 작은 노트북에서 작아짐).
-// 너무 작아지면(0.8 미만) 더 줄이지 않고 스크롤, 좁은 화면(900px 미만)은 확대·축소 없이 세로로 쌓는다.
-const BASE_W = 1440;
-const BASE_H = 900;
+// 1920×1080 기준 디자인을 창 크기에 맞춰 통째로 비례 확대·축소한다(QHD 에서 커지고, 작은 노트북에서 작아짐).
+// 너무 작아지면(0.7 미만) 더 줄이지 않고 스크롤, 좁은 화면(900px 미만)은 확대·축소 없이 세로로 쌓는다.
+const BASE_W = 1920;
+const BASE_H = 1080;
 function fitZoom() {
   if (window.innerWidth < 900) return 1;
-  return Math.min(Math.max(Math.min(window.innerWidth / BASE_W, window.innerHeight / BASE_H), 0.8), 2);
+  return Math.min(Math.max(Math.min(window.innerWidth / BASE_W, window.innerHeight / BASE_H), 0.7), 2);
 }
 function useFitZoom() {
   const [z, setZ] = useState(fitZoom);
