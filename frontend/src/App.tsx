@@ -780,5 +780,10 @@ function Media({ caseId, name, kind }: { caseId: string; name: string; kind: "im
     };
   }, [caseId, name]);
   if (!src) return <span className="muted small">불러오는 중…</span>;
-  return kind === "video" ? <video src={src} controls /> : <img src={src} alt={`증거 화면 ${name}`} />;
+  if (kind === "video") return <video src={src} controls />;
+  return (
+    <a className="screen-fit" href={src} target="_blank" rel="noopener noreferrer" title="원본 크기로 보기 (새 탭)">
+      <img src={src} alt={`증거 화면 ${name}`} />
+    </a>
+  );
 }

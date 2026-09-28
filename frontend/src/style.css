@@ -93,7 +93,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .sunken { background: var(--sunken); border: 1px solid var(--line-soft); border-radius: var(--radius-sm); }
 
 /* 전체 틀 */
-.app { height: 100vh; display: grid; grid-template-rows: 60px auto minmax(0, 1fr); gap: 16px; padding-bottom: 20px; }
+.app { height: 100vh; min-height: 820px; display: grid; grid-template-rows: 60px auto minmax(0, 1fr); gap: 16px; padding-bottom: 20px; }
 .topbar {
   display: flex; align-items: center; gap: 16px; padding: 0 24px;
   border-bottom: 1px solid var(--line-soft); background: rgba(6, 10, 18, 0.75);
@@ -145,7 +145,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .item-sub { font-size: 12px; color: var(--muted); }
 
 /* 가운데: 조사 */
-.live { display: grid; grid-template-rows: auto minmax(0, 1fr) minmax(160px, 38%); min-height: 0; overflow: hidden; }
+.live { display: grid; grid-template-rows: auto minmax(0, 1fr) minmax(150px, 32%); min-height: 0; overflow: hidden; }
 .live-head { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--line-soft); min-width: 0; }
 .live-title { margin: 0; font-size: 15px; font-weight: 600; white-space: nowrap; }
 .live-url { font-family: var(--mono); font-size: 12px; color: var(--faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
@@ -157,8 +157,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .screen { flex: 1; min-height: 0; border-radius: var(--radius-sm); border: 1px solid rgba(110, 170, 255, 0.14); overflow: hidden; display: flex; flex-direction: column; }
 .screen-bar { display: flex; align-items: center; gap: 8px; padding: 7px 12px; font-family: var(--mono); font-size: 11px; color: var(--faint); background: rgba(6, 10, 18, 0.9); }
 .screen-bar .rec { color: var(--red); display: inline-flex; align-items: center; gap: 6px; }
-.screen-body { flex: 1; min-height: 0; display: grid; place-items: center; background: #0a1120; }
-.screen-body img, .screen-body video { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+/* 스크린샷·녹화는 칸 크기와 상관없이 전체가 보이게 맞춘다(잘리지 않음, 남는 곳은 여백) */
+.screen-body { flex: 1; min-height: 120px; position: relative; display: grid; place-items: center; background: #0a1120; }
+.screen-fit { position: absolute; inset: 0; display: block; }
+.screen-fit img, .screen-body video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
+.screen-fit:hover img { outline: 1px solid rgba(94, 200, 255, 0.35); outline-offset: -1px; }
 .stage-tabs { display: flex; gap: 6px; }
 .log { border-top: 1px solid var(--line-soft); padding: 14px 18px; display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow-y: auto; }
 .log-head { display: flex; justify-content: space-between; align-items: center; }
