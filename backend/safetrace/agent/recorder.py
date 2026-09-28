@@ -2,8 +2,8 @@
 
 Playwright 내장 녹화는 960×600 으로 줄이고 속도 우선 실시간 인코딩이라 글자가 뭉개졌고, 창마다 영상을 따로 만들어
 새 창으로 넘어가기 전 부분이 빠졌다. 여기서는
-- JPEG 품질 90 프레임을 1280×800 그대로 받아
-- 고정 간격(기본 15fps)으로 ffmpeg 에 넘기고(화면이 바뀔 때만 프레임이 오므로 사이는 마지막 프레임을 반복)
+- JPEG 품질 80 프레임을 1280×800 그대로 받아
+- 고정 간격(기본 30fps)으로 ffmpeg 에 넘기고(화면이 바뀔 때만 프레임이 오므로 사이는 마지막 프레임을 반복)
 - 품질 우선 VP8 로 인코딩하며
 - 에이전트가 새 창으로 옮기면 같은 영상에 이어서 담는다.
 녹화는 흐름 확인용 보조 증거다. 주 증거는 무손실 PNG 스크린샷이다.
@@ -46,8 +46,9 @@ def find_ffmpeg(explicit: str = "") -> str | None:
 
 
 class ScreencastRecorder:
-    def __init__(self, ffmpeg: str, out: Path, fps: int = 15, quality: int = 90, bitrate: str = "4M"):
+    def __init__(self, ffmpeg: str, out: Path, fps: int = 30, quality: int = 80, bitrate: str = "5M", live=None):
         self.ffmpeg, self.out, self.fps, self.quality, self.bitrate = ffmpeg, out, fps, quality, bitrate
+        self.live = live  # LiveSink: 같은 프레임을 콘솔 실시간 화면으로도 보낸다(보는 사람이 있을 때만)
         self._proc: asyncio.subprocess.Process | None = None
         self._cdp: CDPSession | None = None
         self._page: Page | None = None
@@ -93,6 +94,8 @@ class ScreencastRecorder:
             return  # 옮기기 전 창의 늦은 프레임, 또는 페이지 전체 캡처 중(창 크기가 잠시 바뀜)
         self.frames_received += 1
         self._last = base64.b64decode(ev["data"])
+        if self.live:
+            self.live.on_frame(self._last)
 
     async def _detach(self):
         cdp, self._cdp = self._cdp, None
@@ -124,7 +127,11 @@ class ScreencastRecorder:
         interval = 1 / self.fps
         loop = asyncio.get_running_loop()
         next_t = loop.time()
+        n = 0
         while True:
+            n += 1
+            if self.live and n % self.fps == 0:
+                self.live.keepalive()  # 화면이 멈춰 있어도 새 시청자에게 마지막 화면을 보낸다
             if self._last is not None and self._proc and self._proc.stdin:
                 try:
                     self._proc.stdin.write(self._last)
@@ -161,4 +168,5 @@ class ScreencastRecorder:
                 log.warning("ffmpeg failed: %s", err.decode(errors="replace")[-300:])
             return None
         return {"format": "webm", "codec": "vp8", "width": WIDTH, "height": HEIGHT, "fps": self.fps,
-                "frames": self.frames_written, "source": "cdp-screencast", "jpeg_quality": self.quality}
+                "frames": self.frames_written, "screencast_frames": self.frames_received,
+                "source": "cdp-screencast", "jpeg_quality": self.quality}

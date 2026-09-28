@@ -15,6 +15,7 @@ dependencies = [
   "playwright==1.63.0",
   "argon2-cffi>=25.1",
   "pillow==12.3.0",  # 증거 스크린샷 표시용 미리보기
+  "websockets==17.1",  # uvicorn WebSocket(콘솔 실시간 화면)
 ]
 
 [project.optional-dependencies]

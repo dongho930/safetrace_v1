@@ -14,6 +14,7 @@ import socket
 import redis
 
 from ..config import get_settings
+from ..live import RedisLivePublisher
 from .runner import investigate
 
 log = logging.getLogger("safetrace.worker")
@@ -33,6 +34,7 @@ def main():
     except redis.ResponseError:
         pass
     consumer = socket.gethostname()
+    live = RedisLivePublisher(s.redis_url)  # 콘솔 실시간 화면(시청 중일 때만 발행)
     while True:
         resp = r.xreadgroup(GROUP, consumer, {JOBS: ">"}, count=1, block=5000)
         for _, msgs in resp or []:
@@ -46,7 +48,7 @@ def main():
                     r.xadd(EVENTS, {"case_id": cid, "payload": json.dumps(ev, ensure_ascii=False)}, maxlen=100000)
 
                 try:
-                    investigate(case_id, url, s, emit)
+                    investigate(case_id, url, s, emit, live=live)
                 except Exception as e:
                     log.exception("investigation failed")
                     emit({"type": "status", "status": "FAILED", "reason": f"error:{type(e).__name__}"})

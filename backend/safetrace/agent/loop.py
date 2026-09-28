@@ -115,7 +115,7 @@ class _Observation:
 
 class AgentRun:
     def __init__(self, url: str, settings: Settings, decider: Decider, writer: EvidenceWriter, emit: Emit,
-                 resolver=None):
+                 resolver=None, live=None):
         self.start_url = url
         self.s = settings
         self.decider = decider
@@ -127,6 +127,7 @@ class AgentRun:
         self.result = RunResult(status="RUNNING", finish_reason="")
         self.history: list[str] = []
         self.rec: ScreencastRecorder | None = None
+        self.live = live  # LiveSink(선택): 콘솔 실시간 화면
         self.page_summaries: list[str] = []
         self.summary_evidence: list[int] = []
         self._shot = 0
@@ -380,7 +381,8 @@ class AgentRun:
             page.on("dialog", self._on_dialog)
             rec_info = None
             if ffmpeg:
-                self.rec = ScreencastRecorder(ffmpeg, self.ev.dir / "recording.tmp.webm", fps=self.s.record_fps)
+                self.rec = ScreencastRecorder(ffmpeg, self.ev.dir / "recording.tmp.webm", fps=self.s.record_fps,
+                                              live=self.live)
                 try:
                     await self.rec.start(page)
                 except (OSError, PWError) as e:
