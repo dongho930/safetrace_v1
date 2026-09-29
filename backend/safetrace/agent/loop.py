@@ -592,6 +592,8 @@ class AgentRun:
         threat = {"threat": d.threat.value, "probability": prob, "probabilities": d.probabilities,
                   "hold": d.hold, "provider": d.provider, "model": d.model,
                   "evidence_seqs": self.summary_evidence[-20:]}
+        if d.override:
+            threat["override"] = d.override
         self._record("threat", threat)
         self.result.threat = threat
         status = self.result.status

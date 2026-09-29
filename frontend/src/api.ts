@@ -7,6 +7,8 @@ export type Threat = {
   provider: string;
   model: string;
   evidence_seqs: number[];
+  // 공식 사행사업자 도메인이라 코드가 불법 도박 판단을 정상으로 바꾼 경우
+  override?: { reason: string; operators: string[]; original: { threat: string; probability: number; provider: string } };
 };
 
 export type CaseOut = {

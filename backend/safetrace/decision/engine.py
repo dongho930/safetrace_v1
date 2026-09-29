@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from ..config import Settings
+from .official import all_official
 from .providers import JevProvider, Provider, ProviderError, RuleProvider, state_for_jev, timed
 from .schema import (
     THREAT_CRITERIA,
@@ -95,6 +96,16 @@ class Engine:
         state = req.model_dump()
         provider, res, ms = self._choose(state, THREAT_QUESTION, opts)
         prob = res.probabilities.get(res.choice, 0.0)
+        if res.choice == Threat.ILLEGAL_GAMBLING:
+            operators = all_official(req.url, req.final_url, req.domains)
+            if operators:
+                # 정부 허가 사행사업자 공식 도메인만 거쳤다: 합법 사업이므로 정상으로 판정하고 원래 판단은 남긴다
+                return ThreatDecision(
+                    choice=Threat.BENIGN.value, probabilities={Threat.BENIGN.value: 1.0}, confidence=1.0,
+                    model=res.model, provider="official_domain", latency_ms=ms, threat=Threat.BENIGN, hold=False,
+                    override={"reason": "official_betting_domain", "operators": operators,
+                              "original": {"threat": res.choice, "probability": prob, "provider": provider}},
+                )
         return ThreatDecision(
             choice=res.choice, probabilities=res.probabilities, confidence=res.confidence,
             model=res.model, provider=provider, latency_ms=ms, threat=Threat(res.choice),
