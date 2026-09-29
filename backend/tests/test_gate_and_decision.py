@@ -64,6 +64,9 @@ def test_budget():
     assert b.observe_state("k") == "loop_detected"
     b.steps = 2
     assert b.exceeded() == "step_budget"
+    assert 99 < b.remaining() <= 100
+    b.started -= 101
+    assert b.remaining() < 0
 
 
 # ── 선택지·응답 검증 ─────────────────────────────────────

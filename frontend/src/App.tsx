@@ -556,7 +556,12 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
     if (e.kind === "observe") {
       candidates = new Map(((d.candidates as { id: string; text: string }[]) ?? []).map((c) => [c.id, c.text]));
       const nf = ((d.forbidden as string[]) ?? []).length;
-      lines.push({ seq: e.seq, icon: "eye", tone: "", text: <>관찰 · {String(d.title || d.url)}</>, end: nf ? <span className="bad">금지 {nf} 제외</span> : `후보 ${((d.candidates as unknown[]) ?? []).length}` });
+      const skipped = Number(d.ocr_skipped ?? 0); // 시간이 없어 읽지 않은 이미지 버튼(선택지에서 뺌)
+      lines.push({
+        seq: e.seq, icon: "eye", tone: skipped ? "orange" : "",
+        text: <>관찰 · {String(d.title || d.url)}{skipped ? <span className="warn"> · 시간 부족으로 이미지 버튼 {skipped}개 읽지 않음</span> : null}</>,
+        end: nf ? <span className="bad">금지 {nf} 제외</span> : `후보 ${((d.candidates as unknown[]) ?? []).length}`,
+      });
     } else if (e.kind === "decision") {
       const choice = String(d.choice);
       const eid = choice.startsWith("click_") ? choice.slice(6) : "";
