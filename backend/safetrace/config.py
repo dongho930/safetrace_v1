@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     live_max_fps: int = 30  # 콘솔 실시간 화면(보는 사람이 있을 때만 전송)
     ffmpeg_path: str = ""  # 비우면 PATH·Playwright 가 받아 둔 ffmpeg 를 찾는다. 없으면 Playwright 내장 녹화
     ocr_enabled: bool = True
+    # 관찰 한 번에 이미지 버튼 OCR 에 쓰는 최대 시간(초). 이미지가 많은 첫 화면이 조사 시간을 다 쓰지 않게 한다
+    ocr_observe_max_seconds: int = 30
     # 브라우저: 봇에게 다른 화면을 보여주거나 막는 사이트(클로킹)가 많아, 전체 Chromium 의 새 헤드리스 모드와
     # 실행 중인 버전에 맞춘 일반 User-Agent 를 쓴다. 비우면 Playwright 기본(headless shell, HeadlessChrome UA).
     # 관찰·마지막 화면은 페이지 전체를 캡처한다(숨은 계좌·양식이 아래쪽에 있는 경우가 많음). 너무 긴 페이지는 이 높이에서 자른다

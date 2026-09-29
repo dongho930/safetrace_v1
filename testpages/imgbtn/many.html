@@ -1,0 +1,13 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><title>이미지 배너 많은 화면</title><link rel="stylesheet" href="/_style.css">
+<h1>기획전</h1><p>글자가 이미지인 배너가 아주 많은 화면(OCR 시간이 조사 제한을 넘기는 경우).</p>
+<div id="grid"></div>
+<script>
+const grid = document.getElementById("grid");
+for (let i = 0; i < 60; i++) {
+  const a = document.createElement("a");
+  a.href = "/imgbtn/next.html?b=" + i;
+  a.innerHTML = '<img src="/imgbtn/enter.svg" width="' + (240 - (i % 5) * 20) + '" height="70">';
+  grid.appendChild(a);
+}
+</script>
+</html>

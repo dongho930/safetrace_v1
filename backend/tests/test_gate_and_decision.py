@@ -64,6 +64,9 @@ def test_budget():
     assert b.observe_state("k") == "loop_detected"
     b.steps = 2
     assert b.exceeded() == "step_budget"
+    assert 99 < b.remaining() <= 100
+    b.started -= 101
+    assert b.remaining() < 0
 
 
 # ── 선택지·응답 검증 ─────────────────────────────────────
@@ -269,3 +272,22 @@ def test_official_domain_does_not_hide_other_threats():
                                               "probabilities": {"phishing": 0.9, "benign": 0.1}}))
     d = Engine([p], 0.45, 0.6).decide_threat(_threat_req("https://www.betman.co.kr/"))
     assert d.threat == "phishing" and d.override is None
+
+
+# ── OCR 스레드 수(컨테이너 CPU 한도) ────────────────────────
+def test_ocr_threads_follow_container_cpu_limit(tmp_path, monkeypatch):
+    from safetrace.agent.ocr import ocr_threads
+
+    monkeypatch.delenv("ST_OCR_THREADS", raising=False)
+    monkeypatch.setattr("os.cpu_count", lambda: 8)
+    monkeypatch.setattr("os.sched_getaffinity", lambda _: set(range(8)), raising=False)
+    cpu_max = tmp_path / "cpu.max"
+    cpu_max.write_text("200000 100000\n")  # compose 의 cpus: "2"
+    assert ocr_threads(cpu_max) == 2
+    cpu_max.write_text("max 100000\n")  # 한도 없음: 코어 수, 최대 4
+    assert ocr_threads(cpu_max) == 4
+    cpu_max.write_text("50000 100000\n")  # 0.5 코어여도 1
+    assert ocr_threads(cpu_max) == 1
+    assert ocr_threads(tmp_path / "none") == 4  # cgroup 없음(Windows 등)
+    monkeypatch.setenv("ST_OCR_THREADS", "3")
+    assert ocr_threads(cpu_max) == 3
