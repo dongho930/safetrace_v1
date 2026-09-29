@@ -107,6 +107,10 @@ class Budget:
             return "time_budget"
         return None
 
+    def remaining(self) -> float:
+        """남은 조사 시간(초). 음수면 이미 넘었다."""
+        return self.max_seconds - (time.monotonic() - self.started)
+
     def observe_state(self, key: str) -> str | None:
         self.seen[key] = self.seen.get(key, 0) + 1
         if self.seen[key] > self.max_same_state:

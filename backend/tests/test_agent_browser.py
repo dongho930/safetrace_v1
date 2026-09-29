@@ -113,6 +113,47 @@ def test_hidden_image_button_does_not_stall_observe(settings, testpages):
     assert "unreadable_image:a" in first["data"]["forbidden"], first["data"]  # (가) 숨은 버튼은 누르지 않는다
 
 
+def test_time_budget_holds_on_many_image_buttons(settings, testpages):
+    """이미지 버튼이 아주 많아도 조사 제한 시간을 크게 넘지 않는다: 마감이 되면 OCR 을 멈추고 그 관찰로 끝낸다.
+    읽지 못한 이미지 버튼은 선택지에 올리지 않는다."""
+    from datetime import datetime
+
+    from safetrace.agent.ocr import get_ocr
+
+    if not get_ocr().available:
+        pytest.skip("local OCR not installed")
+    settings.max_seconds = 12
+    _, final, chain, _ = run(f"{BASE}/imgbtn/many.html", settings, testpages)
+    ts = lambda kind: datetime.fromisoformat(next(r for r in chain if r["kind"] == kind)["ts"])  # noqa: E731
+    assert (ts("finish") - ts("start")).total_seconds() < settings.max_seconds + 8
+    finish = next(r for r in chain if r["kind"] == "finish")
+    assert finish["data"]["reason"] == "time_budget", finish["data"]
+    obs = [r for r in chain if r["kind"] == "observe"]
+    assert obs and obs[-1]["data"]["ocr_skipped"] > 0, obs[-1]["data"]
+    # 읽은 버튼만 선택지(화면 안 큰 배너부터 읽음), 판단·행동 없이 끝남
+    first = obs[0]["data"]
+    assert first["candidates"] and all("ENTER" in c["text"].upper() for c in first["candidates"]), first
+    assert not any(r["kind"] == "decision" and r["data"]["step"] == obs[-1]["data"]["step"] for r in chain)
+
+
+def test_ocr_capped_per_observation(settings, testpages):
+    """관찰 한 번의 OCR 상한: 첫 화면이 조사 시간을 다 쓰지 않고 다음 단계로 넘어간다."""
+    from datetime import datetime
+
+    from safetrace.agent.ocr import get_ocr
+
+    if not get_ocr().available:
+        pytest.skip("local OCR not installed")
+    settings.max_steps = 1
+    settings.ocr_observe_max_seconds = 2
+    _, _, chain, _ = run(f"{BASE}/imgbtn/many.html", settings, testpages)
+    obs = next(r for r in chain if r["kind"] == "observe")
+    nav = next(r for r in chain if r["kind"] == "navigation")
+    took = (datetime.fromisoformat(obs["ts"]) - datetime.fromisoformat(nav["ts"])).total_seconds()
+    assert took < 2 + 8, took
+    assert obs["data"]["ocr_skipped"] > 0 and obs["data"]["candidates"], obs["data"]
+
+
 def test_korean_image_button_ocr(settings, testpages):
     """한국어 OCR 모델(ST_OCR_REC_MODEL)이 있을 때: 한글 이미지 버튼을 읽고, 이미지 '결제' 버튼은 선택지에서 뺀다."""
     from safetrace.agent.ocr import get_ocr

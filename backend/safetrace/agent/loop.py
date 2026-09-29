@@ -211,7 +211,12 @@ class AgentRun:
         cands: list[tuple[int, Candidate]] = []
         forbidden: list[str] = []
         ocr = get_ocr() if self.s.ocr_enabled else None
-        for item in raw.get("items", [])[: self.s.max_candidates * 4]:
+        # OCR 은 조사 마감과 관찰당 상한 중 이른 시각까지만 한다. 화면 안·큰 요소부터 읽어 중요한 버튼을 먼저 처리한다
+        ocr_until = time.monotonic() + min(self.budget.remaining(), self.s.ocr_observe_max_seconds)
+        ocr_skipped = 0
+        items = raw.get("items", [])[: self.s.max_candidates * 4]
+        items = sorted(items, key=lambda it: (0 if it.get("inView") else 1, -int(it.get("area") or 0)))
+        for item in items:
             info = ElementInfo.from_js(item)
             eid = str(item.get("id", ""))
             reason = classify_forbidden(info)
@@ -221,6 +226,9 @@ class AgentRun:
                 continue
             text = info.text
             if not text and item.get("imgOnly") and ocr and ocr.available:
+                if time.monotonic() >= ocr_until:
+                    ocr_skipped += 1  # 시간이 없어 읽지 않은 이미지 버튼: 무엇인지 모르므로 누르지 않는다
+                    continue
                 text = await self._ocr_element(page, eid, info, ocr)
                 if text:
                     # OCR 로 얻은 글자로 다시 금지 분류(이미지 '결제' 버튼 등).
@@ -251,7 +259,7 @@ class AgentRun:
             "step": step, "url": page.url[:2048], "title": state.title,
             "candidates": [c.model_dump() for c in chosen],
             "forbidden": forbidden[:50], "has_popup": state.has_popup,
-            "text_excerpt": text[:1500], "text_sha256": text_hash,
+            "text_excerpt": text[:1500], "text_sha256": text_hash, "ocr_skipped": ocr_skipped,
         }, [shot] if shot else [])
         # 같은 화면 판정: URL·버튼 글자에 '남은 선택지'까지 넣는다. 효과 없던 행동이 빠져 선택지가 줄면 다른 상태로 보고
         # (줄어들기만 하므로 끝이 있다), 페이지를 오가는 진짜 반복은 그대로 잡는다.
@@ -466,6 +474,10 @@ class AgentRun:
             loop = self.budget.observe_state(obs.state_key)
             if loop:
                 self.result.status, self.result.finish_reason = "COMPLETED", loop
+                break
+            over = self.budget.exceeded()
+            if over:  # 관찰(OCR·전체 캡처) 중에 시간을 다 썼으면 판단·행동을 하지 않고 이 관찰로 끝낸다
+                self.result.status, self.result.finish_reason = "COMPLETED", over
                 break
 
             try:
