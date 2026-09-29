@@ -291,3 +291,26 @@ def test_ocr_threads_follow_container_cpu_limit(tmp_path, monkeypatch):
     assert ocr_threads(tmp_path / "none") == 4  # cgroup 없음(Windows 등)
     monkeypatch.setenv("ST_OCR_THREADS", "3")
     assert ocr_threads(cpu_max) == 3
+
+
+def test_ocr_cache_reuses_same_image(monkeypatch):
+    import safetrace.agent.ocr as ocrmod
+
+    calls = []
+
+    def fake_engine(img):
+        calls.append(img)
+        return [[None, "충전하기", "0.93"], [None, "흐림", "0.2"]], None
+
+    ocr = ocrmod.LocalOCR.__new__(ocrmod.LocalOCR)
+    ocr.__init__()
+    ocr._engine, ocr.available = fake_engine, True
+    monkeypatch.setattr(ocrmod, "_pad", lambda png: png)
+    assert ocr.read(b"img-a") == "충전하기"  # 점수 0.5 미만은 버림
+    assert ocr.read(b"img-a") == "충전하기" and len(calls) == 1 and ocr.cache_hits == 1
+    assert ocr.read(b"img-a", max_len=2) == "충전"
+    assert ocr.read(b"img-b") == "충전하기" and len(calls) == 2  # 다른 이미지는 새로 읽는다
+    monkeypatch.setattr(ocrmod, "_CACHE_SIZE", 1)
+    ocr.read(b"img-c")  # 가장 오래된 것부터 버림
+    ocr.read(b"img-a")
+    assert len(calls) == 4

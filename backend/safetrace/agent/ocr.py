@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import threading
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -17,12 +19,15 @@ _CGROUP_CPU_MAX = Path("/sys/fs/cgroup/cpu.max")
 
 log = logging.getLogger("safetrace.ocr")
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr")
+_CACHE_SIZE = 512  # 같은 이미지(바이트가 같은 스크린샷)는 다시 읽지 않는다. 같은 배너가 단계마다 다시 보인다
 
 
 class LocalOCR:
     def __init__(self):
         self._engine = None
         self._lock = threading.Lock()
+        self._cache: OrderedDict[str, str] = OrderedDict()
+        self.cache_hits = 0
         self.available = False
         try:
             from rapidocr_onnxruntime import RapidOCR  # noqa: PLC0415
@@ -40,22 +45,22 @@ class LocalOCR:
     def read(self, png: bytes, max_len: int = 80) -> str:
         if not self.available or len(png) > 4_000_000:
             return ""
+        key = hashlib.sha256(png).hexdigest()
         with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                self.cache_hits += 1
+                return self._cache[key][:max_len]
             try:
                 result, _ = self._engine(_pad(png))
             except Exception as e:
                 log.warning("ocr failed: %s", type(e).__name__)
-                return ""
-        if not result:
-            return ""
-        words = []
-        for r in result:
-            try:
-                if len(r) >= 3 and float(r[2]) >= 0.5:  # rapidocr 은 점수를 문자열로 줄 때가 있다
-                    words.append(str(r[1]))
-            except (TypeError, ValueError):
-                continue
-        return " ".join(words)[:max_len]
+                return ""  # 실패는 저장하지 않는다(다음에 다시 시도)
+            text = _join(result)
+            self._cache[key] = text
+            if len(self._cache) > _CACHE_SIZE:
+                self._cache.popitem(last=False)
+        return text[:max_len]
 
     async def read_async(self, png: bytes, max_len: int = 80) -> str:
         """전용 스레드 하나에서 읽는다(이벤트 루프를 막지 않음).
@@ -64,6 +69,18 @@ class LocalOCR:
         따로 잡아 OCR 이 쓴 수백 MB 를 영역마다 쥐고 있는다. 쿠팡 첫 관찰에서 Python 이 1.3GB 까지 늘어
         컨테이너 메모리 한도(2GB)로 강제 종료됐다. 어차피 잠금으로 한 번에 하나씩만 돌므로 스레드를 하나로 묶는다."""
         return await asyncio.get_running_loop().run_in_executor(_executor, self.read, png, max_len)
+
+
+def _join(result) -> str:
+    """인식 결과 중 점수 0.5 이상인 글자만 이어 붙인다."""
+    words = []
+    for r in result or []:
+        try:
+            if len(r) >= 3 and float(r[2]) >= 0.5:  # rapidocr 은 점수를 문자열로 줄 때가 있다
+                words.append(str(r[1]))
+        except (TypeError, ValueError):
+            continue
+    return " ".join(words)
 
 
 def ocr_threads(cpu_max: Path = _CGROUP_CPU_MAX) -> int:
