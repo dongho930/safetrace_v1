@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import logging
+import math
 import re
 import secrets
 import shutil
@@ -19,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from PIL import Image
 from playwright.async_api import Browser, BrowserContext, Page, Route, async_playwright
 from playwright.async_api import Error as PWError
 from playwright.async_api import TimeoutError as PWTimeout
@@ -29,7 +32,7 @@ from ..decision.schema import ActionKind, Candidate, PageState, ThreatRequest, a
 from ..evidence import EvidenceWriter
 from ..masking import mask_pii
 from .gate import Budget, ElementInfo, SafetyGate, classify_forbidden
-from .observe import CLOSE_POPUP_JS, COLLECT_JS, READ_ONE_JS
+from .observe import CLOSE_POPUP_JS, COLLECT_JS, READ_ONE_JS, RECTS_JS
 from .recorder import ScreencastRecorder, find_ffmpeg
 from .ocr import get_ocr
 
@@ -71,6 +74,8 @@ def classify_goto_error(e: Exception) -> dict:
 
 Emit = Callable[[dict], None]
 _ALLOWED_METHODS = {"GET", "HEAD"}
+# 스크롤한 뒤 두 프레임을 기다려 다시 그려진 화면을 찍는다
+_SCROLL_TO_JS = "(y) => new Promise((r) => { window.scrollTo(0, y); requestAnimationFrame(() => requestAnimationFrame(r)); })"
 _OCR_SHOT_TIMEOUT_MS = 3000  # 이미지 버튼 한 개를 찍는 최대 시간
 _PW_DEFAULT_TIMEOUT_MS = 30000  # Playwright 기본 제한(이 모듈은 따로 바꾸지 않는다)
 def browser_user_agent(setting: str, version: str) -> str:
@@ -216,6 +221,9 @@ class AgentRun:
         ocr_skipped = 0
         items = raw.get("items", [])[: self.s.max_candidates * 4]
         items = sorted(items, key=lambda it: (0 if it.get("inView") else 1, -int(it.get("area") or 0)))
+        # 1) DOM 금지 분류, 글자 없는 이미지 버튼은 캡처만 모은다(마감까지)
+        entries: list[list] = []  # [item, info, eid, 캡처 번호 | None | "skip"]
+        need: list[tuple[int, str, ElementInfo]] = []  # 캡처할 이미지 버튼 (entries 번호, eid, info)
         for item in items:
             info = ElementInfo.from_js(item)
             eid = str(item.get("id", ""))
@@ -224,12 +232,26 @@ class AgentRun:
                 label = (item.get("name") or info.text)[:30]
                 forbidden.append(f"{reason}:{info.type or info.tag}:{mask_pii(label)}")
                 continue
+            if not info.text and item.get("imgOnly") and ocr and ocr.available:
+                need.append((len(entries), eid, info))
+            entries.append([item, info, eid, None])
+        shots: list[bytes] = []
+        for (n, _, _), png in zip(need, await self._capture_many(page, need, ocr_until)):
+            if png == "skip":
+                entries[n][3] = "skip"
+            elif png is not None:
+                entries[n][3] = len(shots)
+                shots.append(png)
+        # 2) 모은 캡처를 한 번에 읽는다(모자이크)
+        read = await ocr.read_many_async(shots, deadline=ocr_until) if shots else []
+        # 3) 글자로 다시 금지 분류하고 선택지를 만든다
+        for item, info, eid, shot_no in entries:
+            if shot_no == "skip":
+                ocr_skipped += 1  # 시간이 없어 읽지 않은 이미지 버튼: 무엇인지 모르므로 누르지 않는다
+                continue
             text = info.text
-            if not text and item.get("imgOnly") and ocr and ocr.available:
-                if time.monotonic() >= ocr_until:
-                    ocr_skipped += 1  # 시간이 없어 읽지 않은 이미지 버튼: 무엇인지 모르므로 누르지 않는다
-                    continue
-                text = await self._ocr_element(page, eid, info, ocr)
+            if shot_no is not None:
+                text = read[shot_no]
                 if text:
                     # OCR 로 얻은 글자로 다시 금지 분류(이미지 '결제' 버튼 등).
                     # 클릭 직전 비교용 지문은 DOM 원본(info)을 그대로 쓴다.
@@ -267,8 +289,69 @@ class AgentRun:
         key = hashlib.sha256((page.url + "|" + "|".join(c.text for c in chosen) + "#" + opts).encode()).hexdigest()
         return _Observation(state, infos, forbidden, seq, key)
 
-    async def _ocr_element(self, page: Page, eid: str, info: ElementInfo, ocr) -> str:
-        """이미지 버튼의 글자를 읽는다. 지금 보이지 않는 요소는 찍지 않는다.
+    async def _capture_many(self, page: Page, need: list[tuple[int, str, ElementInfo]], until: float) -> list:
+        """이미지 버튼들을 캡처한다. 결과: PNG | None(보이지 않음) | "skip"(시간이 없어 찍지 않음).
+
+        요소별 캡처는 요소마다 스크롤·안정 대기를 해 장당 약 0.7초가 걸린다. 여기서는 창 높이 단위로만
+        스크롤하며, 위치를 새로 읽은 직후 창 한 장을 찍어 그 안에 온전히 들어온 버튼들을 잘라낸다.
+        창 크기는 바꾸지 않으므로(페이지 전체 캡처와 달리) 레이아웃이 달라지지 않는다. 끝나면 스크롤을 되돌리고,
+        잘라내지 못한 것(창보다 크거나 가로로 벗어남)만 요소별로 찍는다."""
+        out: list = ["far"] * len(need)
+        if not need:
+            return out
+        ids = [eid for _, eid, _ in need]
+        start_y = None
+        try:
+            for _ in range(200):  # 아래로만 스크롤하므로 끝난다. 만일을 위한 상한
+                left = [k for k in range(len(need)) if out[k] == "far"]
+                if not left or time.monotonic() >= until:
+                    break
+                got = await page.evaluate(RECTS_JS, [self.attr, [ids[k] for k in left]])
+                vw, vh, sy = int(got["vw"]), int(got["vh"]), float(got["sy"])
+                start_y = sy if start_y is None else start_y
+                inside, below = {}, []
+                for k, r in zip(left, got["rects"]):
+                    if r is None:
+                        out[k] = None  # 보이지 않음: 찍지 않는다(읽을 수 없는 이미지로)
+                        continue
+                    x0, y0 = math.floor(r[0]), math.floor(r[1])
+                    x1, y1 = math.ceil(r[0] + r[2]), math.ceil(r[1] + r[3])
+                    if x0 >= 0 and y0 >= 0 and x1 <= vw and y1 <= vh:
+                        inside[k] = (x0, y0, x1, y1)
+                    elif x0 >= 0 and x1 <= vw and y1 - y0 <= vh:
+                        below.append((y0 + sy, k))  # 스크롤하면 창에 들어온다
+                    else:
+                        out[k] = "one"  # 창보다 크거나 가로로 벗어남: 요소별로
+                if inside:
+                    shot = Image.open(io.BytesIO(await page.screenshot(timeout=8000)))
+                    fx, fy = shot.width / vw, shot.height / vh
+                    for k, (x0, y0, x1, y1) in inside.items():
+                        buf = io.BytesIO()
+                        shot.crop((round(x0 * fx), round(y0 * fy), round(x1 * fx), round(y1 * fy))).save(buf, "PNG")
+                        out[k] = buf.getvalue()
+                if not below:
+                    break
+                target = max(0.0, min(y for y, _ in below) - 8)
+                if abs(target - sy) < 1:
+                    for _, k in below:  # 스크롤해도 제자리(스크롤 끝): 요소별로
+                        out[k] = "one"
+                    break
+                await page.evaluate(_SCROLL_TO_JS, target)
+        except (PWError, PWTimeout, OSError, KeyError, TypeError, ValueError):
+            pass  # 남은 것은 아래에서 요소별로
+        finally:
+            if start_y is not None:
+                try:
+                    await page.evaluate(_SCROLL_TO_JS, start_y)
+                except PWError:
+                    pass
+        for k, (_, eid, info) in enumerate(need):
+            if out[k] in ("far", "one"):
+                out[k] = "skip" if time.monotonic() >= until else await self._capture_element(page, eid, info)
+        return out
+
+    async def _capture_element(self, page: Page, eid: str, info: ElementInfo) -> bytes | None:
+        """이미지 버튼을 캡처한다(OCR 용). 지금 보이지 않는 요소는 찍지 않는다.
 
         Playwright 요소 스크린샷은 호출에 준 timeout 을 무시하고 페이지 기본 제한(30초)까지 기다린다(1.63 확인).
         관찰 뒤 숨는 캐러셀 배너나 숨은 hover 이미지 하나에 30초씩 멈추던 원인이라, 보이는지 먼저 보고
@@ -281,13 +364,12 @@ class AgentRun:
                 if await imgs.count():
                     loc = imgs.first  # 인라인 <a> 박스는 이미지보다 작게 잘릴 수 있음
             if not await loc.is_visible():
-                return ""
-            png = await loc.screenshot(timeout=_OCR_SHOT_TIMEOUT_MS)
+                return None
+            return await loc.screenshot(timeout=_OCR_SHOT_TIMEOUT_MS)
         except (PWError, PWTimeout):
-            return ""
+            return None
         finally:
             page.set_default_timeout(_PW_DEFAULT_TIMEOUT_MS)
-        return await ocr.read_async(png)
 
     # ── 실행 ──────────────────────────────────────────
     async def _read_element(self, page: Page, eid: str) -> ElementInfo | None:

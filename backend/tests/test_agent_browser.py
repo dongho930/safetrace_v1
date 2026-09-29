@@ -113,7 +113,26 @@ def test_hidden_image_button_does_not_stall_observe(settings, testpages):
     assert "unreadable_image:a" in first["data"]["forbidden"], first["data"]  # (가) 숨은 버튼은 누르지 않는다
 
 
-def test_time_budget_holds_on_many_image_buttons(settings, testpages):
+def _slow_capture(monkeypatch, seconds=0.5):
+    """이미지 버튼 캡처를 일부러 느리게: 시험 PC 속도와 관계없이 OCR 이 조사 시간을 넘기는 상황을 만든다.
+    (창 단위 스크롤 한 번과 요소별 캡처 한 번을 각각 seconds 만큼 늦춘다)"""
+    import asyncio
+
+    from safetrace.agent import loop as loopmod
+
+    ms = int(seconds * 1000)
+    monkeypatch.setattr(loopmod, "_SCROLL_TO_JS",
+                        "(y) => new Promise((r) => { window.scrollTo(0, y); setTimeout(r, %d); })" % ms)
+    orig = loopmod.AgentRun._capture_element
+
+    async def slow(self, *a, **k):
+        await asyncio.sleep(seconds)
+        return await orig(self, *a, **k)
+
+    monkeypatch.setattr(loopmod.AgentRun, "_capture_element", slow)
+
+
+def test_time_budget_holds_on_many_image_buttons(settings, testpages, monkeypatch):
     """이미지 버튼이 아주 많아도 조사 제한 시간을 크게 넘지 않는다: 마감이 되면 OCR 을 멈추고 그 관찰로 끝낸다.
     읽지 못한 이미지 버튼은 선택지에 올리지 않는다."""
     from datetime import datetime
@@ -123,6 +142,7 @@ def test_time_budget_holds_on_many_image_buttons(settings, testpages):
     if not get_ocr().available:
         pytest.skip("local OCR not installed")
     settings.max_seconds = 12
+    _slow_capture(monkeypatch)  # 60개 × 0.5초 > 12초
     _, final, chain, _ = run(f"{BASE}/imgbtn/many.html", settings, testpages)
     ts = lambda kind: datetime.fromisoformat(next(r for r in chain if r["kind"] == kind)["ts"])  # noqa: E731
     assert (ts("finish") - ts("start")).total_seconds() < settings.max_seconds + 8
@@ -136,7 +156,26 @@ def test_time_budget_holds_on_many_image_buttons(settings, testpages):
     assert not any(r["kind"] == "decision" and r["data"]["step"] == obs[-1]["data"]["step"] for r in chain)
 
 
-def test_ocr_capped_per_observation(settings, testpages):
+def test_many_image_buttons_read_in_one_pass(settings, testpages):
+    """이미지 버튼 60개: 캡처를 모자이크로 한 번에 읽어 관찰당 상한 안에 모두 읽는다(한 장씩 읽을 때는 약 48초)."""
+    from datetime import datetime
+
+    from safetrace.agent.ocr import get_ocr
+
+    if not get_ocr().available:
+        pytest.skip("local OCR not installed")
+    settings.max_steps = 1
+    _, _, chain, _ = run(f"{BASE}/imgbtn/many.html", settings, testpages)
+    obs = next(r for r in chain if r["kind"] == "observe")
+    nav = next(r for r in chain if r["kind"] == "navigation")
+    took = (datetime.fromisoformat(obs["ts"]) - datetime.fromisoformat(nav["ts"])).total_seconds()
+    assert obs["data"]["ocr_skipped"] == 0, obs["data"]
+    texts = [c["text"].upper() for c in obs["data"]["candidates"]]
+    assert len(texts) == settings.max_candidates and all("ENTER" in t for t in texts), texts
+    assert took < settings.ocr_observe_max_seconds, took
+
+
+def test_ocr_capped_per_observation(settings, testpages, monkeypatch):
     """관찰 한 번의 OCR 상한: 첫 화면이 조사 시간을 다 쓰지 않고 다음 단계로 넘어간다."""
     from datetime import datetime
 
@@ -146,6 +185,7 @@ def test_ocr_capped_per_observation(settings, testpages):
         pytest.skip("local OCR not installed")
     settings.max_steps = 1
     settings.ocr_observe_max_seconds = 2
+    _slow_capture(monkeypatch)  # 60개 × 0.5초 > 2초
     _, _, chain, _ = run(f"{BASE}/imgbtn/many.html", settings, testpages)
     obs = next(r for r in chain if r["kind"] == "observe")
     nav = next(r for r in chain if r["kind"] == "navigation")

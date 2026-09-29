@@ -98,3 +98,23 @@ CLOSE_POPUP_JS = r"""
   return cands.map(el => el.getAttribute(attr));
 }
 """
+
+# 이미지 버튼들의 지금 위치(창 기준). 글자를 읽을 대상은 요소 안의 첫 번째 '보이는' 이미지(없으면 요소 자체).
+# 보이지 않으면 null. 창 한 장을 찍어 잘라내기 직전에 부른다.
+RECTS_JS = r"""
+([attr, ids]) => {
+  const vis = (e) => {
+    const r = e.getBoundingClientRect(), cs = getComputedStyle(e);
+    return r.width > 2 && r.height > 2 && cs.visibility !== 'hidden' && cs.display !== 'none' && parseFloat(cs.opacity) > 0.05 ? r : null;
+  };
+  const rects = ids.map((id) => {
+    const el = document.querySelector('[' + attr + '="' + id + '"]');
+    if (!el) return null;
+    let t = el;
+    if (el.tagName !== 'IMG') { const v = [...el.querySelectorAll('img')].find((i) => vis(i)); if (v) t = v; }
+    const r = vis(t);
+    return r ? [r.left, r.top, r.width, r.height] : null;
+  });
+  return { vw: window.innerWidth, vh: window.innerHeight, sy: window.scrollY, rects };
+}
+"""
