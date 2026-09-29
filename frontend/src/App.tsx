@@ -446,6 +446,8 @@ function Investigation({
   id: string;
 }) {
   const steps = events.filter((e) => e.kind === "observe").length;
+  // 통계·광고 전송 차단(페이지 이동이 아닌 blocked_request): 체인에는 남기되 위협 증거 수로 읽히지 않게 따로 센다
+  const blockedSends = events.filter((e) => e.kind === "blocked_request" && !e.data.navigation).length;
   // 실시간 화면에는 관찰·마지막 화면(페이지 전체)만 보여 준다. 클릭 직전·직후 화면은 행동 기록에 남아 있다
   const lastShot = [...events].reverse().find((e) => (e.kind === "observe" || e.kind === "finish") && e.files.some((f) => f.endsWith(".png")));
   const shot = lastShot?.files.find((f) => f.endsWith(".png"));
@@ -524,7 +526,9 @@ function Investigation({
       <section className="log" aria-label="에이전트 행동 기록">
         <div className="log-head">
           <h2 className="lbl">에이전트 행동 기록</h2>
-          <span className="mono faint small">증거 {events.length}건</span>
+          <span className="mono faint small">
+            기록 {events.length}건{blockedSends > 0 ? ` (전송 차단 ${blockedSends}건 포함)` : ""}
+          </span>
         </div>
         <EventLog events={events} />
       </section>
@@ -750,7 +754,7 @@ function Evidence({ c, id, running }: { c: CaseOut | null; id: string; running: 
             verify.ok ? (
               <>
                 <span>해시 체인 · HMAC 서명 통과</span>
-                <span className="mono faint small">증거 {verify.records}건</span>
+                <span className="mono faint small">서명 기록 {verify.records}건</span>
               </>
             ) : (
               <>
