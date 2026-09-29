@@ -22,7 +22,7 @@ TypeSafe의 의사결정 모델 **Jev**가 다음 행동과 위협 유형을 정
 | `backend/safetrace/api/` | FastAPI: 사건 접수·조회, SSE 실시간 진행, 증거 파일·무결성 검증 |
 | `frontend/` | 실시간 조사 콘솔(React 19 + TypeScript + Vite) |
 | `testpages/` | 단계형 가짜 위협 페이지 + 에이전트 공격 시나리오 10종 + 요청 기록 서버 |
-| `data/normal_sites.csv` | 정상 대조 사이트 162개 |
+| `data/normal_sites.csv` | 정상 대조 사이트 168개(정부 허가 사행사업 공식 사이트 6개 포함) |
 | `docs/` | 사전준비 점검표, STRIDE 위협 모델, OCR 안내 |
 
 ## 로컬 개발 실행 (Docker 없이)

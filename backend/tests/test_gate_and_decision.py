@@ -220,3 +220,52 @@ def test_live_sink_keeps_30fps_with_jittery_frames(monkeypatch):
     seconds = clock[0] - 100.0
     assert len(offered) / seconds >= 27, len(offered) / seconds
     sink.close()
+
+
+# ── 정부 허가 사행사업자 공식 도메인 ───────────────────────
+def _gambling_jev():
+    return JevProvider("jev_typesafe", "https://x", "k", "m", 5,
+                       transport=_jev_transport({"type": "choice", "choice": "illegal_gambling",
+                                                 "probabilities": {"illegal_gambling": 0.84, "benign": 0.16}}))
+
+
+def _threat_req(url, final_url=None, domains=None):
+    host = url.split("/")[2]
+    return ThreatRequest(url=url, final_url=final_url or url, redirect_count=0,
+                         domains=domains if domains is not None else [host], pages=["스포츠토토 베팅 배당"])
+
+
+def test_official_betting_domain_judged_benign_with_original_kept():
+    d = Engine([_gambling_jev()], 0.45, 0.6).decide_threat(_threat_req("https://www.sportstoto.co.kr/"))
+    assert d.threat == "benign" and not d.hold and d.provider == "official_domain"
+    assert d.override["operators"] == ["스포츠토토"]
+    assert d.override["original"] == {"threat": "illegal_gambling", "probability": 0.84, "provider": "jev_typesafe"}
+
+
+def test_official_domains_chain_across_operators():
+    d = Engine([_gambling_jev()], 0.45, 0.6).decide_threat(
+        _threat_req("https://www.sportstoto.co.kr/", "https://www.betman.co.kr/",
+                    ["www.sportstoto.co.kr", "www.betman.co.kr"]))
+    assert d.threat == "benign" and d.override["operators"] == ["스포츠토토", "베트맨(스포츠토토 공식 발매)"]
+
+
+@pytest.mark.parametrize("url,final_url,domains", [
+    ("https://sportstoto.co.kr.evil.example/", None, None),       # 공식 도메인을 앞에 붙인 사칭
+    ("https://fakesportstoto.co.kr/", None, None),                 # 접미사만 같은 다른 도메인
+    ("https://www.sportstoto.co.kr/", "https://toto-bet.example/", # 공식 사이트에서 다른 곳으로 넘어감
+     ["www.sportstoto.co.kr", "toto-bet.example"]),
+    ("https://toto-bet.example/", "https://www.betman.co.kr/",     # 불법 사이트가 공식 사이트로 넘김
+     ["toto-bet.example", "www.betman.co.kr"]),
+])
+def test_non_official_domains_stay_illegal_gambling(url, final_url, domains):
+    d = Engine([_gambling_jev()], 0.45, 0.6).decide_threat(_threat_req(url, final_url, domains))
+    assert d.threat == "illegal_gambling" and d.override is None
+
+
+def test_official_domain_does_not_hide_other_threats():
+    # 공식 도메인이라도 피싱 등 다른 판단은 그대로 둔다(변조된 공식 사이트 대비)
+    p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
+                    transport=_jev_transport({"type": "choice", "choice": "phishing",
+                                              "probabilities": {"phishing": 0.9, "benign": 0.1}}))
+    d = Engine([p], 0.45, 0.6).decide_threat(_threat_req("https://www.betman.co.kr/"))
+    assert d.threat == "phishing" and d.override is None

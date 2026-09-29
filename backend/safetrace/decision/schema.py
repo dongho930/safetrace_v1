@@ -39,9 +39,16 @@ THREAT_LABELS_KO = {
 THREAT_CRITERIA = {
     Threat.PHISHING: "기관·기업을 사칭해 로그인 정보, 인증번호, 개인정보 입력을 유도한다",
     Threat.SCAM: "투자·환급·지원금·물품 거래 등을 미끼로 입금이나 송금을 요구한다",
-    Threat.ILLEGAL_GAMBLING: "카지노, 스포츠 베팅, 충전·환전, 배당 등 도박 서비스를 제공한다",
+    Threat.ILLEGAL_GAMBLING: (
+        "정부 허가를 받지 않은 카지노·스포츠 베팅 등 도박 서비스를 제공한다"
+        "(충전·환전, 첫충·콤프 같은 보너스, 가입코드, 텔레그램·카카오톡 문의 등)"
+    ),
     Threat.MALWARE: "앱 설치 파일(apk 등)이나 실행 파일 다운로드를 유도한다",
-    Threat.BENIGN: "위 유형의 특징이 없는 일반적인 웹사이트다",
+    Threat.BENIGN: (
+        "위 유형의 특징이 없는 일반적인 웹사이트다. "
+        "정부 허가 사행사업자(스포츠토토·베트맨·동행복권·경마·경륜·경정)의 공식 도메인 사이트도 여기에 해당하며, "
+        "공식 명칭만 내세우고 도메인이 다르면 해당하지 않는다"
+    ),
     Threat.UNKNOWN: "화면 내용이 부족하거나 접속 불가로 판단할 수 없다",
 }
 
@@ -103,6 +110,8 @@ class ThreatRequest(BaseModel):
 class ThreatDecision(Decision):
     threat: Threat
     hold: bool  # 확신 부족이면 True → REVIEW_REQUIRED
+    # 코드 규칙이 모델 판단을 바꿨을 때: {"reason", "operators", "original": {"threat", "probability", "provider"}}
+    override: dict | None = None
 
 
 def _exhausted_actions(history: list[str]) -> set[str]:

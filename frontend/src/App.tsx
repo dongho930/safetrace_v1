@@ -583,7 +583,7 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
     } else if (e.kind === "escalation") {
       lines.push({ seq: e.seq, icon: "alert", tone: "orange", text: <span className="warn">담당자 검토로 전환 · Safe Browsing {((d.threat_types as string[]) ?? []).join(", ")}</span> });
     } else if (e.kind === "threat") {
-      lines.push({ seq: e.seq, icon: "flag", tone: d.threat === "benign" ? "teal" : "orange", text: <>위협 판단 · {THREAT_LABEL[String(d.threat)] ?? String(d.threat)}</>, end: pct(Number(d.probability)) });
+      lines.push({ seq: e.seq, icon: "flag", tone: d.threat === "benign" ? "teal" : "orange", text: <>위협 판단 · {THREAT_LABEL[String(d.threat)] ?? String(d.threat)}{d.override ? " (공식 사행사업자 도메인)" : ""}</>, end: pct(Number(d.probability)) });
     } else if (e.kind === "safebrowsing") {
       lines.push({ seq: e.seq, icon: "shieldCheck", tone: d.status === "match" ? "red" : "", text: <>Safe Browsing · {String(d.status)}</> });
     } else if (e.kind === "finish") {
@@ -698,7 +698,14 @@ function Opinion({ c, running }: { c: CaseOut | null; running: boolean }) {
             {THREAT_LABEL[t.threat] ?? t.threat}
             {risky ? " 의심" : ""}
           </span>
-          <span className="muted small">{t.hold ? "확신 부족 → 담당자 검토" : "판단 확신 기준 충족"}</span>
+          <span className="muted small">
+            {t.override ? `공식 사행사업자 도메인 · ${t.override.operators.join(", ")}` : t.hold ? "확신 부족 → 담당자 검토" : "판단 확신 기준 충족"}
+          </span>
+          {t.override && (
+            <span className="faint small">
+              모델 원래 판단: {THREAT_LABEL[t.override.original.threat] ?? t.override.original.threat} {pct(t.override.original.probability)}
+            </span>
+          )}
           <span className="mono faint small">
             {t.model} · 근거 {t.evidence_seqs.slice(-4).map((s) => `EV-${s}`).join(" ")}
           </span>
