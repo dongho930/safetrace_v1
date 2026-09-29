@@ -216,6 +216,9 @@ class AgentRun:
         ocr_skipped = 0
         items = raw.get("items", [])[: self.s.max_candidates * 4]
         items = sorted(items, key=lambda it: (0 if it.get("inView") else 1, -int(it.get("area") or 0)))
+        # 1) DOM 금지 분류, 글자 없는 이미지 버튼은 캡처만 모은다(마감까지)
+        entries: list[tuple[dict, ElementInfo, str, int | None]] = []  # (item, info, eid, 캡처 번호)
+        shots: list[bytes] = []
         for item in items:
             info = ElementInfo.from_js(item)
             eid = str(item.get("id", ""))
@@ -224,12 +227,23 @@ class AgentRun:
                 label = (item.get("name") or info.text)[:30]
                 forbidden.append(f"{reason}:{info.type or info.tag}:{mask_pii(label)}")
                 continue
-            text = info.text
-            if not text and item.get("imgOnly") and ocr and ocr.available:
+            shot_no = None
+            if not info.text and item.get("imgOnly") and ocr and ocr.available:
                 if time.monotonic() >= ocr_until:
                     ocr_skipped += 1  # 시간이 없어 읽지 않은 이미지 버튼: 무엇인지 모르므로 누르지 않는다
                     continue
-                text = await self._ocr_element(page, eid, info, ocr)
+                png = await self._capture_element(page, eid, info)
+                if png is not None:
+                    shot_no = len(shots)
+                    shots.append(png)
+            entries.append((item, info, eid, shot_no))
+        # 2) 모은 캡처를 한 번에 읽는다(모자이크)
+        read = await ocr.read_many_async(shots, deadline=ocr_until) if shots else []
+        # 3) 글자로 다시 금지 분류하고 선택지를 만든다
+        for item, info, eid, shot_no in entries:
+            text = info.text
+            if shot_no is not None:
+                text = read[shot_no]
                 if text:
                     # OCR 로 얻은 글자로 다시 금지 분류(이미지 '결제' 버튼 등).
                     # 클릭 직전 비교용 지문은 DOM 원본(info)을 그대로 쓴다.
@@ -267,8 +281,8 @@ class AgentRun:
         key = hashlib.sha256((page.url + "|" + "|".join(c.text for c in chosen) + "#" + opts).encode()).hexdigest()
         return _Observation(state, infos, forbidden, seq, key)
 
-    async def _ocr_element(self, page: Page, eid: str, info: ElementInfo, ocr) -> str:
-        """이미지 버튼의 글자를 읽는다. 지금 보이지 않는 요소는 찍지 않는다.
+    async def _capture_element(self, page: Page, eid: str, info: ElementInfo) -> bytes | None:
+        """이미지 버튼을 캡처한다(OCR 용). 지금 보이지 않는 요소는 찍지 않는다.
 
         Playwright 요소 스크린샷은 호출에 준 timeout 을 무시하고 페이지 기본 제한(30초)까지 기다린다(1.63 확인).
         관찰 뒤 숨는 캐러셀 배너나 숨은 hover 이미지 하나에 30초씩 멈추던 원인이라, 보이는지 먼저 보고
@@ -281,13 +295,12 @@ class AgentRun:
                 if await imgs.count():
                     loc = imgs.first  # 인라인 <a> 박스는 이미지보다 작게 잘릴 수 있음
             if not await loc.is_visible():
-                return ""
-            png = await loc.screenshot(timeout=_OCR_SHOT_TIMEOUT_MS)
+                return None
+            return await loc.screenshot(timeout=_OCR_SHOT_TIMEOUT_MS)
         except (PWError, PWTimeout):
-            return ""
+            return None
         finally:
             page.set_default_timeout(_PW_DEFAULT_TIMEOUT_MS)
-        return await ocr.read_async(png)
 
     # ── 실행 ──────────────────────────────────────────
     async def _read_element(self, page: Page, eid: str) -> ElementInfo | None:

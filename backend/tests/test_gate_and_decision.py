@@ -314,3 +314,45 @@ def test_ocr_cache_reuses_same_image(monkeypatch):
     ocr.read(b"img-c")  # 가장 오래된 것부터 버림
     ocr.read(b"img-a")
     assert len(calls) == 4
+
+
+def test_ocr_mosaic_assigns_text_to_its_own_image(monkeypatch):
+    """모자이크로 한 번에 읽고, 글자 중심이 들어간 이미지에만 배정한다. 못 읽은 것만 한 장씩 다시 읽는다."""
+    import io
+
+    from PIL import Image
+
+    import safetrace.agent.ocr as ocrmod
+
+    def png(w, h, color):
+        buf = io.BytesIO()
+        Image.new("RGB", (w, h), color).save(buf, "PNG")
+        return buf.getvalue()
+
+    a, b, c = png(300, 80, "red"), png(200, 60, "blue"), png(120, 40, "green")
+    placed = {}
+
+    def batch_engine(canvas):
+        # 캔버스에서 각 색 상자의 위치를 찾아, 빨강·파랑 상자 안에만 글자를 돌려준다(초록은 못 읽은 것으로)
+        out = []
+        for name, rgb in (("red", (0, 0, 255)), ("blue", (255, 0, 0))):  # cv2 는 BGR
+            ys, xs = ((canvas == rgb).all(axis=2)).nonzero()
+            placed[name] = (xs.min(), ys.min())
+            cx, cy = (xs.min() + xs.max()) / 2, (ys.min() + ys.max()) / 2
+            poly = [[cx - 5, cy - 5], [cx + 5, cy - 5], [cx + 5, cy + 5], [cx - 5, cy + 5]]
+            out.append([poly, {"red": "충전하기", "blue": "다음"}[name], "0.9"])
+        return out, None
+
+    single = []
+    ocr = ocrmod.LocalOCR.__new__(ocrmod.LocalOCR)
+    ocr.__init__()
+    ocr.available = True
+    ocr._batch_engine = batch_engine
+    ocr._engine = lambda img: (single.append(1) or [[None, "결제", "0.95"]], None)
+    monkeypatch.setattr(ocrmod, "_pad", lambda p: p)
+    assert ocr.read_many([a, b, c]) == ["충전하기", "다음", "결제"]  # 초록은 한 장씩 다시 읽음
+    assert len(single) == 1 and placed["red"] != placed["blue"]
+    assert ocr.read_many([b, a]) == ["다음", "충전하기"] and ocr.cache_hits == 2  # 캐시
+    # 마감이 지났으면 한 장씩 다시 읽지 않는다
+    d = png(90, 30, "yellow")
+    assert ocr.read_many([d], deadline=0.0) == [""] and len(single) == 1
