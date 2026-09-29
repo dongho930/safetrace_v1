@@ -6,11 +6,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+_CGROUP_CPU_MAX = Path("/sys/fs/cgroup/cpu.max")
 
 log = logging.getLogger("safetrace.ocr")
+_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr")
 
 
 class LocalOCR:
@@ -25,6 +31,7 @@ class LocalOCR:
             # rapidocr 1.2.x 는 문자 사전 경로 인자를 인식기에 넘기지 않으므로, 사전이 onnx 에 들어 있는 모델만 쓴다
             if os.environ.get("ST_OCR_REC_MODEL"):
                 kwargs["rec_model_path"] = os.environ["ST_OCR_REC_MODEL"]
+            _limit_onnx_threads(ocr_threads())
             self._engine = RapidOCR(**kwargs)
             self.available = True
         except Exception as e:  # 모델·런타임이 없으면 OCR 없이 동작
@@ -49,6 +56,53 @@ class LocalOCR:
             except (TypeError, ValueError):
                 continue
         return " ".join(words)[:max_len]
+
+    async def read_async(self, png: bytes, max_len: int = 80) -> str:
+        """전용 스레드 하나에서 읽는다(이벤트 루프를 막지 않음).
+
+        asyncio.to_thread 는 부를 때마다 다른 작업 스레드(최대 12개)를 쓰고, glibc 는 스레드마다 메모리 영역을
+        따로 잡아 OCR 이 쓴 수백 MB 를 영역마다 쥐고 있는다. 쿠팡 첫 관찰에서 Python 이 1.3GB 까지 늘어
+        컨테이너 메모리 한도(2GB)로 강제 종료됐다. 어차피 잠금으로 한 번에 하나씩만 돌므로 스레드를 하나로 묶는다."""
+        return await asyncio.get_running_loop().run_in_executor(_executor, self.read, png, max_len)
+
+
+def ocr_threads(cpu_max: Path = _CGROUP_CPU_MAX) -> int:
+    """OCR 추론 스레드 수: ST_OCR_THREADS, 없으면 쓸 수 있는 CPU(컨테이너 CPU 한도 반영, 최대 4).
+
+    onnxruntime 은 컨테이너 CPU 한도(cgroup)를 보지 않고 호스트 코어 수만큼 스레드를 띄운다. 에이전트 컨테이너
+    (cpus 2, 호스트 8코어)에서 그 스레드들이 한도 안에서 다투어 이미지 한 장에 2초 가까이 걸렸다(2개면 0.7초)."""
+    if os.environ.get("ST_OCR_THREADS", "").isdigit() and int(os.environ["ST_OCR_THREADS"]) > 0:
+        return int(os.environ["ST_OCR_THREADS"])
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except AttributeError:  # Windows·macOS
+        cpus = os.cpu_count() or 1
+    try:
+        quota, period = cpu_max.read_text().split()[:2]  # cgroup v2: "200000 100000" | "max 100000"
+        if quota != "max":
+            cpus = min(cpus, max(1, int(quota) // int(period)))
+    except (OSError, ValueError):
+        pass
+    return max(1, min(cpus, 4))
+
+
+def _limit_onnx_threads(n: int):
+    """rapidocr 1.2.3 은 스레드 설정을 받지 않으므로, 세션을 만들 때 쓰는 SessionOptions 에 스레드 수를 넣는다."""
+    try:
+        import rapidocr_onnxruntime.utils as rapid_utils  # noqa: PLC0415
+        from onnxruntime import SessionOptions  # noqa: PLC0415
+    except ImportError:
+        return
+
+    class _Limited(SessionOptions):
+        def __init__(self):
+            super().__init__()
+            self.intra_op_num_threads = n
+            self.inter_op_num_threads = 1
+
+    if hasattr(rapid_utils, "SessionOptions"):
+        rapid_utils.SessionOptions = _Limited
+        log.info("ocr threads: %d", n)
 
 
 def _pad(png: bytes):

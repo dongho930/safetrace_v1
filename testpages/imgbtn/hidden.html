@@ -1,0 +1,15 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><title>숨는 이미지 버튼</title><link rel="stylesheet" href="/_style.css">
+<h1>이벤트 배너</h1><p>관찰 직후 숨는 배너(캐러셀 넘김)와, 숨은 이미지가 먼저 오는 버튼.</p>
+<!-- (가) 에이전트가 요소에 ID 속성을 붙이자마자 숨는다: 관찰 뒤 OCR 전에 캐러셀이 넘어간 상황 -->
+<a id="slide" href="/imgbtn/next.html"><img src="/imgbtn/enter.svg" width="240" height="70"></a>
+<!-- (나) 링크는 보이지만 첫 이미지는 숨은 hover 이미지, 글자는 두 번째 이미지에 있다 -->
+<p><a href="/imgbtn/next.html"><img src="/imgbtn/enter.svg" style="display:none"><img src="/imgbtn/enter.svg" width="240" height="70"></a></p>
+<script>
+const slide = document.getElementById("slide");
+new MutationObserver((ms) => {
+  if (ms.some((m) => m.attributeName && m.attributeName.startsWith("data-st-") && slide.hasAttribute(m.attributeName))) {
+    slide.style.display = "none";
+  }
+}).observe(slide, { attributes: true });
+</script>
+</html>

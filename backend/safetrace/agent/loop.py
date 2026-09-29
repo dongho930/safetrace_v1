@@ -71,6 +71,8 @@ def classify_goto_error(e: Exception) -> dict:
 
 Emit = Callable[[dict], None]
 _ALLOWED_METHODS = {"GET", "HEAD"}
+_OCR_SHOT_TIMEOUT_MS = 3000  # 이미지 버튼 한 개를 찍는 최대 시간
+_PW_DEFAULT_TIMEOUT_MS = 30000  # Playwright 기본 제한(이 모듈은 따로 바꾸지 않는다)
 def browser_user_agent(setting: str, version: str) -> str:
     """'auto' 면 실행 중인 Chromium 주 버전에 맞춘 일반 Chrome User-Agent(운영체제 표기는 실제 OS 따름)."""
     if setting != "auto":
@@ -219,14 +221,7 @@ class AgentRun:
                 continue
             text = info.text
             if not text and item.get("imgOnly") and ocr and ocr.available:
-                try:
-                    loc = page.locator(f"[{self.attr}='{eid}']").first
-                    if info.tag != "img" and await loc.locator("img").count():
-                        loc = loc.locator("img").first  # 인라인 <a> 박스는 이미지보다 작게 잘릴 수 있음
-                    png = await loc.screenshot(timeout=3000)
-                    text = await asyncio.to_thread(ocr.read, png)
-                except (PWError, PWTimeout):
-                    text = ""
+                text = await self._ocr_element(page, eid, info, ocr)
                 if text:
                     # OCR 로 얻은 글자로 다시 금지 분류(이미지 '결제' 버튼 등).
                     # 클릭 직전 비교용 지문은 DOM 원본(info)을 그대로 쓴다.
@@ -263,6 +258,28 @@ class AgentRun:
         opts = "|".join(sorted(action_options(state)))
         key = hashlib.sha256((page.url + "|" + "|".join(c.text for c in chosen) + "#" + opts).encode()).hexdigest()
         return _Observation(state, infos, forbidden, seq, key)
+
+    async def _ocr_element(self, page: Page, eid: str, info: ElementInfo, ocr) -> str:
+        """이미지 버튼의 글자를 읽는다. 지금 보이지 않는 요소는 찍지 않는다.
+
+        Playwright 요소 스크린샷은 호출에 준 timeout 을 무시하고 페이지 기본 제한(30초)까지 기다린다(1.63 확인).
+        관찰 뒤 숨는 캐러셀 배너나 숨은 hover 이미지 하나에 30초씩 멈추던 원인이라, 보이는지 먼저 보고
+        그 사이에 숨는 경우에 대비해 찍는 동안만 기본 제한을 줄인다."""
+        loc = page.locator(f"[{self.attr}='{eid}']").first
+        page.set_default_timeout(_OCR_SHOT_TIMEOUT_MS)
+        try:
+            if info.tag != "img":
+                imgs = loc.locator("img").filter(visible=True)
+                if await imgs.count():
+                    loc = imgs.first  # 인라인 <a> 박스는 이미지보다 작게 잘릴 수 있음
+            if not await loc.is_visible():
+                return ""
+            png = await loc.screenshot(timeout=_OCR_SHOT_TIMEOUT_MS)
+        except (PWError, PWTimeout):
+            return ""
+        finally:
+            page.set_default_timeout(_PW_DEFAULT_TIMEOUT_MS)
+        return await ocr.read_async(png)
 
     # ── 실행 ──────────────────────────────────────────
     async def _read_element(self, page: Page, eid: str) -> ElementInfo | None:

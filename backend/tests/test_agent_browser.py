@@ -95,6 +95,24 @@ def test_image_button_ocr(settings, testpages):
     assert any(r["kind"] == "observe" and r["data"]["url"].endswith("next.html") for r in chain)
 
 
+def test_hidden_image_button_does_not_stall_observe(settings, testpages):
+    """관찰 뒤 숨는 이미지 버튼(캐러셀), 숨은 이미지가 먼저 오는 버튼: 요소마다 30초씩 멈추지 않는다."""
+    from datetime import datetime
+
+    from safetrace.agent.ocr import get_ocr
+
+    if not get_ocr().available:
+        pytest.skip("local OCR not installed")
+    settings.max_steps = 1
+    _, _, chain, _ = run(f"{BASE}/imgbtn/hidden.html", settings, testpages)
+    ts = {r["kind"]: datetime.fromisoformat(r["ts"]) for r in reversed(chain)}
+    first = next(r for r in chain if r["kind"] == "observe")
+    assert (ts["observe"] - ts["navigation"]).total_seconds() < 15, "관찰이 숨은 요소 스크린샷에서 멈췄다"
+    texts = [c["text"].upper() for c in first["data"]["candidates"]]
+    assert any("ENTER" in t for t in texts), first["data"]  # (나) 보이는 두 번째 이미지를 읽는다
+    assert "unreadable_image:a" in first["data"]["forbidden"], first["data"]  # (가) 숨은 버튼은 누르지 않는다
+
+
 def test_korean_image_button_ocr(settings, testpages):
     """한국어 OCR 모델(ST_OCR_REC_MODEL)이 있을 때: 한글 이미지 버튼을 읽고, 이미지 '결제' 버튼은 선택지에서 뺀다."""
     from safetrace.agent.ocr import get_ocr
