@@ -349,11 +349,22 @@ def test_recording_is_full_size_and_follows_new_window(settings, testpages):
     assert any(r["kind"] == "new_window" for r in chain)
     path = settings.evidence_dir / cid / "files" / "recording.webm"
     assert path.stat().st_size > 10_000
-    # 프레임 수 ≈ 조사 시간 × fps (새 창 이후에도 계속 기록됨)
+    # 가변 프레임률: 바뀐 화면 + 1초 heartbeat + 끝 프레임만 담고, 시각은 브라우저 캡처 시각을 쓴다
+    data = rec["data"]
+    assert data["fps_mode"] == "vfr"
+    assert data["frames"] == data["screencast_frames"] + data["heartbeat_frames"] + 1, data
+    assert data["cdp_timestamps"] == data["screencast_frames"] > 0, data
     from datetime import datetime
 
+    from .test_recorder import probe
+
+    duration, times = probe(path)
+    assert len(times) == data["frames"] and times == sorted(times)
+    assert duration == pytest.approx(data["duration_s"], abs=0.01)
+    # 영상 길이 = 녹화 시간(조사 시간과 어긋나지 않음). 녹화는 브라우저를 띄운 뒤 시작해 finish 뒤에 끝난다
     ts = lambda kind: datetime.fromisoformat(next(r for r in chain if r["kind"] == kind)["ts"])  # noqa: E731
-    seconds = (ts("finish") - ts("start")).total_seconds()
-    assert rec["data"]["frames"] >= seconds * settings.record_fps * 0.6, (rec["data"], seconds)
+    investigated = (ts("finish") - ts("start")).total_seconds()
+    until_saved = (ts("recording") - ts("start")).total_seconds()
+    assert investigated - 5 <= duration <= until_saved, (data, investigated, until_saved)
     verify = verify_case(settings.evidence_dir, cid, make_signer(settings), None)
     assert verify.ok, verify.errors
