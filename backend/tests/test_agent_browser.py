@@ -114,11 +114,15 @@ def test_hidden_image_button_does_not_stall_observe(settings, testpages):
 
 
 def _slow_capture(monkeypatch, seconds=0.5):
-    """이미지 버튼 캡처를 일부러 느리게: 시험 PC 속도와 관계없이 OCR 이 조사 시간을 넘기는 상황을 만든다."""
+    """이미지 버튼 캡처를 일부러 느리게: 시험 PC 속도와 관계없이 OCR 이 조사 시간을 넘기는 상황을 만든다.
+    (창 단위 스크롤 한 번과 요소별 캡처 한 번을 각각 seconds 만큼 늦춘다)"""
     import asyncio
 
     from safetrace.agent import loop as loopmod
 
+    ms = int(seconds * 1000)
+    monkeypatch.setattr(loopmod, "_SCROLL_TO_JS",
+                        "(y) => new Promise((r) => { window.scrollTo(0, y); setTimeout(r, %d); })" % ms)
     orig = loopmod.AgentRun._capture_element
 
     async def slow(self, *a, **k):
