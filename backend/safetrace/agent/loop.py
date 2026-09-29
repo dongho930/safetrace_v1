@@ -381,7 +381,7 @@ class AgentRun:
             page.on("dialog", self._on_dialog)
             rec_info = None
             if ffmpeg:
-                self.rec = ScreencastRecorder(ffmpeg, self.ev.dir / "recording.tmp.webm", fps=self.s.record_fps,
+                self.rec = ScreencastRecorder(ffmpeg, self.ev.dir / "recording.tmp.webm",
                                               live=self.live)
                 try:
                     await self.rec.start(page)
