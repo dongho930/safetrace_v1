@@ -575,12 +575,21 @@ class AgentRun:
 
         tracked = [page]
         page.on("framenavigated", track)
+        # 첫 접속은 두 단계로 본다. 서버 응답(헤더)이 제한 안에 오지 않을 때만 접속 불가다.
+        # 응답은 왔는데 화면 구성이 늦는 사이트(무거운 첫 화면, 부하 중인 조사 서버)는 기다린 만큼 보고 조사를 이어 간다
         try:
-            resp = await page.goto(self.start_url, timeout=self.s.nav_timeout_ms, wait_until="domcontentloaded")
+            resp = await page.goto(self.start_url, timeout=self.s.nav_timeout_ms, wait_until="commit")
         except (PWError, PWTimeout) as e:
             self._record("unreachable", classify_goto_error(e))
             self.result.status, self.result.finish_reason = "UNREACHABLE", "goto_failed"
             return
+        t0 = time.monotonic()
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=self.s.nav_timeout_ms)
+            dom_ready = True
+        except (PWError, PWTimeout):
+            dom_ready = False
+        dom_ms = int((time.monotonic() - t0) * 1000)
         if resp is not None:
             chain = []
             r = resp.request
@@ -588,7 +597,8 @@ class AgentRun:
                 r = r.redirected_from
                 chain.append(r.url[:2048])
             self._record("navigation", {"status": resp.status, "redirects": list(reversed(chain)),
-                                        "final_url": page.url[:2048]})
+                                        "final_url": page.url[:2048],
+                                        "dom_ready": dom_ready, "dom_wait_ms": dom_ms})
         await self._settle(page)
 
         step = 0
