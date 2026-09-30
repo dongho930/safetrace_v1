@@ -1,0 +1,39 @@
+group,expected,url,note
+testpage,phishing,http://testpages:8900/phish/,택배 사칭 → 개인정보 입력
+testpage,phishing,http://testpages:8900/smish/,긴 스미싱(도메인 경유·새 창·앱 설치·카드 입력)
+testpage,malicious,http://testpages:8900/smish/notice.html,스미싱 중간(재배송 안내 → 앱 설치)
+testpage,scam,http://testpages:8900/scam/,투자 사기 → 입금 계좌
+testpage,illegal_gambling,http://testpages:8900/gamble/,유심 교체 사칭 → 불법 도박 충전
+testpage,scam,http://testpages:8900/imgbtn/,이미지 버튼(OCR) → 참여비 입금
+testpage,scam,http://testpages:8900/imgbtn/ko.html,한국어 이미지 버튼(OCR) → 참여비 입금
+testpage,phishing,http://testpages:8900/phish/short.html,단축 URL → 사라진 네이버페이 사칭(서버 리다이렉트)
+testpage,phishing,http://testpages:8900/phish/short-js.html,단축 URL → 사라진 네이버페이 사칭(스크립트 이동)
+testpage,phishing,http://testpages:8900/phish/short-link.html,단축 URL → 사라진 네이버페이 사칭(막힌 링크)
+testpage,benign,http://testpages:8900/benign/,정상 대조 페이지
+normal,benign,https://www.gov.kr/,정부24
+normal,benign,https://www.police.go.kr/,경찰청
+normal,benign,https://www.hometax.go.kr/,국세청 홈택스
+normal,benign,https://www.kbstar.com/,KB국민은행
+normal,benign,https://www.tossbank.com/,토스뱅크
+normal,benign,https://www.shinhancard.com/,신한카드
+normal,benign,https://www.11st.co.kr/,11번가
+normal,benign,https://www.cjlogistics.com/,CJ대한통운
+normal,benign,https://service.epost.go.kr/,우체국택배
+normal,benign,https://www.kt.com/,KT
+normal,benign,https://www.naver.com/,네이버
+normal,benign,https://www.yna.co.kr/,연합뉴스
+normal,benign,https://www.ebs.co.kr/,EBS
+normal,benign,https://www.cgv.co.kr/,CGV
+normal,benign,https://www.baemin.com/,배달의민족
+normal,benign,https://www.sportstoto.co.kr/,스포츠토토(정부 허가 사행사업자 공식 도메인)
+kisa,malicious,http://go9.co/UCi,KISA 2024-12. 단축 URL 경유 → ren.liufan.site(소멸)
+kisa,malicious,http://go9.co/XD5,KISA 2024-12. 단축 URL 경유 → name.n-paybody.shop(네이버페이 사칭·소멸)
+kisa,malicious,http://go9.co/Xyq,KISA 2024-12. 단축 URL 경유 → name.n-payaeur.shop(네이버페이 사칭·소멸)
+kisa,malicious,https://lrl.kr/HlEG,KISA 2024-12. 단축 URL 경유 → name.n-payost.shop(네이버페이 사칭·소멸)
+kisa,malicious,https://lrl.kr/C6dk,KISA 2024-12. 단축 URL 경유 → name.n-payviv.shop(네이버페이 사칭·소멸)
+kisa,malicious,http://goo.su/PUPst,KISA 2024-12. 단축 URL 경유 → ven.nibyol.fun(소멸)
+kisa,malicious,https://goo.su/E7i5QDl,KISA 2024-12. 단축 URL 경유 → g.kbank.mywire.org(케이뱅크 사칭·소멸)
+kisa,illegal_gambling,http://tel-telegram.com,KISA 2024-12. 텔레그램 사칭 도메인 → 중국 스포츠 베팅(米兰体育)
+kisa,illegal_gambling,http://kc-telegram.com,KISA 2024-12. 텔레그램 사칭 도메인 → 중국 도박(亚新)
+kisa,malicious,http://mi-telegram.com,KISA 2024-12. 텔레그램 사칭 도메인
+kisa,malicious,https://iii.im/ZujV,KISA 2024-12. 단축 URL 서비스가 위험 URL 경고 페이지를 띄움

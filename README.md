@@ -58,8 +58,21 @@ docker compose --profile demo up -d testpages   # 시연용 시험 페이지(선
 ## 시험
 
 ```bash
-cd backend && ../.venv/Scripts/python -m pytest -q          # 106개 (단위 + 실제 Chromium 통합)
+cd backend && ../.venv/Scripts/python -m pytest -q          # 171개 (단위 + 실제 Chromium 통합)
 ```
+
+## 품질 평가 (Docker 스택에서, 실제 Jev 판단)
+
+정답을 붙인 URL 목록(`data/eval_set.csv`: 시험 페이지·정상 사이트·KISA 피싱 URL)을 여러 번 조사해
+정답률·놓침·오탐·판단 불가·반복 일관성·시간을 잰다. 모델 판단은 매번 조금씩 달라서 개선 전후는 이 도구로 비교한다.
+
+```bash
+docker compose --profile demo up -d
+python tools/eval_agent.py run --repeat 3 --label 메모        # 결과: var/eval/<시각>_<메모>.jsonl · .md
+python tools/eval_agent.py compare var/eval/전.jsonl var/eval/후.jsonl
+```
+
+KISA 주소는 시간이 지나면 사라진다(접속 불가는 채점에서 빼고 따로 센다). 늘어나면 목록을 갱신한다.
 
 ## Jev 실연결 점검 (키 발급 후)
 
