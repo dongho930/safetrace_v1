@@ -234,6 +234,67 @@ def test_internal_auto_redirect_blocked(settings, testpages):
     assert any("169.254.169.254" in b["url"] and b["reason"].startswith("ssrf") for b in blocked)
 
 
+@pytest.fixture
+def egress_proxy():
+    """운영과 같은 검문 프록시(시험 서버만 허용). 주소를 돌려준다."""
+    import asyncio
+    import threading
+
+    from safetrace.proxy.egress import EgressProxy, Policy
+
+    loop = asyncio.new_event_loop()
+    box, ready = {}, threading.Event()
+
+    async def start():
+        box["srv"] = await asyncio.start_server(EgressProxy(Policy({80, 443}, {"127.0.0.1:8900"})).handle,
+                                                "127.0.0.1", 0)
+        box["port"] = box["srv"].sockets[0].getsockname()[1]
+        ready.set()
+
+    threading.Thread(target=lambda: (loop.run_until_complete(start()), loop.run_forever()), daemon=True).start()
+    ready.wait(5)
+    yield f"http://127.0.0.1:{box['port']}"
+    loop.call_soon_threadsafe(box["srv"].close)
+    loop.call_soon_threadsafe(loop.stop)
+
+
+@pytest.mark.parametrize("page, host, reason, proxied", [
+    ("short.html", "name.n-payost.invalid", "net:ERR_NAME_NOT_RESOLVED", False),  # 서버 리다이렉트 → 연결 실패
+    ("short.html", "name.n-payost.invalid", "egress:dns_failure", True),         # 같은 경우, 검문 프록시가 거부 응답
+    ("short-js.html", "name.n-payviv.invalid", "ssrf:", False),                    # 스크립트 이동 → 요청 검사에서 차단
+    ("short-link.html", "name.n-paycaro.invalid", "ssrf:", False),                 # 링크 목적지가 게이트에서 막혀 누르지 않음
+])
+def test_dead_destination_reaches_threat_judgment(settings, testpages, request, page, host, reason, proxied):
+    """이미 사라진 피싱 도착지는 화면이 없어도 도메인 이름을 위협 판단에 넘긴다(단축 URL 경유 사례)."""
+    from safetrace.agent.runner import make_decider
+
+    if proxied:
+        settings.egress_proxy = request.getfixturevalue("egress_proxy")
+
+    class Capture:
+        def __init__(self):
+            self.inner, self.req = make_decider(settings), None
+
+        def action(self, state):
+            return self.inner.action(state)
+
+        def threat(self, req):
+            self.req = req
+            return self.inner.threat(req)
+
+    settings.max_steps = 4
+    testpages.clear()
+    cid, d = str(uuid.uuid4()), Capture()
+    investigate(cid, f"{BASE}/phish/{page}", settings, lambda e: None, decider=d)
+    got = [(b.host, b.reason) for b in d.req.blocked_destinations]
+    assert len(got) == 1 and got[0][0] == host and got[0][1].startswith(reason), got
+    if not proxied:  # 프록시의 거부 응답은 페이지로 열려 원래도 경유 도메인에 남는다
+        assert host not in d.req.domains  # 열리지 않은 목적지는 열린 페이지 도메인(리다이렉트 수 계산)과 섞지 않는다
+    chain = [json.loads(x) for x in (settings.evidence_dir / cid / "chain.jsonl").read_text(encoding="utf-8").splitlines()]
+    fin = next(r["data"] for r in chain if r["kind"] == "finish")
+    assert [b["host"] for b in fin["blocked_destinations"]] == [host]
+
+
 def test_start_url_private_blocked(settings, testpages):
     _, final, chain, _ = run("http://169.254.169.254/latest/meta-data/", settings, testpages)
     assert final["status"] == "BLOCKED"

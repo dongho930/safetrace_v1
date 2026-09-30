@@ -48,6 +48,7 @@ def test_proxy_denies_internal_connect():
 
     a, b, c, d = asyncio.run(main())
     assert a.startswith(b"HTTP/1.1 403") and b"non_public_ip" in a
+    assert b"\r\nX-SafeTrace-Egress: non_public_ip\r\n" in a  # 에이전트가 프록시 거부를 알아보는 표시
     assert b.startswith(b"HTTP/1.1 403")
     assert c.startswith(b"HTTP/1.1 400")
     assert d.startswith(b"HTTP/1.1 403") and b"port_not_allowed" in d

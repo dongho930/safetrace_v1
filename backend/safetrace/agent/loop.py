@@ -31,6 +31,7 @@ from ..decision.client import Decider, DecisionUnavailable
 from ..decision.schema import ActionKind, Candidate, PageState, ThreatRequest, action_options
 from ..evidence import EvidenceWriter
 from ..masking import mask_pii
+from ..proxy.egress import EGRESS_HEADER
 from .gate import Budget, ElementInfo, SafetyGate, classify_forbidden
 from .observe import CLOSE_POPUP_JS, COLLECT_JS, READ_ONE_JS, RECTS_JS
 from .recorder import ScreencastRecorder, find_ffmpeg
@@ -78,6 +79,16 @@ _ALLOWED_METHODS = {"GET", "HEAD"}
 _SCROLL_TO_JS = "(y) => new Promise((r) => { window.scrollTo(0, y); requestAnimationFrame(() => requestAnimationFrame(r)); })"
 _OCR_SHOT_TIMEOUT_MS = 3000  # 이미지 버튼 한 개를 찍는 최대 시간
 _PW_DEFAULT_TIMEOUT_MS = 30000  # Playwright 기본 제한(이 모듈은 따로 바꾸지 않는다)
+
+
+def _is_main_frame(req) -> bool:
+    """페이지(새 창 포함) 자체의 이동인지. 광고 iframe 의 이동은 판단 근거로 쓰지 않는다."""
+    try:
+        return req.frame.parent_frame is None
+    except PWError:  # 서비스 워커 요청 등 프레임이 없는 경우
+        return False
+
+
 def browser_user_agent(setting: str, version: str) -> str:
     """'auto' 면 실행 중인 Chromium 주 버전에 맞춘 일반 Chrome User-Agent(운영체제 표기는 실제 OS 따름)."""
     if setting != "auto":
@@ -109,6 +120,7 @@ class RunResult:
     candidates_found: list[str] = field(default_factory=list)
     blocked_requests: int = 0
     forbidden_seen: list[str] = field(default_factory=list)
+    blocked_destinations: list[dict] = field(default_factory=list)  # 열리지 않은 이동 목적지 {host, reason}
 
 
 @dataclass
@@ -199,12 +211,47 @@ class AgentRun:
                 reason = why
         if reason:
             self.result.blocked_requests += 1
+            if reason.startswith("ssrf:") and req.is_navigation_request() and _is_main_frame(req):
+                self._note_blocked_destination(url, reason)
             if req.is_navigation_request() or reason.startswith("method"):
                 self._record("blocked_request", {"url": url[:500], "reason": reason,
                                                  "navigation": req.is_navigation_request()})
             await route.abort("blockedbyclient")
             return
         await route.continue_()
+
+    def _note_blocked_destination(self, url: str, reason: str):
+        """열리지 않은 이동 목적지를 위협 판단 입력으로 모은다. 도착지 화면이 없어도 도메인 이름은 근거가 된다
+        (예: 단축 URL → name.n-payost.shop 이 이미 사라짐). 열린 페이지만 담는 nav_chain 에는 남지 않는다."""
+        host = urlsplit(url).hostname
+        seen = self.result.blocked_destinations
+        if host and len(seen) < 20 and all(b["host"] != host for b in seen):
+            seen.append({"host": host[:253], "reason": reason[:64]})
+
+    def _on_request_failed(self, req):
+        # 검문 프록시가 거부했거나 상대에 연결하지 못한 이동(서버 리다이렉트로 간 곳 포함).
+        # 우리가 막은 요청(ERR_BLOCKED_BY_CLIENT)은 _on_route 가 이미 기록했고, ERR_ABORTED 는 다른 이동에 밀려 취소된 것이다
+        try:
+            if not (req.is_navigation_request() and _is_main_frame(req)):
+                return
+            code = _NET_ERR.search(req.failure or "")
+        except PWError:
+            return
+        if code and code.group(1) not in ("ERR_BLOCKED_BY_CLIENT", "ERR_ABORTED"):
+            self._note_blocked_destination(req.url, "net:" + code.group(1))
+
+    def _on_response(self, resp):
+        # http 목적지는 검문 프록시가 연결 실패 대신 거부 응답(403·502)을 돌려준다(https 는 위의 연결 실패로 잡힌다).
+        # 평문 http 사이트가 이 헤더를 흉내 낼 수는 있지만, 그 결과는 자기 도메인을 목적지로 한 번 더 알리는 것뿐이다
+        try:
+            reason = resp.headers.get(EGRESS_HEADER.lower())
+            if not reason or resp.status < 400:
+                return
+            req = resp.request
+            if req.is_navigation_request() and _is_main_frame(req):
+                self._note_blocked_destination(req.url, "egress:" + reason)
+        except PWError:
+            return
 
     # ── 관찰 ──────────────────────────────────────────
     async def _observe(self, page: Page, step: int) -> _Observation:
@@ -483,6 +530,8 @@ class AgentRun:
                 ctx_kw["record_video_size"] = {"width": 1280, "height": 800}
             ctx = await browser.new_context(**ctx_kw)
             await ctx.route("**/*", self._on_route)
+            ctx.on("requestfailed", self._on_request_failed)
+            ctx.on("response", self._on_response)
             ctx.on("page", lambda pg: pg.on("dialog", self._on_dialog))
             page = await ctx.new_page()
             page.on("dialog", self._on_dialog)
@@ -593,6 +642,8 @@ class AgentRun:
                 self._record("gate", {"step": step, "action": "click", "element": decision.element_id,
                                       "allowed": gate.allowed, "reason": gate.reason})
                 if not gate.allowed:
+                    if gate.reason.startswith("ssrf:") and cur is not None:
+                        self._note_blocked_destination(cur.href, gate.reason)  # 링크 목적지를 열 수 없어 누르지 않음
                     label = next((c.text for c in obs.state.candidates if c.id == decision.element_id), "")
                     self.history.append(f"blocked:{decision.element_id}:{label[:40]}")
                     self.budget.steps += 1
@@ -647,7 +698,8 @@ class AgentRun:
         final = await self._screenshot(page, "final", full=True)
         self._record("finish", {"reason": self.result.finish_reason, "final_url": self.result.final_url,
                                 "nav_chain": self.result.nav_chain[:50],
-                                "blocked_requests": self.result.blocked_requests},
+                                "blocked_requests": self.result.blocked_requests,
+                                "blocked_destinations": self.result.blocked_destinations},
                      [final] if final else [])
         self._collect_candidates()
 
@@ -692,6 +744,7 @@ class AgentRun:
             url=self.start_url[:2048], final_url=(self.result.final_url or self.start_url)[:2048],
             redirect_count=max(0, len(self.result.nav_chain) - 1), domains=domains[:30],
             pages=self.page_summaries[-20:], forbidden_seen=self.result.forbidden_seen[:50],
+            blocked_destinations=self.result.blocked_destinations[:20],
         )
         try:
             d = self.decider.threat(req)

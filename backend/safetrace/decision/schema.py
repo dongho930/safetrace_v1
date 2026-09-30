@@ -98,13 +98,21 @@ class ActionDecision(Decision):
         return v
 
 
+class BlockedDestination(BaseModel):
+    """사이트가 이동시키려 했지만 열리지 않은 목적지. 피싱 도착지가 이미 사라진 경우 도메인 이름만 남는다."""
+
+    host: str = Field(max_length=253)
+    reason: str = Field(max_length=64)  # 예: "ssrf:dns_failure", "net:ERR_TUNNEL_CONNECTION_FAILED"
+
+
 class ThreatRequest(BaseModel):
     url: str = Field(max_length=2048)
     final_url: str = Field(max_length=2048)
     redirect_count: int = Field(ge=0, le=100)
-    domains: list[str] = Field(max_length=30)
+    domains: list[str] = Field(max_length=30)  # 실제로 열린 페이지의 도메인
     pages: list[str] = Field(max_length=20)  # 단계별 마스킹된 텍스트 요약
     forbidden_seen: list[str] = Field(default_factory=list, max_length=50)  # 예: "input:password", "download:apk"
+    blocked_destinations: list[BlockedDestination] = Field(default_factory=list, max_length=20)
 
 
 class ThreatDecision(Decision):

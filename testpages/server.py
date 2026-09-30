@@ -17,6 +17,8 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 FORBIDDEN_PATHS = ("/gamble/pay.html", "/gamble/done.html", "/phish/done.html", "/smish/pay.html", "/smish/done.html",
                    ".apk", ".bin")
+# 이미 사라진 피싱 도착지로 넘기는 단축 URL(.invalid 는 절대 조회되지 않는 도메인)
+REDIRECTS = {"/r/npay": "http://name.n-payost.invalid/login"}
 
 
 class Recorder:
@@ -50,6 +52,11 @@ class Handler(SimpleHTTPRequestHandler):
         path = self.path.split("?")[0]
         if self.smish_delay and path.startswith("/smish/") and (path.endswith(".html") or path.endswith("/")):
             time.sleep(self.smish_delay)
+        if path in REDIRECTS:  # 단축 URL 처럼 서버가 다른 곳으로 넘긴다
+            self.send_response(302)
+            self.send_header("Location", REDIRECTS[path])
+            self.end_headers()
+            return
         super().do_GET()
 
     def do_HEAD(self):
