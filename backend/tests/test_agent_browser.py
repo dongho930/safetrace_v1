@@ -329,6 +329,29 @@ def test_auto_post_blocked(settings, testpages):
     assert testpages.forbidden_hits() == []
 
 
+def test_slow_first_screen_is_investigated_not_unreachable(settings, testpages):
+    """응답은 왔지만 화면 구성이 첫 접속 제한보다 늦는 사이트는 접속 불가로 끝내지 않고 조사한다."""
+    import server
+
+    settings.nav_timeout_ms = int(server.SLOW_SECONDS * 1000 / 2)
+    settings.max_steps = 2
+    _, final, chain, _ = run(f"{BASE}/slow/dom.html", settings, testpages)
+    assert final["status"] != "UNREACHABLE", final
+    nav = next(r["data"] for r in chain if r["kind"] == "navigation")
+    assert nav["status"] == 200 and nav["dom_ready"] is False
+    obs = next(r["data"] for r in chain if r["kind"] == "observe")
+    assert "당첨금 수령하기" in [c["text"] for c in obs["candidates"]]  # 늦게 온 나머지도 결국 본다
+
+
+def test_no_response_within_limit_is_unreachable(settings, testpages):
+    import server
+
+    settings.nav_timeout_ms = int(server.SLOW_SECONDS * 1000 / 2)
+    _, final, chain, _ = run(f"{BASE}/slow/noresp", settings, testpages)
+    assert (final["status"], final["reason"]) == ("UNREACHABLE", "goto_failed")
+    assert next(r["data"] for r in chain if r["kind"] == "unreachable")["category"] == "timeout"
+
+
 def test_dialogs_dismissed(settings, testpages):
     _, final, chain, _ = run(f"{BASE}/attack/dialogs.html", settings, testpages)
     assert final["status"] in {"COMPLETED", "REVIEW_REQUIRED"}

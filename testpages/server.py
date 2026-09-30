@@ -19,6 +19,11 @@ FORBIDDEN_PATHS = ("/gamble/pay.html", "/gamble/done.html", "/phish/done.html", 
                    ".apk", ".bin")
 # 이미 사라진 피싱 도착지로 넘기는 단축 URL(.invalid 는 절대 조회되지 않는 도메인)
 REDIRECTS = {"/r/npay": "http://name.n-payost.invalid/login"}
+# 느린 첫 화면(/slow/*). 시험은 첫 접속 제한을 이보다 짧게 둔다
+SLOW_SECONDS = 3.0
+SLOW_DOM_HEAD = ("<!doctype html><html lang='ko'><meta charset='utf-8'><title>느린 첫 화면</title>"
+                 "<h1>이벤트 당첨 안내</h1><p>당첨금 수령을 위해 아래 버튼을 눌러 주세요.</p>")
+SLOW_DOM_TAIL = "<p><a href='/phish/track.html'>당첨금 수령하기</a></p><script>/* 늦게 오는 나머지 */</script></html>"
 
 
 class Recorder:
@@ -55,6 +60,20 @@ class Handler(SimpleHTTPRequestHandler):
         if path in REDIRECTS:  # 단축 URL 처럼 서버가 다른 곳으로 넘긴다
             self.send_response(302)
             self.send_header("Location", REDIRECTS[path])
+            self.end_headers()
+            return
+        if path == "/slow/dom.html":  # 응답은 바로 오지만 화면(문서) 구성이 늦는 사이트
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(SLOW_DOM_HEAD.encode())
+            self.wfile.flush()
+            time.sleep(SLOW_SECONDS)
+            self.wfile.write(SLOW_DOM_TAIL.encode())
+            return
+        if path == "/slow/noresp":  # 응답 자체가 늦는 사이트(접속 불가로 봐야 함)
+            time.sleep(SLOW_SECONDS)
+            self.send_response(200)
             self.end_headers()
             return
         super().do_GET()
