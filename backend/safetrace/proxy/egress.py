@@ -20,6 +20,7 @@ from ..netguard import BlockedURL, is_public_ip, resolve
 log = logging.getLogger("safetrace.egress")
 
 MAX_HEADER = 16 * 1024
+EGRESS_HEADER = "X-SafeTrace-Egress"  # 거부 응답에만 붙인다. 값은 거부 사유(dns_failure 등)
 IDLE_TIMEOUT = 60
 
 
@@ -121,8 +122,9 @@ class EgressProxy:
 
     async def _deny(self, writer: asyncio.StreamWriter, code: int, reason: str):
         body = f"blocked by safetrace egress: {reason}\n".encode()
+        # 에이전트가 '사이트의 403'과 '검문 프록시의 거부'를 구분하도록 사유를 헤더로도 알린다
         writer.write(f"HTTP/1.1 {code} Blocked\r\nContent-Type: text/plain\r\nContent-Length: {len(body)}\r\n"
-                     f"Connection: close\r\n\r\n".encode() + body)
+                     f"{EGRESS_HEADER}: {reason}\r\nConnection: close\r\n\r\n".encode() + body)
         try:
             await writer.drain()
         finally:

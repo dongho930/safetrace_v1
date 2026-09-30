@@ -6,7 +6,14 @@ import pytest
 from safetrace.agent.gate import Budget, ElementInfo, SafetyGate, classify_forbidden
 from safetrace.decision.engine import Engine, NoProviderAvailable
 from safetrace.decision.providers import JevProvider, ProviderError, RuleProvider, validate_choice
-from safetrace.decision.schema import ActionRequest, Candidate, PageState, ThreatRequest, action_options
+from safetrace.decision.schema import (
+    ActionRequest,
+    BlockedDestination,
+    Candidate,
+    PageState,
+    ThreatRequest,
+    action_options,
+)
 from safetrace.masking import mask_pii, mask_secrets
 
 
@@ -263,6 +270,31 @@ def test_official_domains_chain_across_operators():
 def test_non_official_domains_stay_illegal_gambling(url, final_url, domains):
     d = Engine([_gambling_jev()], 0.45, 0.6).decide_threat(_threat_req(url, final_url, domains))
     assert d.threat == "illegal_gambling" and d.override is None
+
+
+def test_blocked_destination_counts_against_official_domain():
+    # 공식 사이트 화면이었어도 사라진 다른 도메인으로 넘기려 했다면 공식 도메인 예외를 두지 않는다
+    req = _threat_req("https://www.sportstoto.co.kr/")
+    req.blocked_destinations = [BlockedDestination(host="toto-bet.example", reason="ssrf:dns_failure")]
+    d = Engine([_gambling_jev()], 0.45, 0.6).decide_threat(req)
+    assert d.threat == "illegal_gambling" and d.override is None
+
+
+def test_blocked_destinations_sent_to_model():
+    seen = {}
+
+    def handler(request):
+        seen.update(json.loads(request.content))
+        return httpx.Response(200, json={"answers": {"q": {"type": "choice", "choice": "phishing",
+                                                           "probabilities": {"phishing": 0.8, "unknown": 0.2}}}})
+
+    p = JevProvider("jev_typesafe", "https://x", "k", "m", 5, transport=httpx.MockTransport(handler))
+    req = ThreatRequest(url="https://lrl.kr/HlEG", final_url="https://lrl.kr/check/url", redirect_count=1,
+                        domains=["lrl.kr"], pages=["페이지 이동중"],
+                        blocked_destinations=[BlockedDestination(host="name.n-payost.shop", reason="ssrf:dns_failure")])
+    Engine([p], 0.45, 0.6).decide_threat(req)
+    assert seen["state"]["blocked_destinations"] == [{"host": "name.n-payost.shop", "reason": "ssrf:dns_failure"}]
+    assert "blocked_destinations" in seen["questions"]["q"]["instructions"]
 
 
 def test_official_domain_does_not_hide_other_threats():
