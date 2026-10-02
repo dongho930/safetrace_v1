@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from ..config import Settings
 from .official import all_official
@@ -35,6 +36,17 @@ THREAT_QUESTION = (
     "state.blocked_destinations 는 사이트가 이동시키려 했지만 열리지 않은 목적지(도메인 소멸·차단)다. "
     "목적지 화면은 볼 수 없어도 기관·기업을 흉내 낸 도메인 이름 자체가 판단 근거가 된다."
 )
+
+
+# 단축 URL 서비스의 위험 경고 화면: 위험 문구와 '자동 이동을 막음' 문구가 한 화면에 함께 있다
+_DANGER = re.compile(r"위험|악성|피싱|unsafe|dangerous|malicious|phishing", re.I)
+_NO_REDIRECT = re.compile(r"자동\s?(?:으로\s?)?이동\S{0,2}\s?(?:막|차단|중단)"
+                          r"|cannot\s+(?:automatically\s+)?redirect|redirect(?:ion)?\s+(?:is\s+|has\s+been\s+)?blocked", re.I)
+
+
+def shortener_warning(pages: list[str]) -> bool:
+    """단축 URL 서비스가 위험 링크라며 자동 이동을 막은 경고 화면을 거쳤는지."""
+    return any(_DANGER.search(p) and _NO_REDIRECT.search(p) for p in pages)
 
 
 class NoProviderAvailable(Exception):
@@ -110,6 +122,15 @@ class Engine:
                     override={"reason": "official_betting_domain", "operators": operators,
                               "original": {"threat": res.choice, "probability": prob, "provider": provider}},
                 )
+        if res.choice in (Threat.UNKNOWN, Threat.BENIGN) and shortener_warning(req.pages):
+            # 단축 URL 서비스가 위험 링크로 판정해 자동 이동을 막았다: 목적지는 못 봤지만 그 판정을 근거로 피싱(신고 문자에
+            # 가장 흔한 유형)으로 보고 담당자 검토로 보낸다. 판단 문구를 바꾸면 다른 사이트 판단이 흔들려 여기서 따로 정한다
+            return ThreatDecision(
+                choice=Threat.PHISHING.value, probabilities={Threat.PHISHING.value: 1.0}, confidence=None,
+                model=res.model, provider="shortener_warning", latency_ms=ms, threat=Threat.PHISHING, hold=True,
+                override={"reason": "shortener_warning",
+                          "original": {"threat": res.choice, "probability": prob, "provider": provider}},
+            )
         return ThreatDecision(
             choice=res.choice, probabilities=res.probabilities, confidence=res.confidence,
             model=res.model, provider=provider, latency_ms=ms, threat=Threat(res.choice),

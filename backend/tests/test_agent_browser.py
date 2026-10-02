@@ -322,6 +322,15 @@ def test_site_moving_itself_to_dead_end_finishes(settings, testpages):
     assert not any(r["kind"] == "action" and "chrome-error" in r["data"]["result_url"] for r in chain)
 
 
+def test_shortener_warning_judged_threat_with_review(settings, testpages):
+    """단축 URL 서비스가 위험 링크라며 자동 이동을 막은 화면: 목적지를 못 봐도 위협(담당자 검토)으로 본다."""
+    settings.max_steps = 3
+    _, final, chain, _ = run(f"{BASE}/phish/short-warn.html", settings, testpages)
+    assert final["threat"]["threat"] == "phishing" and final["threat"]["hold"], final["threat"]
+    assert final["status"] == "REVIEW_REQUIRED"
+    assert_no_forbidden(chain, testpages)
+
+
 def test_start_url_private_blocked(settings, testpages):
     _, final, chain, _ = run("http://169.254.169.254/latest/meta-data/", settings, testpages)
     assert final["status"] == "BLOCKED"
