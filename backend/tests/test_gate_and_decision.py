@@ -402,3 +402,36 @@ def test_rules_see_chinese_gambling_words():
         url="http://x.example/", final_url="http://x.example/", redirect_count=0, domains=["x.example"],
         pages=["[0] 米兰体育 | http://x.example/ | 真人娱乐 体育投注 彩票"]))
     assert d.threat == "illegal_gambling"
+
+
+# ── 단축 URL 서비스의 위험 경고 화면 ──────────────────────
+_IIIM_KO = ("[0] iii.im URL 단축 서비스 | https://iii.im/ZujV | 경고 지금 접속하신 주소는 단축된 주소이지만 사용자에게 "
+            "위험한 콘텐츠를 포함 할 수도 있는 것으로 확인이 되어 자동 이동이 막혀 있습니다. 위험할 수 있는 URL 보기")
+_IIIM_EN = ("[0] iii.im URL Shortener | https://iii.im/ZujV | Warning The link you followed is a shortened URL. However, "
+            "we cannot automatically redirect you as the full URL may be unsafe.")
+
+
+@pytest.mark.parametrize("page, expected", [
+    (_IIIM_KO, True),
+    (_IIIM_EN, True),
+    ("[0] 링크 이동 | https://me2.kr/a | 외부 사이트로 이동합니다. 계속하려면 이동하기를 누르세요", False),
+    ("[0] 외부 링크 | https://link.naver.com/b | 네이버가 운영하지 않으며 안전을 보장하지 않습니다. 주의 계속 이동", False),
+    ("[0] 이동중 | https://x/ | 잠시 후 자동으로 이동합니다. 피싱 예방 안내", False),
+])
+def test_shortener_warning_detected(page, expected):
+    from safetrace.decision.engine import shortener_warning
+
+    assert shortener_warning([page]) is expected
+
+
+def test_shortener_warning_threat_goes_to_review():
+    # 단축 서비스의 경고만으로 위협이라 봤다면 목적지 화면이 없으므로 확신도가 높아도 담당자 검토로 보낸다
+    p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
+                    transport=_jev_transport({"type": "choice", "choice": "phishing",
+                                              "probabilities": {"phishing": 0.87, "unknown": 0.13}}))
+    req = ThreatRequest(url="https://iii.im/ZujV", final_url="https://iii.im/ZujV", redirect_count=0,
+                        domains=["iii.im"], pages=[_IIIM_KO])
+    d = Engine([p], 0.45, 0.6).decide_threat(req)
+    assert d.threat == "phishing" and d.hold
+    d = Engine([RuleProvider()], 0.45, 0.6).decide_threat(req)
+    assert d.threat == "phishing" and d.hold
