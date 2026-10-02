@@ -263,6 +263,7 @@ def egress_proxy():
     ("short.html", "name.n-payost.invalid", "egress:dns_failure", True),         # 같은 경우, 검문 프록시가 거부 응답
     ("short-js.html", "name.n-payviv.invalid", "ssrf:", False),                    # 스크립트 이동 → 요청 검사에서 차단
     ("short-link.html", "name.n-paycaro.invalid", "ssrf:", False),                 # 링크 목적지가 게이트에서 막혀 누르지 않음
+    ("check.html", "name.n-paypak.invalid", "ssrf:", False),                       # 확인 화면의 버튼이 스크립트로 이동 → 차단
 ])
 def test_dead_destination_reaches_threat_judgment(settings, testpages, request, page, host, reason, proxied):
     """이미 사라진 피싱 도착지는 화면이 없어도 도메인 이름을 위협 판단에 넘긴다(단축 URL 경유 사례)."""
@@ -288,11 +289,37 @@ def test_dead_destination_reaches_threat_judgment(settings, testpages, request, 
     investigate(cid, f"{BASE}/phish/{page}", settings, lambda e: None, decider=d)
     got = [(b.host, b.reason) for b in d.req.blocked_destinations]
     assert len(got) == 1 and got[0][0] == host and got[0][1].startswith(reason), got
-    if not proxied:  # 프록시의 거부 응답은 페이지로 열려 원래도 경유 도메인에 남는다
-        assert host not in d.req.domains  # 열리지 않은 목적지는 열린 페이지 도메인(리다이렉트 수 계산)과 섞지 않는다
+    # 열리지 않은 목적지는 열린 페이지 도메인(리다이렉트 수 계산)과 섞지 않는다(프록시 거부 화면도 열린 페이지가 아니다)
+    assert host not in d.req.domains
     chain = [json.loads(x) for x in (settings.evidence_dir / cid / "chain.jsonl").read_text(encoding="utf-8").splitlines()]
     fin = next(r["data"] for r in chain if r["kind"] == "finish")
     assert [b["host"] for b in fin["blocked_destinations"]] == [host]
+    # 막다른 곳(오류 화면·프록시 거부 화면)은 관찰하지 않고, 같은 목적지를 오가며 반복하지 않는다
+    observed = [r["data"]["url"] for r in chain if r["kind"] == "observe"]
+    assert all(u.startswith(BASE) for u in observed), observed
+    assert fin["reason"] != "loop_detected"
+    assert fin["final_url"].startswith(f"{BASE}/phish/"), fin["final_url"]
+    assert all(urlsplit(u).hostname in {"127.0.0.1", "localhost"} for u in fin["nav_chain"]), fin["nav_chain"]
+
+
+def test_dead_end_link_is_not_retried(settings, testpages):
+    """확인 화면에서 누른 버튼이 사라진 목적지로 가면 원래 화면으로 돌아오고, 그 버튼은 다시 내놓지 않는다."""
+    settings.max_steps = 6
+    _, final, chain, _ = run(f"{BASE}/phish/check.html", settings, testpages)
+    dead = [r["data"] for r in chain if r["kind"] == "dead_end"]
+    assert len(dead) == 1 and dead[0]["destinations"] == ["name.n-paypak.invalid"], dead
+    obs = [r["data"] for r in chain if r["kind"] == "observe"]
+    assert [urlsplit(o["url"]).path for o in obs] == ["/phish/check.html"] * len(obs) and len(obs) == 2, obs
+    assert not any("계속 이동하기" in c["text"] for c in obs[-1]["candidates"])
+    assert len(executed_clicks(chain)) == 1
+
+
+def test_site_moving_itself_to_dead_end_finishes(settings, testpages):
+    """첫 화면이 스스로 사라진 목적지로 옮기면 오류 화면에서 헛되이 움직이지 않고 끝낸다."""
+    _, final, chain, _ = run(f"{BASE}/phish/short-js.html", settings, testpages)
+    fin = next(r["data"] for r in chain if r["kind"] == "finish")
+    assert fin["reason"] in {"dead_end", "agent_finished"}, fin
+    assert not any(r["kind"] == "action" and "chrome-error" in r["data"]["result_url"] for r in chain)
 
 
 def test_start_url_private_blocked(settings, testpages):

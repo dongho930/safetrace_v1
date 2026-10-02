@@ -151,6 +151,8 @@ class AgentRun:
         self.summary_evidence: list[int] = []
         self._shot = 0
         self._host_ok: dict[str, tuple[float, bool, str]] = {}
+        self._egress_refused: set[str] = set()  # 검문 프록시가 거부 응답을 돌려준 주소(그 응답 화면은 막다른 곳)
+        self._dead_links: set[tuple[str, str]] = set()  # 막다른 곳으로 이어진 (페이지 주소, 버튼 글자)
 
     # ── 기록 ──────────────────────────────────────────
     def _record(self, kind: str, data: dict, files: list[str] | None = None) -> int:
@@ -250,6 +252,7 @@ class AgentRun:
             req = resp.request
             if req.is_navigation_request() and _is_main_frame(req):
                 self._note_blocked_destination(req.url, "egress:" + reason)
+                self._egress_refused.add(req.url)
         except PWError:
             return
 
@@ -266,6 +269,7 @@ class AgentRun:
         # OCR 은 조사 마감과 관찰당 상한 중 이른 시각까지만 한다. 화면 안·큰 요소부터 읽어 중요한 버튼을 먼저 처리한다
         ocr_until = time.monotonic() + min(self.budget.remaining(), self.s.ocr_observe_max_seconds)
         ocr_skipped = 0
+        dead_hosts = {b["host"] for b in self.result.blocked_destinations}
         items = raw.get("items", [])[: self.s.max_candidates * 4]
         items = sorted(items, key=lambda it: (0 if it.get("inView") else 1, -int(it.get("area") or 0)))
         # 1) DOM 금지 분류, 글자 없는 이미지 버튼은 캡처만 모은다(마감까지)
@@ -311,8 +315,10 @@ class AgentRun:
                 # 이미지로 된 '결제' 버튼이 빈 이름으로 선택지에 오르는 것을 막는다.
                 forbidden.append(f"unreadable_image:{info.tag}")
                 continue
-            infos[eid] = info
             host = urlsplit(info.href).hostname if info.href.startswith("http") else None
+            if (page.url, mask_pii(text)[:40]) in self._dead_links or host in dead_hosts:
+                continue  # 이미 막다른 곳으로 이어진 버튼·링크(글자는 기록과 같은 40자로 비교)는 다시 내놓지 않는다
+            infos[eid] = info
             prio = (0 if item.get("inView") else 1, -int(item.get("area") or 0))
             cands.append((prio, Candidate(id=eid, tag=info.tag[:16], text=mask_pii(text)[:120],
                                           href_host=host, covered=bool(item.get("covered")))))
@@ -427,6 +433,31 @@ class AgentRun:
             return ElementInfo.from_js(await loc.first.evaluate(READ_ONE_JS))
         except PWError:
             return None
+
+    def _is_dead_end(self, page: Page, blocked_before: int) -> bool:
+        """더 조사할 것이 없는 화면인지: 브라우저 오류 화면, 검문 프록시 거부 화면, 목적지가 막힌 채 남은 빈 화면."""
+        url = page.url
+        if url.startswith("chrome-error://") or url in self._egress_refused:
+            return True
+        return url == "about:blank" and len(self.result.blocked_destinations) > blocked_before
+
+    async def _leave_dead_end(self, page: Page, back_to: Page, url: str) -> Page | None:
+        """막다른 곳에서 마지막 실제 페이지로 돌아간다. 돌아가지 못하면 None."""
+        if page is not back_to:  # 새 창이 막다른 곳: 닫고 원래 창으로
+            if self.rec:
+                await self.rec.switch(back_to)
+            try:
+                await page.close()
+            except PWError:
+                pass
+            page = back_to
+        if page.url != url:
+            try:
+                await page.go_back(timeout=self.s.nav_timeout_ms)
+            except (PWError, PWTimeout):
+                pass
+            await self._settle(page)
+        return page if page.url == url else None
 
     async def _settle(self, page: Page):
         try:
@@ -570,7 +601,10 @@ class AgentRun:
         main_frame_navs: list[str] = self.result.nav_chain
 
         def track(frame):
-            if frame == frame.page.main_frame and (not main_frame_navs or main_frame_navs[-1] != frame.url):
+            # 오류 화면(chrome-error://)·about:blank·프록시 거부 화면은 열린 페이지가 아니다(경유 도메인·리다이렉트 수에 넣지 않음)
+            if (frame == frame.page.main_frame and frame.url.startswith(("http://", "https://"))
+                    and frame.url not in self._egress_refused
+                    and (not main_frame_navs or main_frame_navs[-1] != frame.url)):
                 main_frame_navs.append(frame.url[:2048])
 
         tracked = [page]
@@ -581,6 +615,13 @@ class AgentRun:
             resp = await page.goto(self.start_url, timeout=self.s.nav_timeout_ms, wait_until="commit")
         except (PWError, PWTimeout) as e:
             self._record("unreachable", classify_goto_error(e))
+            self.result.status, self.result.finish_reason = "UNREACHABLE", "goto_failed"
+            return
+        refused = resp.headers.get(EGRESS_HEADER.lower()) if resp is not None and resp.status >= 400 else None
+        if refused and resp.request.redirected_from is None:
+            # 평문 http 시작 주소를 검문 프록시가 거부했다(상대에 연결 못 함): https 의 터널 실패와 같은 접속 불가다
+            self._record("unreachable", {"error": "EgressRefused", "net_error": None, "category": "egress_refused",
+                                         "egress_reason": refused[:64]})
             self.result.status, self.result.finish_reason = "UNREACHABLE", "goto_failed"
             return
         t0 = time.monotonic()
@@ -602,12 +643,31 @@ class AgentRun:
         await self._settle(page)
 
         step = 0
+        last_real: tuple[Page, str] | None = None  # 마지막으로 관찰한 실제 페이지와 그 주소
+        blocked_before = 0  # 직전 행동 전에 기록돼 있던 열리지 않은 목적지 수
         while True:
             over = self.budget.exceeded()
             if over:
                 self.result.status, self.result.finish_reason = "COMPLETED", over
                 break
+            if self._is_dead_end(page, blocked_before):
+                # 오류 화면·프록시 거부 화면에서는 할 수 있는 일이 없다('다시 시도'를 누르며 오가지 않는다).
+                # 우리가 누른 링크 때문이면 그 링크를 빼고 원래 페이지로 돌아가 계속하고, 사이트가 스스로 옮겼으면 끝낸다
+                self._record("dead_end", {"step": step, "url": page.url[:2048], "destinations": [
+                    b["host"] for b in self.result.blocked_destinations[blocked_before:]]})
+                last = self.history[-1] if self.history else ""
+                back = None
+                if last_real and last.startswith("click:") and last.count(":") >= 2:
+                    self._dead_links.add((last_real[1], last.split(":", 2)[2]))
+                    self.history[-1] = "dead_end:" + last.split(":", 1)[1]
+                    back = await self._leave_dead_end(page, *last_real)
+                if back is None:
+                    self.result.status, self.result.finish_reason = "COMPLETED", "dead_end"
+                    break
+                page, blocked_before = back, len(self.result.blocked_destinations)
+                continue
             obs = await self._observe(page, step)
+            last_real = (page, page.url)
             self.result.forbidden_seen.extend(x for x in obs.forbidden if x not in self.result.forbidden_seen)
             self.page_summaries.append(f"[{step}] {obs.state.title} | {obs.state.url} | {obs.state.text[:600]}")
             self.summary_evidence.append(obs.evidence_seq)
@@ -643,6 +703,7 @@ class AgentRun:
                 self.result.status, self.result.finish_reason = "COMPLETED", "agent_finished"
                 break
 
+            blocked_before = len(self.result.blocked_destinations)
             before = await self._screenshot(page, "before")
             offered = set(obs.infos)
             outcome = ""
@@ -704,7 +765,11 @@ class AgentRun:
             step += 1
 
         self.result.steps = step
-        self.result.final_url = page.url[:2048]
+        # 막다른 곳에서 끝났으면 마지막으로 열린 실제 페이지를 최종 주소로 둔다(목적지는 blocked_destinations 에 있다)
+        final_url = page.url
+        if self._is_dead_end(page, len(self.result.blocked_destinations)):
+            final_url = self.result.nav_chain[-1] if self.result.nav_chain else self.start_url
+        self.result.final_url = final_url[:2048]
         final = await self._screenshot(page, "final", full=True)
         self._record("finish", {"reason": self.result.finish_reason, "final_url": self.result.final_url,
                                 "nav_chain": self.result.nav_chain[:50],
