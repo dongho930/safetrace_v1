@@ -12,6 +12,7 @@ import {
   listCases,
   setToken,
   streamEvents,
+  type Threat,
   verifyCase,
 } from "./api";
 
@@ -44,11 +45,18 @@ const THREAT_LABEL: Record<string, string> = {
   benign: "정상",
   unknown: "판단 불가",
 };
+// 코드 규칙이 모델 판단을 바꾼 이유
+function overrideLabel(o: Threat["override"]): string {
+  if (!o) return "";
+  if (o.reason === "shortener_warning") return "단축 URL 서비스의 위험 경고 → 담당자 검토";
+  return `공식 사행사업자 도메인${o.operators?.length ? ` · ${o.operators.join(", ")}` : ""}`;
+}
 const REASON_LABEL: Record<string, string> = {
   unreachable_reputation_match: "접속 불가 · Safe Browsing 위험 일치",
   goto_failed: "최초 접속 실패",
   low_confidence_action: "다음 행동 확신 부족으로 탐색 종료",
   loop_detected: "같은 화면 반복으로 탐색 종료",
+  dead_end: "더 갈 수 없는 화면(오류·차단)에서 탐색 종료",
   agent_finished: "에이전트가 조사 완료 판단",
   step_budget: "최대 단계 도달",
   time_budget: "최대 시간 도달",
@@ -588,7 +596,7 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
     } else if (e.kind === "escalation") {
       lines.push({ seq: e.seq, icon: "alert", tone: "orange", text: <span className="warn">담당자 검토로 전환 · Safe Browsing {((d.threat_types as string[]) ?? []).join(", ")}</span> });
     } else if (e.kind === "threat") {
-      lines.push({ seq: e.seq, icon: "flag", tone: d.threat === "benign" ? "teal" : "orange", text: <>위협 판단 · {THREAT_LABEL[String(d.threat)] ?? String(d.threat)}{d.override ? " (공식 사행사업자 도메인)" : ""}</>, end: pct(Number(d.probability)) });
+      lines.push({ seq: e.seq, icon: "flag", tone: d.threat === "benign" ? "teal" : "orange", text: <>위협 판단 · {THREAT_LABEL[String(d.threat)] ?? String(d.threat)}{d.override ? ` (${overrideLabel(d.override as Threat["override"])})` : ""}</>, end: pct(Number(d.probability)) });
     } else if (e.kind === "safebrowsing") {
       lines.push({ seq: e.seq, icon: "shieldCheck", tone: d.status === "match" ? "red" : "", text: <>Safe Browsing · {String(d.status)}</> });
     } else if (e.kind === "finish") {
@@ -704,7 +712,7 @@ function Opinion({ c, running }: { c: CaseOut | null; running: boolean }) {
             {risky ? " 의심" : ""}
           </span>
           <span className="muted small">
-            {t.override ? `공식 사행사업자 도메인 · ${t.override.operators.join(", ")}` : t.hold ? "확신 부족 → 담당자 검토" : "판단 확신 기준 충족"}
+            {t.override ? overrideLabel(t.override) : t.hold ? "확신 부족 → 담당자 검토" : "판단 확신 기준 충족"}
           </span>
           {t.override && (
             <span className="faint small">

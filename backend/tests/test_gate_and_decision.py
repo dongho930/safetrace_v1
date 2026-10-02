@@ -425,13 +425,25 @@ def test_shortener_warning_detected(page, expected):
 
 
 def test_shortener_warning_threat_goes_to_review():
-    # 단축 서비스의 경고만으로 위협이라 봤다면 목적지 화면이 없으므로 확신도가 높아도 담당자 검토로 보낸다
-    p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
-                    transport=_jev_transport({"type": "choice", "choice": "phishing",
-                                              "probabilities": {"phishing": 0.87, "unknown": 0.13}}))
+    # 판단 모델이 판단 불가·정상으로 봐도 단축 서비스의 위험 경고가 있으면 피싱(담당자 검토)으로, 원래 판단은 남긴다
     req = ThreatRequest(url="https://iii.im/ZujV", final_url="https://iii.im/ZujV", redirect_count=0,
                         domains=["iii.im"], pages=[_IIIM_KO])
-    d = Engine([p], 0.45, 0.6).decide_threat(req)
-    assert d.threat == "phishing" and d.hold
+    for choice in ("unknown", "benign"):
+        p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
+                        transport=_jev_transport({"type": "choice", "choice": choice,
+                                                  "probabilities": {choice: 0.6, "phishing": 0.4}}))
+        d = Engine([p], 0.45, 0.6).decide_threat(req)
+        assert d.threat == "phishing" and d.hold and d.provider == "shortener_warning"
+        assert d.override["original"]["threat"] == choice
     d = Engine([RuleProvider()], 0.45, 0.6).decide_threat(req)
     assert d.threat == "phishing" and d.hold
+
+
+def test_shortener_warning_keeps_other_threats():
+    # 판단 모델이 이미 위협 유형을 골랐으면 그대로 둔다
+    p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
+                    transport=_jev_transport({"type": "choice", "choice": "illegal_gambling",
+                                              "probabilities": {"illegal_gambling": 0.9, "benign": 0.1}}))
+    d = Engine([p], 0.45, 0.6).decide_threat(ThreatRequest(
+        url="https://iii.im/x", final_url="https://iii.im/x", redirect_count=0, domains=["iii.im"], pages=[_IIIM_KO]))
+    assert d.threat == "illegal_gambling" and d.override is None
