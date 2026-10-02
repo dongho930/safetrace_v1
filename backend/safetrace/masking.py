@@ -2,14 +2,21 @@
 
 import re
 
-_PATTERNS: list[tuple[re.Pattern, str]] = [
+
+def _account(m: re.Match) -> str:
+    # 날짜(2025-11-13, 8자리)·짧은 번호는 그대로 둔다: 계좌로 가리면 판단 모델이 금융 화면으로 오해한다
+    n = sum(ch.isdigit() for ch in m.group(0))
+    return "[계좌번호]" if 10 <= n <= 16 else m.group(0)
+
+
+_PATTERNS: list[tuple[re.Pattern, object]] = [
     (re.compile(r"\b\d{6}\s*-\s*[1-8]\d{6}\b"), "[주민번호]"),
     (re.compile(r"\b01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}\b"), "[전화번호]"),
     (re.compile(r"\b0\d{1,2}[-\s.]\d{3,4}[-\s.]\d{4}\b"), "[전화번호]"),
     (re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"), "[이메일]"),
     (re.compile(r"\b(?:\d{4}[-\s]?){3}\d{4}\b"), "[카드번호]"),
-    # 계좌번호: 숫자 그룹 3~4개, 전체 10~16자리
-    (re.compile(r"\b\d{2,6}-\d{2,6}-\d{2,6}(?:-\d{1,6})?\b"), "[계좌번호]"),
+    # 계좌번호: 숫자 그룹 3~4개(카카오뱅크 3333-01-1234567 처럼 셋째 묶음 7자리까지), 전체 10~16자리
+    (re.compile(r"\b\d{2,6}-\d{2,6}-\d{2,7}(?:-\d{1,6})?\b"), _account),
     (re.compile(r"\b\d{11,14}\b"), "[번호]"),
 ]
 
