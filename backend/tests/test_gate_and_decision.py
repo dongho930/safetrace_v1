@@ -156,6 +156,13 @@ def test_masking():
     assert "sk-abc" not in mask_secrets('api_key="sk-abc" x')
 
 
+def test_masking_keeps_dates():
+    # 뉴스 날짜를 계좌번호로 가리면 판단 모델이 금융 화면으로 오해한다
+    t = mask_pii("2025-11-13 공지 · 계좌 3333-01-1234567 · 사업자 123-45-67890")
+    assert "2025-11-13" in t
+    assert "3333-01-1234567" not in t and "123-45-67890" not in t
+
+
 def test_scroll_not_offered_after_no_effect():
     from safetrace.decision.schema import PageState, action_options
 
@@ -388,3 +395,10 @@ def test_ocr_mosaic_assigns_text_to_its_own_image(monkeypatch):
     # 마감이 지났으면 한 장씩 다시 읽지 않는다
     d = png(90, 30, "yellow")
     assert ocr.read_many([d], deadline=0.0) == [""] and len(single) == 1
+
+
+def test_rules_see_chinese_gambling_words():
+    d = Engine([RuleProvider()], 0.45, 0.6).decide_threat(ThreatRequest(
+        url="http://x.example/", final_url="http://x.example/", redirect_count=0, domains=["x.example"],
+        pages=["[0] 米兰体育 | http://x.example/ | 真人娱乐 体育投注 彩票"]))
+    assert d.threat == "illegal_gambling"
