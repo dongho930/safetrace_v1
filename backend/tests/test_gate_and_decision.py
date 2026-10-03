@@ -414,6 +414,10 @@ _IIIM_EN = ("[0] iii.im URL Shortener | https://iii.im/ZujV | Warning The link y
 @pytest.mark.parametrize("page, expected", [
     (_IIIM_KO, True),
     (_IIIM_EN, True),
+    ("[0] Warning! | https://bit.ly/3GWIQhx | Warning: This URL has been blocked by Bitly's systems as potentially "
+     "harmful. We recommend you close your browser window and notify the person who sent you the link.", True),
+    ("[0] 로그인 | https://bank.example/ | 비밀번호 5회 오류로 로그인이 차단되었습니다. 피싱에 주의하세요", False),
+    ("[0] Bitly | https://bit.ly/1TV4K | 다음은 귀하의 목적지에 대한 미리보기입니다. 현재 위협이 감지되지 않았습니다", False),
     ("[0] 링크 이동 | https://me2.kr/a | 외부 사이트로 이동합니다. 계속하려면 이동하기를 누르세요", False),
     ("[0] 외부 링크 | https://link.naver.com/b | 네이버가 운영하지 않으며 안전을 보장하지 않습니다. 주의 계속 이동", False),
     ("[0] 이동중 | https://x/ | 잠시 후 자동으로 이동합니다. 피싱 예방 안내", False),
