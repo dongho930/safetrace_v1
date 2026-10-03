@@ -460,7 +460,12 @@ def test_shortener_warning_keeps_other_threats():
     ("telegram-kr.xyz", "telegram"),
     ("naver-pay.help", "naver"),
     ("kakaotalk-event.shop", "kakao"),
-    ("g.kbank.mywire.org", None),     # 브랜드 이름이 조각으로 들어 있지 않음
+    ("g.kbank.mywire.org", "kbank"),  # 케이뱅크 사칭(KISA goo.su/E7i5QDl 의 목적지)
+    ("gkk.ilogenskns.com", "ilogen"),
+    ("kks.lotteglo.com", "lotteglo"),
+    ("www.kbanknow.com", None),
+    ("www.ilogen.com", None),
+    ("www.lotteglogis.com", None),
     ("name.n-payost.shop", None),
     ("hometax-go.kr.refund.top", "hometax"),
 ])
@@ -515,3 +520,31 @@ def test_official_brand_domain_with_no_content_kept():
                                               "probabilities": {"benign": 0.9, "unknown": 0.1}}))
     d = Engine([p], 0.45, 0.6).decide_threat(_brand_req("https://t.me/somechannel", "OK"))
     assert d.threat == "benign" and d.override is None
+
+
+@pytest.mark.parametrize("choice, overridden", [("unknown", True), ("benign", True), ("scam", False)])
+def test_brand_lookalike_dead_destination_goes_to_review(choice, overridden):
+    # 목적지가 이미 사라졌어도 그 이름이 브랜드 사칭이면 피싱(담당자 검토). 모델이 고른 위협 유형은 그대로
+    p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
+                    transport=_jev_transport({"type": "choice", "choice": choice,
+                                              "probabilities": {choice: 0.6, "phishing": 0.4}}))
+    req = ThreatRequest(url="https://goo.su/E7i5QDl", final_url="https://goo.su/E7i5QDl", redirect_count=0,
+                        domains=["goo.su"], pages=["[0] goo.su | https://goo.su/E7i5QDl | 이동 중입니다 " * 10],
+                        blocked_destinations=[BlockedDestination(host="g.kbank.mywire.org", reason="ssrf:dns_failure")])
+    d = Engine([p], 0.45, 0.6).decide_threat(req)
+    if overridden:
+        assert d.threat == "phishing" and d.hold
+        assert (d.override["brand"], d.override["destination"]) == ("kbank", "g.kbank.mywire.org")
+    else:
+        assert d.threat == choice and d.override is None
+
+
+def test_meaningless_dead_destination_kept():
+    p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
+                    transport=_jev_transport({"type": "choice", "choice": "unknown",
+                                              "probabilities": {"unknown": 0.7, "phishing": 0.3}}))
+    req = ThreatRequest(url="http://goo.su/PUPst", final_url="http://goo.su/PUPst", redirect_count=0,
+                        domains=["goo.su"], pages=["[0] goo.su | http://goo.su/PUPst | 이동 중"],
+                        blocked_destinations=[BlockedDestination(host="ven.nibyol.fun", reason="ssrf:dns_failure")])
+    d = Engine([p], 0.45, 0.6).decide_threat(req)
+    assert d.threat == "unknown" and d.override is None

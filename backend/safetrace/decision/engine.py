@@ -6,7 +6,7 @@ import logging
 import re
 
 from ..config import Settings
-from .brands import lookalike_in, thin_content
+from .brands import lookalike_destination, lookalike_in, thin_content
 from .official import all_official
 from .providers import JevProvider, Provider, ProviderError, RuleProvider, state_for_jev, timed
 from .schema import (
@@ -131,6 +131,16 @@ class Engine:
                 choice=Threat.PHISHING.value, probabilities={Threat.PHISHING.value: 1.0}, confidence=None,
                 model=res.model, provider="shortener_warning", latency_ms=ms, threat=Threat.PHISHING, hold=True,
                 override={"reason": "shortener_warning",
+                          "original": {"threat": res.choice, "probability": prob, "provider": provider}},
+            )
+        dest = lookalike_destination([b.host for b in req.blocked_destinations])
+        if dest and res.choice in (Threat.UNKNOWN, Threat.BENIGN):
+            # 사이트가 보내려던 목적지가 브랜드를 흉내 낸 도메인이다(이미 사라짐, 예: g.kbank.mywire.org):
+            # 목적지 화면은 못 봤지만 그 이름을 근거로 사칭으로 보고 담당자 검토로 보낸다
+            return ThreatDecision(
+                choice=Threat.PHISHING.value, probabilities={Threat.PHISHING.value: 1.0}, confidence=None,
+                model=res.model, provider="brand_lookalike", latency_ms=ms, threat=Threat.PHISHING, hold=True,
+                override={"reason": "brand_lookalike", "brand": dest[0], "destination": dest[1],
                           "original": {"threat": res.choice, "probability": prob, "provider": provider}},
             )
         brand = lookalike_in(req.url, req.final_url)
