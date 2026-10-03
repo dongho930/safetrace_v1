@@ -37,3 +37,13 @@ kisa,illegal_gambling,http://tel-telegram.com,KISA 2024-12. 텔레그램 사칭 
 kisa,illegal_gambling,http://kc-telegram.com,KISA 2024-12. 텔레그램 사칭 도메인 → 중국 도박(亚新)
 kisa,malicious,http://mi-telegram.com,KISA 2024-12. 텔레그램 사칭 도메인
 kisa,malicious,https://iii.im/ZujV,KISA 2024-12. 단축 URL 서비스가 위험 URL 경고 페이지를 띄움
+kisa,malicious,https://bit.ly/3GWIQhx,KISA 2023. Bitly가 유해 링크로 막은 경고 화면(potentially harmful)
+kisa,malicious,https://bit.ly/1TV4K,KISA 2023. Bitly 미리보기 화면 → xn--vk1bn50bf2d.korean100.com(소멸)
+kisa,malicious,https://lrl.kr/fJFX,KISA 2023. 단축 URL 확인 화면 → sa.boramd.co.kr(소멸)
+kisa,malicious,http://lrl.kr/I1IJ,KISA 2023. 단축 URL 확인 화면 → krkr.appkorea.store(소멸)
+kisa,malicious,https://lrl.kr/PdZ,KISA 2023. 단축 URL 확인 화면 → dp.smosmkh.com(소멸)
+kisa,malicious,https://c11.kr/187mb,KISA 2023. 첫 접속에서 서버가 바로 넘김 → mmsk.ppusrio.top(소멸)
+kisa,malicious,https://han.gl/ICrVHZ,KISA 2023. 첫 접속에서 서버가 바로 넘김 → gsk.smartsmk.com(소멸)
+kisa,malicious,https://han.gl/lSFnPG,KISA 2023. 첫 접속에서 서버가 바로 넘김 → gkk.ilogenskns.com(로젠택배 사칭·소멸)
+kisa,malicious,https://han.gl/WBTaOc,KISA 2023. 첫 접속에서 서버가 바로 넘김 → kks.lotteglo.com(롯데글로벌로지스 사칭·소멸)
+kisa,malicious,https://han.gl/nYQWfx,KISA 2023. 첫 접속에서 서버가 바로 넘김 → m.appcard.pro(카드사 앱 사칭·소멸)
