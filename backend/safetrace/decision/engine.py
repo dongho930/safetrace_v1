@@ -39,10 +39,11 @@ THREAT_QUESTION = (
 )
 
 
-# 단축 URL 서비스의 위험 경고 화면: 위험 문구와 '자동 이동을 막음' 문구가 한 화면에 함께 있다
-_DANGER = re.compile(r"위험|악성|피싱|unsafe|dangerous|malicious|phishing", re.I)
+# 단축 URL 서비스의 위험 경고 화면: 위험 문구와 '자동 이동·링크를 막음' 문구가 한 화면에 함께 있다(iii.im, Bitly)
+_DANGER = re.compile(r"위험|악성|피싱|유해|unsafe|dangerous|malicious|phishing|harmful", re.I)
 _NO_REDIRECT = re.compile(r"자동\s?(?:으로\s?)?이동\S{0,2}\s?(?:막|차단|중단)"
-                          r"|cannot\s+(?:automatically\s+)?redirect|redirect(?:ion)?\s+(?:is\s+|has\s+been\s+)?blocked", re.I)
+                          r"|cannot\s+(?:automatically\s+)?redirect|redirect(?:ion)?\s+(?:is\s+|has\s+been\s+)?blocked"
+                          r"|(?:url|link)\s+(?:is\s+|was\s+|has\s+been\s+)blocked", re.I)
 
 
 def shortener_warning(pages: list[str]) -> bool:
