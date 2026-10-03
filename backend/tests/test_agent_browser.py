@@ -444,6 +444,25 @@ def test_unreachable_escalates_only_on_reputation_match(settings, testpages, mon
         assert not esc
 
 
+def test_unreachable_by_name_blocking_escalates(settings, testpages, monkeypatch):
+    """도메인 이름만 보고 연결을 끊는 회선(통신사 차단): 접속 불가로 묻지 않고 담당자 검토로 올린다."""
+    from safetrace.agent import runner
+    from tests.test_netfilter import _serve
+
+    monkeypatch.setattr(runner, "lookup", lambda *a, **k: {"status": "no_match", "matches": []})
+    srv, port = _serve("name_block", tls=False)
+    try:
+        settings.test_allowlist = [*settings.test_allowlist, f"localhost:{port}"]
+        _, final, chain, _ = run(f"http://localhost:{port}/", settings, testpages)
+    finally:
+        srv.close()
+    assert (final["status"], final["reason"]) == ("REVIEW_REQUIRED", "unreachable_network_filtered"), final
+    assert final["threat"] is None  # 차단 사실만으로 위협 유형을 확정하지 않는다
+    unreachable = next(r for r in chain if r["kind"] == "unreachable")["data"]
+    assert unreachable["network_filter"]["filtered"], unreachable
+    assert [r["data"]["reason"] for r in chain if r["kind"] == "escalation"] == ["unreachable_network_filtered"]
+
+
 def test_unreadable_image_button_not_offered(settings, testpages):
     """OCR 로 글자를 읽지 못한 이미지 버튼(여기서는 OCR 꺼짐)은 선택지에 오르지 않는다: 이미지 '결제' 버튼 대비."""
     settings.ocr_enabled = False
