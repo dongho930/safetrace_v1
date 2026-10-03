@@ -331,6 +331,20 @@ def test_shortener_warning_judged_threat_with_review(settings, testpages):
     assert_no_forbidden(chain, testpages)
 
 
+@pytest.mark.parametrize("proxied", [False, True])
+def test_first_load_redirect_to_dead_destination_is_judged(settings, testpages, request, proxied):
+    """단축 URL 이 첫 접속에서 바로 사라진 목적지로 넘기면 접속 불가가 아니라 막다른 곳: 목적지 이름으로 판단한다."""
+    if proxied:
+        settings.egress_proxy = request.getfixturevalue("egress_proxy")
+    _, final, chain, _ = run(f"{BASE}/r/npay", settings, testpages)
+    assert final["status"] != "UNREACHABLE" and final["reason"] == "dead_end", final
+    assert final["threat"] is not None
+    fin = next(r["data"] for r in chain if r["kind"] == "finish")
+    assert [b["host"] for b in fin["blocked_destinations"]] == ["name.n-payost.invalid"]
+    assert fin["final_url"] == f"{BASE}/r/npay"
+    assert not any(r["kind"] == "unreachable" for r in chain)
+
+
 def test_start_url_private_blocked(settings, testpages):
     _, final, chain, _ = run("http://169.254.169.254/latest/meta-data/", settings, testpages)
     assert final["status"] == "BLOCKED"
