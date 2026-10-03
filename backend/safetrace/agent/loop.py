@@ -616,6 +616,16 @@ class AgentRun:
         try:
             resp = await page.goto(self.start_url, timeout=self.s.nav_timeout_ms, wait_until="commit")
         except (PWError, PWTimeout) as e:
+            start_host = urlsplit(self.start_url).hostname
+            moved = [b["host"] for b in self.result.blocked_destinations if b["host"] != start_host]
+            if moved:
+                # 시작 주소는 응답했지만 서버가 바로 넘긴 목적지가 열리지 않았다(단축 URL → 사라진 피싱 사이트).
+                # 접속 불가가 아니라 막다른 곳이다: 화면은 없어도 목적지 이름을 근거로 위협 판단을 한다
+                self._record("dead_end", {"step": 0, "url": self.start_url[:2048], "destinations": moved,
+                                          "goto_error": classify_goto_error(e)})
+                self.result.status, self.result.finish_reason = "COMPLETED", "dead_end"
+                await self._wrap_up(page, 0)
+                return
             info = classify_goto_error(e)
             if info["net_error"] in netfilter.DROPPED_ERRORS:
                 # 연결은 됐는데 응답 없이 끊겼다: 사이트가 내려간 것인지, 회선이 이름을 보고 막은 것인지 확인한다
@@ -780,10 +790,15 @@ class AgentRun:
             self.budget.steps += 1
             step += 1
 
+        await self._wrap_up(page, step)
+
+    async def _wrap_up(self, page: Page, step: int):
+        """조사를 마무리한다: 최종 주소·전체 캡처·finish 기록·경유 도메인."""
         self.result.steps = step
-        # 막다른 곳에서 끝났으면 마지막으로 열린 실제 페이지를 최종 주소로 둔다(목적지는 blocked_destinations 에 있다)
+        # 오류 화면·빈 화면·프록시 거부 화면에서 끝났으면 마지막으로 열린 실제 페이지를 최종 주소로 둔다
+        # (열리지 않은 목적지는 blocked_destinations 에 있다)
         final_url = page.url
-        if self._is_dead_end(page, len(self.result.blocked_destinations)):
+        if not final_url.startswith(("http://", "https://")) or final_url in self._egress_refused:
             final_url = self.result.nav_chain[-1] if self.result.nav_chain else self.start_url
         self.result.final_url = final_url[:2048]
         final = await self._screenshot(page, "final", full=True)
