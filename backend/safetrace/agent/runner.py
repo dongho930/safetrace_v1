@@ -56,11 +56,17 @@ def investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], None
 
     # 페이지는 못 열었지만 평판 DB 가 위험 URL 로 표시한 경우: 사건을 묻지 않고 담당자 검토로 올린다.
     # 근거가 외부 평판 하나뿐이므로 위협 유형은 확정하지 않는다(threat 없음).
+    # 회선이 도메인 이름을 보고 막은 경우(통신사·기관 차단)도 같다: 이미 차단 목록에 오른 사이트라는 근거다
     status, reason = result.status, result.finish_reason
+    esc = None
     if status == "UNREACHABLE" and sb.get("status") == "match":
         status, reason = "REVIEW_REQUIRED", "unreachable_reputation_match"
         esc = {"from": result.status, "to": status, "reason": reason,
                "threat_types": sorted({m["threat_type"] for m in sb["matches"]})}
+    elif status == "UNREACHABLE" and result.network_filtered:
+        status, reason = "REVIEW_REQUIRED", "unreachable_network_filtered"
+        esc = {"from": result.status, "to": status, "reason": reason, "threat_types": []}
+    if esc:
         rec = writer.append("escalation", esc)
         emit({"type": "evidence", "seq": rec["seq"], "kind": "escalation", "data": esc, "files": [], "hash": rec["hash"]})
 
