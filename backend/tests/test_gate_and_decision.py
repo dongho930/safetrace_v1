@@ -447,3 +447,67 @@ def test_shortener_warning_keeps_other_threats():
     d = Engine([p], 0.45, 0.6).decide_threat(ThreatRequest(
         url="https://iii.im/x", final_url="https://iii.im/x", redirect_count=0, domains=["iii.im"], pages=[_IIIM_KO]))
     assert d.threat == "illegal_gambling" and d.override is None
+
+
+# ── 브랜드 사칭 도메인 ───────────────────────────────────
+@pytest.mark.parametrize("host, brand", [
+    ("mi-telegram.com", "telegram"),
+    ("tel-telegram.com", "telegram"),
+    ("telegram-kr.xyz", "telegram"),
+    ("naver-pay.help", "naver"),
+    ("kakaotalk-event.shop", "kakao"),
+    ("g.kbank.mywire.org", None),     # 브랜드 이름이 조각으로 들어 있지 않음
+    ("name.n-payost.shop", None),
+    ("hometax-go.kr.refund.top", "hometax"),
+])
+def test_lookalike_brand(host, brand):
+    from safetrace.decision.brands import lookalike_brand
+
+    assert lookalike_brand(host) == brand
+
+
+def test_eval_normal_sites_are_not_lookalikes():
+    # 평가 세트의 정상 사이트(공식 도메인)와 그 하위 도메인은 사칭으로 보지 않는다
+    import csv
+    from pathlib import Path
+    from urllib.parse import urlsplit
+
+    from safetrace.decision.brands import lookalike_brand
+
+    rows = csv.reader((Path(__file__).resolve().parents[2] / "data" / "eval_set.csv").open(encoding="utf-8"))
+    hosts = [urlsplit(r[2]).hostname for r in rows if r and r[0] == "normal"]
+    assert len(hosts) >= 16
+    extra = ["nid.naver.com", "accounts.kakao.com", "web.telegram.org", "t.me", "login.coupang.com", "obank.kbstar.com"]
+    assert [h for h in [*hosts, *extra] if lookalike_brand(h)] == []
+
+
+def _brand_req(url, text):
+    host = url.split("/")[2]
+    return ThreatRequest(url=url, final_url=url, redirect_count=0, domains=[host],
+                         pages=[f"[0]  | {url} | {text}"])
+
+
+@pytest.mark.parametrize("choice, text, overridden", [
+    ("benign", "OK", True),                       # 봇에게 'OK' 만 보여 주는 사칭 도메인
+    ("unknown", "OK", True),
+    ("benign", "텔레그램 사용 안내 " * 30, False),  # 내용이 있는 정상 화면이면 모델 판단을 따른다
+    ("illegal_gambling", "OK", False),            # 모델이 고른 위협 유형은 그대로
+])
+def test_brand_lookalike_with_no_content_goes_to_review(choice, text, overridden):
+    p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
+                    transport=_jev_transport({"type": "choice", "choice": choice,
+                                              "probabilities": {choice: 0.6, "phishing": 0.4}}))
+    d = Engine([p], 0.45, 0.6).decide_threat(_brand_req("https://mi-telegram.com/", text))
+    if overridden:
+        assert d.threat == "phishing" and d.hold and d.override["brand"] == "telegram"
+        assert d.override["original"]["threat"] == choice
+    else:
+        assert d.threat == choice and d.override is None
+
+
+def test_official_brand_domain_with_no_content_kept():
+    p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
+                    transport=_jev_transport({"type": "choice", "choice": "benign",
+                                              "probabilities": {"benign": 0.9, "unknown": 0.1}}))
+    d = Engine([p], 0.45, 0.6).decide_threat(_brand_req("https://t.me/somechannel", "OK"))
+    assert d.threat == "benign" and d.override is None

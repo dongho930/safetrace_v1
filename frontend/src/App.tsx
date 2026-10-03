@@ -49,6 +49,7 @@ const THREAT_LABEL: Record<string, string> = {
 function overrideLabel(o: Threat["override"]): string {
   if (!o) return "";
   if (o.reason === "shortener_warning") return "단축 URL 서비스의 위험 경고 → 담당자 검토";
+  if (o.reason === "brand_lookalike") return `브랜드 사칭 도메인(${o.brand ?? ""}), 화면 내용 없음 → 담당자 검토`;
   return `공식 사행사업자 도메인${o.operators?.length ? ` · ${o.operators.join(", ")}` : ""}`;
 }
 const REASON_LABEL: Record<string, string> = {
