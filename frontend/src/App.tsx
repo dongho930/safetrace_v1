@@ -53,6 +53,7 @@ function overrideLabel(o: Threat["override"]): string {
 }
 const REASON_LABEL: Record<string, string> = {
   unreachable_reputation_match: "접속 불가 · Safe Browsing 위험 일치",
+  unreachable_network_filtered: "접속 불가 · 회선이 도메인 이름을 보고 차단(이미 차단 목록에 오른 사이트)",
   goto_failed: "최초 접속 실패",
   low_confidence_action: "다음 행동 확신 부족으로 탐색 종료",
   loop_detected: "같은 화면 반복으로 탐색 종료",
@@ -594,7 +595,10 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
     } else if (e.kind === "unreachable") {
       lines.push({ seq: e.seq, icon: "ban", tone: "red", text: <span className="bad">접속 불가 · {NET_CATEGORY_LABEL[String(d.category)] ?? String(d.error)}{d.net_error ? ` (${String(d.net_error)})` : ""}</span> });
     } else if (e.kind === "escalation") {
-      lines.push({ seq: e.seq, icon: "alert", tone: "orange", text: <span className="warn">담당자 검토로 전환 · Safe Browsing {((d.threat_types as string[]) ?? []).join(", ")}</span> });
+      const why = d.reason === "unreachable_network_filtered"
+        ? "회선의 도메인 차단 감지"
+        : `Safe Browsing ${((d.threat_types as string[]) ?? []).join(", ")}`;
+      lines.push({ seq: e.seq, icon: "alert", tone: "orange", text: <span className="warn">담당자 검토로 전환 · {why}</span> });
     } else if (e.kind === "threat") {
       lines.push({ seq: e.seq, icon: "flag", tone: d.threat === "benign" ? "teal" : "orange", text: <>위협 판단 · {THREAT_LABEL[String(d.threat)] ?? String(d.threat)}{d.override ? ` (${overrideLabel(d.override as Threat["override"])})` : ""}</>, end: pct(Number(d.probability)) });
     } else if (e.kind === "safebrowsing") {

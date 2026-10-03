@@ -32,6 +32,7 @@ from ..decision.schema import ActionKind, Candidate, PageState, ThreatRequest, a
 from ..evidence import EvidenceWriter
 from ..masking import mask_pii
 from ..proxy.egress import EGRESS_HEADER
+from . import netfilter
 from .gate import Budget, ElementInfo, SafetyGate, classify_forbidden
 from .observe import CLOSE_POPUP_JS, COLLECT_JS, READ_ONE_JS, RECTS_JS
 from .recorder import ScreencastRecorder, find_ffmpeg
@@ -121,6 +122,7 @@ class RunResult:
     blocked_requests: int = 0
     forbidden_seen: list[str] = field(default_factory=list)
     blocked_destinations: list[dict] = field(default_factory=list)  # 열리지 않은 이동 목적지 {host, reason}
+    network_filtered: bool = False  # 접속 불가의 원인이 회선의 도메인 이름 차단(통신사·기관)으로 보임
 
 
 @dataclass
@@ -614,7 +616,13 @@ class AgentRun:
         try:
             resp = await page.goto(self.start_url, timeout=self.s.nav_timeout_ms, wait_until="commit")
         except (PWError, PWTimeout) as e:
-            self._record("unreachable", classify_goto_error(e))
+            info = classify_goto_error(e)
+            if info["net_error"] in netfilter.DROPPED_ERRORS:
+                # 연결은 됐는데 응답 없이 끊겼다: 사이트가 내려간 것인지, 회선이 이름을 보고 막은 것인지 확인한다
+                info["network_filter"] = await asyncio.to_thread(
+                    netfilter.probe, self.start_url, self.s.egress_proxy, set(self.s.test_allowlist))
+                self.result.network_filtered = info["network_filter"]["filtered"]
+            self._record("unreachable", info)
             self.result.status, self.result.finish_reason = "UNREACHABLE", "goto_failed"
             return
         refused = resp.headers.get(EGRESS_HEADER.lower()) if resp is not None and resp.status >= 400 else None
@@ -622,6 +630,14 @@ class AgentRun:
             # 평문 http 시작 주소를 검문 프록시가 거부했다(상대에 연결 못 함): https 의 터널 실패와 같은 접속 불가다
             self._record("unreachable", {"error": "EgressRefused", "net_error": None, "category": "egress_refused",
                                          "egress_reason": refused[:64]})
+            self.result.status, self.result.finish_reason = "UNREACHABLE", "goto_failed"
+            return
+        if netfilter.is_warning_page(page.url):
+            # 회선이 차단 안내 페이지(warning.or.kr)로 보냈다: 사이트 화면은 볼 수 없다
+            self._record("unreachable", {"error": "WarningPage", "net_error": None, "category": "network_filtered",
+                                         "network_filter": {"method": "warning_page", "filtered": True,
+                                                            "url": page.url[:2048]}})
+            self.result.network_filtered = True
             self.result.status, self.result.finish_reason = "UNREACHABLE", "goto_failed"
             return
         t0 = time.monotonic()
