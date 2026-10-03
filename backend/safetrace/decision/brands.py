@@ -23,6 +23,9 @@ OFFICIAL_BRAND_DOMAINS: dict[str, tuple[str, ...]] = {
     "hometax": ("hometax.go.kr",),
     "epost": ("epost.go.kr", "epost.kr"),
     "cjlogistics": ("cjlogistics.com",),
+    "kbank": ("kbanknow.com",),                 # 케이뱅크
+    "ilogen": ("ilogen.com",),                  # 로젠택배
+    "lotteglo": ("lotteglogis.com",),           # 롯데글로벌로지스
 }
 THIN_TEXT_CHARS = 200  # 조사한 화면 글자를 다 합쳐 이보다 적으면 '내용이 거의 없음'
 _TOKEN = re.compile(r"[.\-_]")
@@ -43,6 +46,15 @@ def lookalike_in(url: str, final_url: str) -> str | None:
         brand = lookalike_brand(urlsplit(u).hostname or "")
         if brand:
             return brand
+    return None
+
+
+def lookalike_destination(hosts: list[str]) -> tuple[str, str] | None:
+    """열리지 않은 이동 목적지 중 브랜드 사칭 도메인이 있으면 (브랜드, 도메인)."""
+    for h in hosts:
+        brand = lookalike_brand(h)
+        if brand:
+            return brand, h
     return None
 
 
