@@ -32,3 +32,15 @@ def test_browser_user_agent():
     assert "Chrome/153.0.0.0" in ua and "Headless" not in ua
     assert browser_user_agent("", "153.0") == ""
     assert browser_user_agent("custom-ua", "153.0") == "custom-ua"
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Redirecting...\nPlease wait", True),                                         # goo.su
+    (" 안전한 URL\n\n곧 원하시는 페이지로 이동됩니다.\n조금만 기다려주세요.\n\n7\n\n초 후 이동합니다.", True),  # lrl.kr
+    ("로그인\n아이디 비밀번호 찾기", False),
+    ("페이지를 이동하려면 아래 버튼을 누르세요", False),
+])
+def test_auto_redirect_page(text, expected):
+    from safetrace.agent.loop import is_auto_redirect_page
+
+    assert is_auto_redirect_page(text) is expected

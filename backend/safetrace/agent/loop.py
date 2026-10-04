@@ -58,6 +58,15 @@ _NET_CATEGORY = {
     "ERR_INTERNET_DISCONNECTED": "network_unreachable",
 }
 
+# 잠시 뒤 스스로 목적지로 넘어가는 대기 화면(단축 URL 서비스). 실제로 관찰한 문구만 넣는다:
+# goo.su "Redirecting... Please wait", lrl.kr "곧 원하시는 페이지로 이동됩니다 … 7 초 후 이동합니다"
+_AUTO_REDIRECT = re.compile(r"Redirecting\.\.\.|Please wait|원하시는 페이지로 이동|초 후 이동합니다")
+_AUTO_REDIRECT_WAIT = 10.0  # 대기 화면에서 이동을 기다리는 최대 시간(초)
+
+
+def is_auto_redirect_page(text: str) -> bool:
+    return bool(_AUTO_REDIRECT.search(text[:2000]))
+
 
 def classify_goto_error(e: Exception) -> dict:
     """최초 접속 실패를 '사이트가 내려감'과 '우리를 막음'을 구분할 수 있는 분류로 바꾼다."""
@@ -155,6 +164,7 @@ class AgentRun:
         self._host_ok: dict[str, tuple[float, bool, str]] = {}
         self._egress_refused: set[str] = set()  # 검문 프록시가 거부 응답을 돌려준 주소(그 응답 화면은 막다른 곳)
         self._dead_links: set[tuple[str, str]] = set()  # 막다른 곳으로 이어진 (페이지 주소, 버튼 글자)
+        self._waited: set[str] = set()  # 자동 이동을 기다려 본 대기 화면 주소(한 번만 기다린다)
 
     # ── 기록 ──────────────────────────────────────────
     def _record(self, kind: str, data: dict, files: list[str] | None = None) -> int:
@@ -461,6 +471,28 @@ class AgentRun:
             await self._settle(page)
         return page if page.url == url else None
 
+    async def _wait_auto_redirect(self, page: Page, state: PageState, step: int) -> bool:
+        """끝내기 전에, 스스로 넘어가는 대기 화면이면 잠시 기다려 본다. 넘어갔으면 True.
+        단축 URL 서비스는 대기 화면을 몇 초 보여 준 뒤 목적지로 옮긴다. 그 전에 끝내면 목적지가 기록되지 않는다."""
+        url = page.url
+        if url in self._waited or not is_auto_redirect_page(state.text):
+            return False
+        self._waited.add(url)
+        blocked0 = len(self.result.blocked_destinations)
+        t0 = time.monotonic()
+        until = t0 + min(_AUTO_REDIRECT_WAIT, max(0.0, self.budget.remaining() - 5))
+        while time.monotonic() < until:
+            if page.url != url or len(self.result.blocked_destinations) > blocked0:
+                break
+            await asyncio.sleep(0.25)
+        moved = page.url != url or len(self.result.blocked_destinations) > blocked0
+        if moved:
+            await self._settle(page)
+        self._record("wait_redirect", {"step": step, "url": url[:2048], "moved": moved,
+                                       "result_url": page.url[:2048], "waited_ms": int((time.monotonic() - t0) * 1000),
+                                       "destinations": [b["host"] for b in self.result.blocked_destinations[blocked0:]]})
+        return moved
+
     async def _settle(self, page: Page):
         try:
             await page.wait_for_load_state("domcontentloaded", timeout=5000)
@@ -720,6 +752,15 @@ class AgentRun:
                 "provider": decision.provider, "model": decision.model, "latency_ms": decision.latency_ms,
                 "observe_seq": obs.evidence_seq,
             })
+            if prob < self.s.action_min_prob or decision.action == ActionKind.FINISH:
+                waiting_from = len(self.result.blocked_destinations)
+                if await self._wait_auto_redirect(page, obs.state, step):
+                    # 대기 화면이 스스로 다음 곳으로 넘어갔다: 끝내지 않고 넘어간 곳(막다른 곳 포함)을 이어서 본다
+                    blocked_before = waiting_from
+                    self.history.append("wait_redirect")
+                    self.budget.steps += 1
+                    step += 1
+                    continue
             if prob < self.s.action_min_prob:
                 # 다음 행동을 확신하지 못하면 탐색만 멈춘다. 담당자 검토 여부는 위협 판단(확신 부족 시 hold)에 맡긴다:
                 # 탐색 확신도가 낮은 것과 위협 판단이 불확실한 것은 다르다.

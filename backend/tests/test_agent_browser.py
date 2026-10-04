@@ -322,6 +322,43 @@ def test_site_moving_itself_to_dead_end_finishes(settings, testpages):
     assert not any(r["kind"] == "action" and "chrome-error" in r["data"]["result_url"] for r in chain)
 
 
+@pytest.mark.parametrize("decision", ["low_confidence", "finish"])
+def test_waits_for_auto_redirect_before_finishing(settings, testpages, decision):
+    """단축 URL 의 대기 화면("Redirecting... Please wait")에서 끝내려 하면 스스로 넘어갈 때까지 잠시 기다려
+    목적지를 기록한다(goo.su: 몇 초 뒤 사라진 피싱 도메인으로 이동)."""
+    from safetrace.decision.schema import ActionDecision, ActionKind, Threat, ThreatDecision
+
+    class Stopper:
+        req = None
+
+        def action(self, state):
+            if decision == "finish":
+                return ActionDecision(choice="finish", probabilities={"finish": 0.9}, model="t", provider="t",
+                                      latency_ms=0, action=ActionKind.FINISH)
+            return ActionDecision(choice="scroll", probabilities={"scroll": 0.3, "finish": 0.25}, model="t",
+                                  provider="t", latency_ms=0, action=ActionKind.SCROLL)
+
+        def threat(self, req):
+            self.req = req
+            return ThreatDecision(choice="unknown", probabilities={"unknown": 0.5}, model="t", provider="t",
+                                  latency_ms=0, threat=Threat.UNKNOWN, hold=True)
+
+    testpages.clear()
+    cid, d = str(uuid.uuid4()), Stopper()
+    final = investigate(cid, f"{BASE}/phish/short-wait.html", settings, lambda e: None, decider=d)
+    assert final["reason"] == "dead_end", final
+    assert [b.host for b in d.req.blocked_destinations] == ["name.n-paywait.invalid"]
+    chain = [json.loads(x) for x in (settings.evidence_dir / cid / "chain.jsonl").read_text(encoding="utf-8").splitlines()]
+    waits = [r["data"] for r in chain if r["kind"] == "wait_redirect"]
+    assert len(waits) == 1 and waits[0]["moved"] and waits[0]["destinations"] == ["name.n-paywait.invalid"], waits
+
+
+def test_no_wait_on_ordinary_page(settings, testpages):
+    """대기 문구가 없는 화면에서 끝낼 때는 기다리지 않는다(조사가 길어지지 않게)."""
+    _, final, chain, _ = run(f"{BASE}/benign/", settings, testpages)
+    assert not any(r["kind"] == "wait_redirect" for r in chain)
+
+
 def test_shortener_warning_judged_threat_with_review(settings, testpages):
     """단축 URL 서비스가 위험 링크라며 자동 이동을 막은 화면: 목적지를 못 봐도 위협(담당자 검토)으로 본다."""
     settings.max_steps = 3
