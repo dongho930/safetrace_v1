@@ -15,7 +15,8 @@ os.environ.setdefault("ST_DATABASE_URL", "sqlite:///" + str(ROOT / "var" / "test
 os.environ.setdefault("ST_EVIDENCE_DIR", str(ROOT / "var" / "test-evidence"))
 INVESTIGATOR = "inv-" + secrets.token_hex(16)
 VIEWER = "view-" + secrets.token_hex(16)
-os.environ["ST_API_TOKENS"] = f'["{INVESTIGATOR}:investigator", "{VIEWER}:viewer"]'
+SERVICE_ADMIN = "svc-" + secrets.token_hex(16)  # 자동화 토큰: 관리자 역할이어도 계정 관리·판정은 못 한다
+os.environ["ST_API_TOKENS"] = f'["{INVESTIGATOR}:investigator", "{VIEWER}:viewer", "{SERVICE_ADMIN}:admin"]'
 os.environ["ST_DECIDER_CHAIN"] = '["rules"]'
 os.environ["ST_TEST_ALLOWLIST"] = '["127.0.0.1:8900", "localhost:8900"]'
 os.environ["ST_RECORD_VIDEO"] = "true"

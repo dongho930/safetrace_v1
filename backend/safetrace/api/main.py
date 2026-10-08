@@ -1,4 +1,4 @@
-"""SafeTrace API: 사건 접수·조회, 실시간 진행(SSE), 증거 파일·무결성 검증.
+"""SafeTrace API: 로그인·계정, 사건 접수·조회, 실시간 진행(SSE), 증거 파일·무결성 검증.
 
 실행: uvicorn safetrace.api.main:app --port 8000
 """
@@ -23,6 +23,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from .. import accounts
+from ..accounts import ROLES, AccountError
 from ..config import get_settings
 from ..evidence import Head, Signer, verify_case
 from ..live import CHANNEL as LIVE_CHANNEL
@@ -39,14 +41,14 @@ log = logging.getLogger("safetrace.api")
 settings = get_settings()
 store = Store(settings.database_url)
 
-ROLES = {"viewer": 0, "investigator": 1, "reviewer": 2, "admin": 3}
 _FILE_NAME = re.compile(r"^[a-z0-9_\-]{1,64}\.(png|webm)$")
 _CASE_ID = re.compile(r"^[a-f0-9\-]{36}$")
 TERMINAL = {"COMPLETED", "REVIEW_REQUIRED", "FAILED", "UNREACHABLE", "BLOCKED"}
 
 
 def _token_table() -> dict[str, tuple[str, str]]:
-    """토큰 원문은 메모리에도 해시로만 둔다. 반환: sha256(token) -> (role, 주체 이름)"""
+    """자동화(서비스) 토큰. 원문은 메모리에도 해시로만 둔다. 반환: sha256(token) -> (role, 주체 이름)
+    사람은 계정으로 로그인하고(accounts.py), 이 토큰은 스크립트·연동용이다. 서비스 주체는 계정 관리를 할 수 없다."""
     out = {}
     for i, entry in enumerate(settings.api_tokens):
         token, _, role = entry.rpartition(":")
@@ -61,15 +63,20 @@ TOKENS = _token_table()
 class Principal(BaseModel):
     name: str
     role: str
+    kind: str = "user"  # user(담당자 계정) | service(자동화 토큰)
+    user_id: int | None = None
 
 
 def _principal(token: str) -> Principal | None:
     if not token:
         return None
+    u = accounts.resolve(store, token)
+    if u is not None:
+        return Principal(name=u.username, role=u.role, kind="user", user_id=u.user_id)
     digest = hashlib.sha256(token.encode()).hexdigest()
     for known, (role, name) in TOKENS.items():
         if hmac.compare_digest(known, digest):
-            return Principal(name=name, role=role)
+            return Principal(name=name, role=role, kind="service")
     return None
 
 
@@ -81,9 +88,11 @@ def auth(authorization: Annotated[str, Header()] = "") -> Principal:
     return p
 
 
-def need(role: str):
+def need(role: str, human: bool = False):
+    """역할 검사. human=True 면 담당자 계정만 허용한다(자동화 토큰은 역할과 관계없이 거부)."""
+
     def dep(p: Annotated[Principal, Depends(auth)]) -> Principal:
-        if ROLES[p.role] < ROLES[role]:
+        if ROLES[p.role] < ROLES[role] or (human and p.kind != "user"):
             raise HTTPException(403, "forbidden")
         return p
 
@@ -145,7 +154,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="SafeTrace API", docs_url=None, redoc_url=None, lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_methods=["GET", "POST"],
+app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_methods=["GET", "POST", "PATCH"],
                    allow_headers=["Authorization", "Content-Type", "Idempotency-Key"], allow_credentials=False)
 
 
@@ -191,6 +200,54 @@ class CaseOut(BaseModel):
                    head_seq=c.head_seq, created_at=c.created_at.isoformat())
 
 
+class LoginIn(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=accounts.PASSWORD_MAX)
+
+
+class Me(BaseModel):
+    name: str
+    role: str
+    kind: str
+
+
+class LoginOut(BaseModel):
+    token: str
+    expires_at: str
+    user: Me
+
+
+class PasswordChange(BaseModel):
+    current: str = Field(min_length=1, max_length=accounts.PASSWORD_MAX)
+    new: str = Field(min_length=1, max_length=accounts.PASSWORD_MAX)
+
+
+class UserOut(BaseModel):
+    username: str
+    role: str
+    active: bool
+    locked: bool
+    created_at: str
+
+    @classmethod
+    def of(cls, u) -> UserOut:
+        return cls(username=u.username, role=u.role, active=u.active, locked=accounts.is_locked(u),
+                   created_at=u.created_at.isoformat())
+
+
+class UserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
+    password: str = Field(min_length=1, max_length=accounts.PASSWORD_MAX)
+    role: str = Field(pattern=r"^(viewer|investigator|reviewer|admin)$")
+
+
+class UserPatch(BaseModel):
+    role: str | None = Field(default=None, pattern=r"^(viewer|investigator|reviewer|admin)$")
+    active: bool | None = None
+    password: str | None = Field(default=None, min_length=1, max_length=accounts.PASSWORD_MAX)
+    unlock: bool = False
+
+
 def _get_case(case_id: str) -> Case:
     if not _CASE_ID.match(case_id):
         raise HTTPException(404, "not found")
@@ -207,6 +264,87 @@ def healthz():
     return {"ok": True}
 
 
+# ── 로그인·계정 ─────────────────────────────────────────
+def _safe_name(username: str) -> str:
+    # 감사로그에는 형식에 맞는 아이디만 그대로 남긴다(공격자가 넣은 임의 문자열이 로그에 섞이지 않게)
+    return username if accounts.USERNAME.match(username) else "-"
+
+
+@app.post("/api/auth/login", response_model=LoginOut)
+def login(body: LoginIn):
+    res = accounts.login(store, body.username, body.password)
+    if res is None:
+        store.audit(_safe_name(body.username), "auth.login_failed",
+                    detail=accounts.login_failure_reason(store, body.username))
+        raise HTTPException(401, "아이디 또는 비밀번호가 올바르지 않습니다")
+    token, u, expires = res
+    store.audit(u.username, "auth.login")
+    return LoginOut(token=token, expires_at=expires.isoformat(), user=Me(name=u.username, role=u.role, kind="user"))
+
+
+@app.post("/api/auth/logout", status_code=204)
+def logout(p: Annotated[Principal, Depends(auth)], authorization: Annotated[str, Header()] = ""):
+    if p.kind == "user":
+        accounts.logout(store, authorization.partition(" ")[2])
+        store.audit(p.name, "auth.logout")
+    return Response(status_code=204)
+
+
+@app.get("/api/auth/me", response_model=Me)
+def me(p: Annotated[Principal, Depends(auth)]):
+    return Me(name=p.name, role=p.role, kind=p.kind)
+
+
+@app.post("/api/auth/password", status_code=204)
+def change_password(body: PasswordChange, p: Annotated[Principal, Depends(need("viewer", human=True))]):
+    try:
+        ok = accounts.change_password(store, p.user_id, body.current, body.new)
+    except AccountError as e:
+        raise HTTPException(422, str(e)) from None
+    if not ok:
+        store.audit(p.name, "auth.password_change_failed")
+        raise HTTPException(403, "현재 비밀번호가 올바르지 않습니다")
+    store.audit(p.name, "auth.password_change")
+    return Response(status_code=204)
+
+
+@app.get("/api/users", response_model=list[UserOut])
+def list_users(p: Annotated[Principal, Depends(need("admin", human=True))]):
+    return [UserOut.of(u) for u in accounts.list_users(store)]
+
+
+@app.post("/api/users", response_model=UserOut, status_code=201)
+def create_user(body: UserCreate, p: Annotated[Principal, Depends(need("admin", human=True))]):
+    try:
+        u = accounts.create_user(store, body.username, body.password, body.role)
+    except AccountError as e:
+        raise HTTPException(422, str(e)) from None
+    store.audit(p.name, "user.create", detail=f"user={u.username} role={u.role}")
+    return UserOut.of(u)
+
+
+@app.patch("/api/users/{username}", response_model=UserOut)
+def patch_user(username: str, body: UserPatch, p: Annotated[Principal, Depends(need("admin", human=True))]):
+    if not accounts.USERNAME.match(username):
+        raise HTTPException(404, "not found")
+    if username == p.name and (body.role not in (None, "admin") or body.active is False):
+        raise HTTPException(422, "자기 계정의 관리자 권한은 내리거나 끌 수 없습니다")
+    try:
+        u = accounts.update_user(store, username, role=body.role, active=body.active, password=body.password,
+                                 unlock=body.unlock)
+    except AccountError as e:
+        raise HTTPException(422, str(e)) from None
+    except LookupError:
+        raise HTTPException(404, "not found") from None
+    changes = [f"role={body.role}"] if body.role else []
+    changes += [f"active={body.active}"] if body.active is not None else []
+    changes += ["password_reset"] if body.password is not None else []
+    changes += ["unlock"] if body.unlock else []
+    store.audit(p.name, "user.update", detail=f"user={username} " + " ".join(changes))
+    return UserOut.of(u)
+
+
+# ── 사건 ─────────────────────────────────────────────
 @app.post("/api/cases", response_model=CaseOut, status_code=201)
 def create_case(body: CaseCreate, p: Annotated[Principal, Depends(need("investigator"))],
                 idempotency_key: Annotated[str | None, Header(max_length=64)] = None):

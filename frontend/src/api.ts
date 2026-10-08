@@ -1,4 +1,4 @@
-// API 클라이언트. 토큰은 sessionStorage 에만 두고(탭 종료 시 삭제), 모든 요청에 Bearer 로 붙인다.
+// API 클라이언트. 로그인으로 받은 세션 토큰은 sessionStorage 에만 두고(탭 종료 시 삭제), 모든 요청에 Bearer 로 붙인다.
 export type Threat = {
   threat: string;
   probability: number;
@@ -51,6 +51,13 @@ export class ApiError extends Error {
 }
 
 async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const r = await send(path, init);
+  return r.json() as Promise<T>;
+}
+async function reqNoBody(path: string, init: RequestInit = {}): Promise<void> {
+  await send(path, init);
+}
+async function send(path: string, init: RequestInit): Promise<Response> {
   const r = await fetch(path, {
     ...init,
     headers: { ...(init.headers ?? {}), Authorization: `Bearer ${getToken()}`, "Content-Type": "application/json" },
@@ -65,10 +72,44 @@ async function req<T>(path: string, init: RequestInit = {}): Promise<T> {
     }
     throw new ApiError(r.status, msg);
   }
-  return r.json() as Promise<T>;
+  return r;
 }
 
-export const listCases = () => req<CaseOut[]>("/api/cases?limit=50");
+// ── 로그인·계정 ─────────────────────────────────────
+export type Role = "viewer" | "investigator" | "reviewer" | "admin";
+export const ROLE_RANK: Record<Role, number> = { viewer: 0, investigator: 1, reviewer: 2, admin: 3 };
+export type Me = { name: string; role: Role; kind: "user" | "service" };
+export type UserOut = { username: string; role: Role; active: boolean; locked: boolean; created_at: string };
+
+// 로그인 요청은 아직 토큰이 없으므로 Authorization 없이 보낸다
+export async function login(username: string, password: string): Promise<Me> {
+  const r = await fetch("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!r.ok) throw new ApiError(r.status, r.status === 401 ? "아이디 또는 비밀번호가 올바르지 않습니다" : `로그인 실패 (${r.status})`);
+  const j = (await r.json()) as { token: string; user: Me };
+  setToken(j.token);
+  return j.user;
+}
+export async function logout() {
+  try {
+    await fetch("/api/auth/logout", { method: "POST", headers: { Authorization: `Bearer ${getToken()}` } });
+  } finally {
+    clearToken();
+  }
+}
+export const me = () => req<Me>("/api/auth/me");
+export const changePassword = (current: string, next: string) =>
+  reqNoBody("/api/auth/password", { method: "POST", body: JSON.stringify({ current, new: next }) });
+export const listUsers = () => req<UserOut[]>("/api/users");
+export const createUser = (username: string, password: string, role: Role) =>
+  req<UserOut>("/api/users", { method: "POST", body: JSON.stringify({ username, password, role }) });
+export const patchUser = (username: string, patch: Partial<{ role: Role; active: boolean; password: string; unlock: boolean }>) =>
+  req<UserOut>(`/api/users/${encodeURIComponent(username)}`, { method: "PATCH", body: JSON.stringify(patch) });
+
+export const listCases = () =>req<CaseOut[]>("/api/cases?limit=50");
 export const getCase = (id: string) => req<CaseOut>(`/api/cases/${encodeURIComponent(id)}`);
 export const createCase = (url: string, source: string) =>
   req<CaseOut>("/api/cases", {
