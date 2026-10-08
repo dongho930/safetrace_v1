@@ -33,10 +33,11 @@ python -m venv .venv && .venv/Scripts/pip install -e "backend[ocr,dev]"   # macO
 
 # backend/.env
 #   ST_EVIDENCE_HMAC_KEY=<python -c "import secrets;print(secrets.token_hex(32))">
-#   ST_API_TOKENS=["<24자 이상 토큰>:admin"]
+#   ST_API_TOKENS=[]                                        # 자동화(스크립트)용 토큰만. 사람은 계정으로 로그인
 #   ST_DECIDER_CHAIN=["rules"]                              # Jev 키가 있으면 ["jev_typesafe","jev_openrouter","rules"]
 #   ST_TEST_ALLOWLIST=["127.0.0.1:8900","localhost:8900"]   # 시험 페이지 허용(운영에서는 비움)
 
+cd backend && ../.venv/Scripts/python -m safetrace.accounts add <아이디> --role admin   # 첫 관리자(비밀번호 입력)
 python testpages/server.py                                   # 시험 페이지 :8900
 cd backend && ../.venv/Scripts/uvicorn safetrace.api.main:app --port 8000
 cd frontend && npm install && npm run dev                    # 콘솔 :5173
@@ -50,7 +51,17 @@ cd frontend && npm install && npm run dev                    # 콘솔 :5173
 cp .env.example .env   # 값 채우기
 docker compose up -d --build
 docker compose --profile demo up -d testpages   # 시연용 시험 페이지(선택)
+docker compose exec api python -m safetrace.accounts add <아이디> --role admin   # 첫 관리자
 ```
+
+## 계정과 권한
+
+- 담당자는 아이디·비밀번호로 로그인한다. 비밀번호는 Argon2id(m=64MiB, t=3, p=4)로만 저장하고, 세션 토큰은 DB에 SHA-256만 남긴다.
+- 세션은 30분 동안 쓰지 않거나 12시간이 지나면 끊긴다. 비밀번호가 5번 연속 틀리면 그 계정을 15분 잠근다.
+- 역할: 열람(viewer) < 조사관(investigator, URL 접수) < 검토관(reviewer, 판정) < 관리자(admin, 계정 관리). 역할 변경·비활성화·비밀번호 변경 때 그 계정의 세션을 모두 끊는다.
+- 첫 관리자는 명령줄로 만들고, 그다음 계정은 콘솔의 「계정 관리」에서 만든다. 잊은 비밀번호는 `python -m safetrace.accounts passwd <아이디>`, 잠금 해제는 `unlock <아이디>`.
+- `ST_API_TOKENS`는 자동화(스크립트) 전용이다. 관리자 역할이어도 계정 관리는 할 수 없다.
+- 로그인 성공·실패(이유 포함), 로그아웃, 계정 생성·변경은 감사로그에 남는다. 비밀번호는 남기지 않는다.
 
 - `sandbox` 네트워크는 `internal`: 에이전트는 인터넷에 직접 나갈 수 없고 `egress` 프록시로만 나간다.
 - 에이전트에는 DB 접속 정보와 Jev 키가 없다. Jev 키는 `decision`에만 있다.

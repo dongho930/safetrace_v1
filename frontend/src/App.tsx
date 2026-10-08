@@ -4,13 +4,23 @@ import {
   ApiError,
   type CaseOut,
   type EvidenceEvent,
+  type Me,
+  ROLE_RANK,
+  type Role,
+  type UserOut,
+  changePassword,
   clearToken,
   createCase,
+  createUser,
   fileUrl,
   getCase,
   getToken,
   listCases,
-  setToken,
+  listUsers,
+  login,
+  logout,
+  me,
+  patchUser,
   streamEvents,
   type Threat,
   verifyCase,
@@ -128,38 +138,57 @@ function useFitZoom() {
   return { zoom: z, width: `calc(100vw / ${z})`, height: `calc(100vh / ${z})` };
 }
 
+const ROLE_LABEL: Record<Role, string> = { viewer: "열람", investigator: "조사관", reviewer: "검토관", admin: "관리자" };
+
 const fmtTime = (iso: string) => new Date(iso).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false });
 const pct = (v: number) => v.toFixed(2);
 
 // ── 앱 ─────────────────────────────────────────────
 export default function App() {
-  const [token, setTok] = useState(getToken());
+  const [user, setUser] = useState<Me | null>(null);
+  const [checking, setChecking] = useState(!!getToken());
   const [cases, setCases] = useState<CaseOut[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [dialog, setDialog] = useState<"" | "users" | "password">("");
   const fit = useFitZoom();
+
+  const signOut = useCallback(() => {
+    clearToken();
+    setUser(null);
+    setCases([]);
+    setSelected(null);
+    setDialog("");
+  }, []);
+
+  // 새로 고침해도 같은 탭이면 세션을 이어 쓴다(만료됐으면 로그인 화면으로)
+  useEffect(() => {
+    if (!getToken()) return;
+    me()
+      .then(setUser)
+      .catch(signOut)
+      .finally(() => setChecking(false));
+  }, [signOut]);
 
   const refresh = useCallback(async () => {
     try {
       setCases(await listCases());
       setError("");
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) {
-        clearToken();
-        setTok("");
-      }
+      if (e instanceof ApiError && e.status === 401) signOut();
       setError(e instanceof Error ? e.message : "목록 조회 실패");
     }
-  }, []);
+  }, [signOut]);
 
   useEffect(() => {
-    if (!token) return;
+    if (!user) return;
     refresh();
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
-  }, [token, refresh]);
+  }, [user, refresh]);
 
-  if (!token) return <Login fit={fit} onLogin={(t) => (setToken(t), setTok(t))} />;
+  if (checking) return <div className="login" style={fit} />;
+  if (!user) return <Login fit={fit} onLogin={setUser} />;
 
   return (
     <div className="app" style={fit}>
@@ -173,15 +202,32 @@ export default function App() {
         </div>
         <span className="muted small">위협 의심 사이트 조사 콘솔</span>
         <div className="spacer" />
-        <button type="button" className="btn btn-ghost" onClick={() => (clearToken(), setTok(""))}>
+        <span className="who">
+          <span className="mono">{user.name}</span>
+          <span className="chip">{ROLE_LABEL[user.role]}</span>
+        </span>
+        {user.kind === "user" && user.role === "admin" && (
+          <button type="button" className="btn btn-text" onClick={() => setDialog("users")}>
+            계정 관리
+          </button>
+        )}
+        {user.kind === "user" && (
+          <button type="button" className="btn btn-text" onClick={() => setDialog("password")}>
+            비밀번호 변경
+          </button>
+        )}
+        <button type="button" className="btn btn-ghost" onClick={() => logout().finally(signOut)}>
           로그아웃
         </button>
       </header>
+      {dialog === "users" && <UsersDialog me={user} onClose={() => setDialog("")} />}
+      {dialog === "password" && <PasswordDialog onClose={() => setDialog("")} onChanged={signOut} />}
 
       <Kpis cases={cases} />
 
       <div className="cols">
         <Queue
+          canCreate={ROLE_RANK[user.role] >= ROLE_RANK.investigator}
           cases={cases}
           selected={selected}
           error={error}
@@ -197,8 +243,11 @@ export default function App() {
   );
 }
 
-function Login({ fit, onLogin }: { fit: React.CSSProperties; onLogin: (t: string) => void }) {
-  const [t, setT] = useState("");
+function Login({ fit, onLogin }: { fit: React.CSSProperties; onLogin: (u: Me) => void }) {
+  const [name, setName] = useState("");
+  const [pw, setPw] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
   return (
     <div className="login" style={fit}>
       <div className="panel login-card">
@@ -210,23 +259,204 @@ function Login({ fit, onLogin }: { fit: React.CSSProperties; onLogin: (t: string
           <span className="chip">SOC</span>
         </div>
         <h1>조사 콘솔 접속</h1>
-        <p className="muted small">발급받은 API 토큰을 입력하세요. 토큰은 이 탭에만 보관됩니다.</p>
+        <p className="muted small">담당자 계정으로 로그인하세요. 로그인은 이 탭에만 유지되고, 30분 동안 쓰지 않으면 끊깁니다.</p>
         <form
-          onSubmit={(e) => {
+          className="login-form"
+          onSubmit={async (e) => {
             e.preventDefault();
-            if (t.trim()) onLogin(t.trim());
+            setBusy(true);
+            setMsg("");
+            try {
+              onLogin(await login(name.trim(), pw));
+            } catch (err) {
+              setMsg(err instanceof Error ? err.message : "로그인 실패");
+              setPw("");
+            } finally {
+              setBusy(false);
+            }
           }}
         >
-          <label className="sr" htmlFor="token">
-            API 토큰
+          <label className="sr" htmlFor="username">
+            아이디
           </label>
-          <input id="token" className="field" type="password" value={t} onChange={(e) => setT(e.target.value)} placeholder="API 토큰" autoFocus />
-          <button type="submit" className="btn btn-primary">
-            접속
+          <input id="username" className="field" autoComplete="username" value={name} onChange={(e) => setName(e.target.value)} placeholder="아이디" required autoFocus />
+          <label className="sr" htmlFor="password">
+            비밀번호
+          </label>
+          <input id="password" className="field" type="password" autoComplete="current-password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="비밀번호" required />
+          <button type="submit" className="btn btn-primary" disabled={busy}>
+            {busy ? "확인 중…" : "로그인"}
           </button>
+          {msg && (
+            <p className="err" role="alert">
+              {msg}
+            </p>
+          )}
         </form>
       </div>
     </div>
+  );
+}
+
+// ── 대화상자: 비밀번호 변경, 계정 관리(관리자) ─────────────────
+function Dialog({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", on);
+    return () => window.removeEventListener("keydown", on);
+  }, [onClose]);
+  return (
+    <div className="overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="panel dialog" role="dialog" aria-modal="true" aria-label={title}>
+        <div className="dialog-head">
+          <h2 className="panel-title">{title}</h2>
+          <button type="button" className="btn btn-text" onClick={onClose}>
+            닫기
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function PasswordDialog({ onClose, onChanged }: { onClose: () => void; onChanged: () => void }) {
+  const [cur, setCur] = useState("");
+  const [next, setNext] = useState("");
+  const [again, setAgain] = useState("");
+  const [msg, setMsg] = useState("");
+  return (
+    <Dialog title="비밀번호 변경" onClose={onClose}>
+      <form
+        className="stack"
+        onSubmit={async (e) => {
+          e.preventDefault();
+          if (next !== again) return setMsg("새 비밀번호가 서로 다릅니다");
+          try {
+            await changePassword(cur, next);
+            onChanged(); // 서버가 모든 세션을 끊었으므로 다시 로그인
+          } catch (err) {
+            setMsg(err instanceof Error ? err.message : "변경 실패");
+          }
+        }}
+      >
+        <input className="field" type="password" autoComplete="current-password" placeholder="현재 비밀번호" aria-label="현재 비밀번호" value={cur} onChange={(e) => setCur(e.target.value)} required />
+        <input className="field" type="password" autoComplete="new-password" placeholder="새 비밀번호(12자 이상)" aria-label="새 비밀번호" value={next} onChange={(e) => setNext(e.target.value)} required />
+        <input className="field" type="password" autoComplete="new-password" placeholder="새 비밀번호 확인" aria-label="새 비밀번호 확인" value={again} onChange={(e) => setAgain(e.target.value)} required />
+        <p className="faint small" style={{ margin: 0 }}>
+          바꾸면 모든 기기에서 로그아웃되고 다시 로그인해야 합니다.
+        </p>
+        <button type="submit" className="btn btn-primary">
+          변경
+        </button>
+        {msg && (
+          <p className="err" role="alert">
+            {msg}
+          </p>
+        )}
+      </form>
+    </Dialog>
+  );
+}
+
+function RoleSelect({ value, onChange, label, disabled }: { value: Role; onChange: (r: Role) => void; label: string; disabled?: boolean }) {
+  return (
+    <select className="field" aria-label={label} value={value} disabled={disabled} onChange={(e) => onChange(e.target.value as Role)}>
+      {(Object.keys(ROLE_LABEL) as Role[]).map((r) => (
+        <option key={r} value={r}>
+          {ROLE_LABEL[r]}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function UsersDialog({ me: current, onClose }: { me: Me; onClose: () => void }) {
+  const [users, setUsers] = useState<UserOut[]>([]);
+  const [msg, setMsg] = useState("");
+  const [name, setName] = useState("");
+  const [pw, setPw] = useState("");
+  const [role, setRole] = useState<Role>("investigator");
+  const load = useCallback(() => listUsers().then(setUsers, (e: Error) => setMsg(e.message)), []);
+  useEffect(() => {
+    load();
+  }, [load]);
+  const act = async (f: () => Promise<unknown>) => {
+    setMsg("");
+    try {
+      await f();
+      await load();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "실패");
+    }
+  };
+  return (
+    <Dialog title="계정 관리" onClose={onClose}>
+      <form
+        className="user-new"
+        onSubmit={(e) => {
+          e.preventDefault();
+          act(async () => {
+            await createUser(name.trim(), pw, role);
+            setName("");
+            setPw("");
+          });
+        }}
+      >
+        <input className="field mono" placeholder="아이디" aria-label="새 아이디" value={name} onChange={(e) => setName(e.target.value)} required />
+        <input className="field" type="password" autoComplete="new-password" placeholder="초기 비밀번호(12자 이상)" aria-label="초기 비밀번호" value={pw} onChange={(e) => setPw(e.target.value)} required />
+        <RoleSelect label="새 계정 역할" value={role} onChange={setRole} />
+        <button type="submit" className="btn btn-primary">
+          추가
+        </button>
+      </form>
+      {msg && (
+        <p className="err" role="alert">
+          {msg}
+        </p>
+      )}
+      <table className="users">
+        <thead>
+          <tr>
+            <th>아이디</th>
+            <th>역할</th>
+            <th>상태</th>
+            <th>
+              <span className="sr">조치</span>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {users.map((u) => {
+            const self = u.username === current.name;
+            return (
+              <tr key={u.username}>
+                <td className="mono">{u.username}</td>
+                <td>
+                  <RoleSelect label={`${u.username} 역할`} value={u.role} disabled={self} onChange={(r) => act(() => patchUser(u.username, { role: r }))} />
+                </td>
+                <td className="small">{!u.active ? "비활성" : u.locked ? "잠김" : "활성"}</td>
+                <td className="users-act">
+                  {u.locked && (
+                    <button type="button" className="btn btn-text" onClick={() => act(() => patchUser(u.username, { unlock: true }))}>
+                      잠금 풀기
+                    </button>
+                  )}
+                  {!self && (
+                    <button type="button" className="btn btn-text" onClick={() => act(() => patchUser(u.username, { active: !u.active }))}>
+                      {u.active ? "끄기" : "켜기"}
+                    </button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <p className="faint small" style={{ margin: 0 }}>
+        역할을 바꾸거나 끄면 그 계정의 로그인이 바로 끊깁니다. 비밀번호를 잊은 계정은 명령줄(python -m safetrace.accounts passwd)로 재설정합니다.
+      </p>
+    </Dialog>
   );
 }
 
@@ -264,12 +494,14 @@ function Kpis({ cases }: { cases: CaseOut[] }) {
 
 // ── 왼쪽: 사건 대기열 ─────────────────────────────────
 function Queue({
+  canCreate,
   cases,
   selected,
   error,
   onSelect,
   onCreated,
 }: {
+  canCreate: boolean;
   cases: CaseOut[];
   selected: string | null;
   error: string;
@@ -284,9 +516,11 @@ function Queue({
     <aside className="panel queue" aria-label="사건 대기열">
       <div className="queue-head">
         <h2>사건 대기열</h2>
-        <button type="button" className="btn btn-primary" aria-expanded={adding} onClick={() => setAdding((v) => !v)}>
-          {adding ? "닫기" : "+ URL 접수"}
-        </button>
+        {canCreate && (
+          <button type="button" className="btn btn-primary" aria-expanded={adding} onClick={() => setAdding((v) => !v)}>
+            {adding ? "닫기" : "+ URL 접수"}
+          </button>
+        )}
       </div>
       {adding && (
         <NewCase
