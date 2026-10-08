@@ -471,14 +471,13 @@ class AgentRun:
             await self._settle(page)
         return page if page.url == url else None
 
-    async def _wait_auto_redirect(self, page: Page, state: PageState, step: int) -> bool:
+    async def _wait_auto_redirect(self, page: Page, state: PageState, step: int, url: str, blocked0: int) -> bool:
         """끝내기 전에, 스스로 넘어가는 대기 화면이면 잠시 기다려 본다. 넘어갔으면 True.
-        단축 URL 서비스는 대기 화면을 몇 초 보여 준 뒤 목적지로 옮긴다. 그 전에 끝내면 목적지가 기록되지 않는다."""
-        url = page.url
+        단축 URL 서비스는 대기 화면을 몇 초 보여 준 뒤 목적지로 옮긴다. 그 전에 끝내면 목적지가 기록되지 않는다.
+        url·blocked0 은 관찰하기 전의 주소와 열리지 않은 목적지 수다. 관찰·판단이 느려 그사이에 이미 넘어갔어도 알아챈다."""
         if url in self._waited or not is_auto_redirect_page(state.text):
             return False
         self._waited.add(url)
-        blocked0 = len(self.result.blocked_destinations)
         t0 = time.monotonic()
         until = t0 + min(_AUTO_REDIRECT_WAIT, max(0.0, self.budget.remaining() - 5))
         while time.monotonic() < until:
@@ -724,6 +723,7 @@ class AgentRun:
                     break
                 page, blocked_before = back, len(self.result.blocked_destinations)
                 continue
+            observed_from = (page.url, len(self.result.blocked_destinations))
             obs = await self._observe(page, step)
             last_real = (page, page.url)
             self.result.forbidden_seen.extend(x for x in obs.forbidden if x not in self.result.forbidden_seen)
@@ -753,10 +753,9 @@ class AgentRun:
                 "observe_seq": obs.evidence_seq,
             })
             if prob < self.s.action_min_prob or decision.action == ActionKind.FINISH:
-                waiting_from = len(self.result.blocked_destinations)
-                if await self._wait_auto_redirect(page, obs.state, step):
+                if await self._wait_auto_redirect(page, obs.state, step, *observed_from):
                     # 대기 화면이 스스로 다음 곳으로 넘어갔다: 끝내지 않고 넘어간 곳(막다른 곳 포함)을 이어서 본다
-                    blocked_before = waiting_from
+                    blocked_before = observed_from[1]
                     self.history.append("wait_redirect")
                     self.budget.steps += 1
                     step += 1
