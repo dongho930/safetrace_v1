@@ -51,7 +51,8 @@ KISA 남은 오답(모두 판단 불가·담당자 검토로 감):
 
 - 품질 개선은 #29로 마쳤다(사용자 결정, 2026-10-04).
 - 사전준비 최종 점검 완료(2026-10-04): `docs/prep-checklist.md` 14절. 점검 중 끊긴 조사가 '조사 중'에 멈추는 문제를 고쳤다(워커가 끝나지 않은 작업을 FAILED로 마무리).
-- 다음: 본선 1주차(10/6~) Argon2id 계정·RBAC, 담당자 판정 저장, 검토 패키지.
+- 본선 1주차 ① 계정·권한 완료(#31, 2026-10-08): Argon2id 담당자 계정, 서버 측 세션(DB엔 SHA-256), 5회 실패 15분 잠금, 역할 viewer<investigator<reviewer<admin, 계정 관리는 사람 관리자만(`ST_API_TOKENS`는 자동화 전용). 코드는 `backend/safetrace/accounts.py`, 시험 `tests/test_accounts.py`. 첫 관리자는 `docker compose exec api python -m safetrace.accounts add <아이디> --role admin`(`!`로 실행할 땐 `--password-stdin`). 두 번째 PC 로컬 DB에는 관리자 `dongho`가 있고 시험 계정 `qa.*`는 꺼 두었다.
+- 다음: 본선 1주차 ② 담당자 판정 저장(검토관 이상·사람 계정만, AI·자동화 토큰은 확정 불가, 낙관적 잠금, 감사로그) → ③ 검토 패키지(탐색 기록·판단 결과 묶음) + 콘솔 판정 화면. 각각 main에서 새 브랜치로 PR.
 
 ## 남은 개선 후보 (품질 개선은 마침, 참고용)
 
