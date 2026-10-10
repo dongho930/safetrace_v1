@@ -7,6 +7,7 @@
 """
 
 import json
+import time
 import os
 import uuid
 from urllib.parse import urlsplit
@@ -322,17 +323,20 @@ def test_site_moving_itself_to_dead_end_finishes(settings, testpages):
     assert not any(r["kind"] == "action" and "chrome-error" in r["data"]["result_url"] for r in chain)
 
 
-@pytest.mark.parametrize("decision", ["low_confidence", "finish"])
+@pytest.mark.parametrize("decision", ["low_confidence", "finish", "slow_finish"])
 def test_waits_for_auto_redirect_before_finishing(settings, testpages, decision):
     """단축 URL 의 대기 화면("Redirecting... Please wait")에서 끝내려 하면 스스로 넘어갈 때까지 잠시 기다려
-    목적지를 기록한다(goo.su: 몇 초 뒤 사라진 피싱 도메인으로 이동)."""
+    목적지를 기록한다(goo.su: 몇 초 뒤 사라진 피싱 도메인으로 이동).
+    slow_finish: 판단이 느려(느린 CI·Jev) 끝내기로 정한 때에는 이미 넘어가 있는 경우도 알아채야 한다."""
     from safetrace.decision.schema import ActionDecision, ActionKind, Threat, ThreatDecision
 
     class Stopper:
         req = None
 
         def action(self, state):
-            if decision == "finish":
+            if decision == "slow_finish":
+                time.sleep(5)  # 시험 페이지는 4초 뒤에 넘어간다
+            if decision in ("finish", "slow_finish"):
                 return ActionDecision(choice="finish", probabilities={"finish": 0.9}, model="t", provider="t",
                                       latency_ms=0, action=ActionKind.FINISH)
             return ActionDecision(choice="scroll", probabilities={"scroll": 0.3, "finish": 0.25}, model="t",
