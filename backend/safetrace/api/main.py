@@ -1,4 +1,4 @@
-"""SafeTrace API: 로그인·계정, 사건 접수·조회, 실시간 진행(SSE), 증거 파일·무결성 검증.
+"""SafeTrace API: 로그인·계정, 사건 접수·조회, 실시간 진행(SSE), 증거 파일·무결성 검증, 담당자 판정.
 
 실행: uvicorn safetrace.api.main:app --port 8000
 """
@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from .. import accounts
+from .. import accounts, verdicts
 from ..accounts import ROLES, AccountError
 from ..config import get_settings
 from ..evidence import Head, Signer, verify_case
@@ -35,7 +35,7 @@ from ..live import LocalLive
 from ..masking import mask_secrets
 from ..netguard import BlockedURL, parse_url
 from ..preview import preview_image
-from ..store import Case, Store
+from ..store import Case, Store, Verdict
 
 log = logging.getLogger("safetrace.api")
 settings = get_settings()
@@ -180,6 +180,29 @@ class CaseCreate(BaseModel):
     source: str = Field(default="report", pattern=r"^(report|kisa|test)$")
 
 
+class VerdictOut(BaseModel):
+    rev: int
+    decision: str
+    threat: str | None
+    note: str | None
+    reviewer: str
+    ai_threat: str | None
+    head_seq: int | None
+    created_at: str
+
+    @classmethod
+    def of(cls, v: Verdict) -> VerdictOut:
+        return cls(rev=v.rev, decision=v.decision, threat=v.threat, note=v.note, reviewer=v.reviewer,
+                   ai_threat=v.ai_threat, head_seq=v.head_seq, created_at=v.created_at.isoformat())
+
+
+class VerdictIn(BaseModel):
+    rev: int = Field(ge=0, description="보고 있던 판 번호(판정이 없었으면 0)")
+    decision: str = Field(pattern=r"^(threat|benign|hold)$")
+    threat: str | None = Field(default=None, pattern=r"^(phishing|scam|illegal_gambling|malware)$")
+    note: str | None = Field(default=None, max_length=verdicts.NOTE_MAX * 2)
+
+
 class CaseOut(BaseModel):
     id: str
     url: str
@@ -192,12 +215,13 @@ class CaseOut(BaseModel):
     candidates: list | None
     head_seq: int | None
     created_at: str
+    verdict: VerdictOut | None = None  # 담당자의 현재 판정
 
     @classmethod
-    def of(cls, c: Case) -> CaseOut:
+    def of(cls, c: Case, v: Verdict | None = None) -> CaseOut:
         return cls(id=c.id, url=c.url, source=c.source, status=c.status, finish_reason=c.finish_reason,
                    final_url=c.final_url, threat=c.threat, safebrowsing=c.safebrowsing, candidates=c.candidates,
-                   head_seq=c.head_seq, created_at=c.created_at.isoformat())
+                   head_seq=c.head_seq, created_at=c.created_at.isoformat(), verdict=VerdictOut.of(v) if v else None)
 
 
 class LoginIn(BaseModel):
@@ -376,12 +400,42 @@ def create_case(body: CaseCreate, p: Annotated[Principal, Depends(need("investig
 def list_cases(p: Annotated[Principal, Depends(need("viewer"))], limit: int = Query(50, ge=1, le=200)):
     with store.session() as s:
         rows = s.scalars(select(Case).order_by(Case.created_at.desc()).limit(limit)).all()
-    return [CaseOut.of(c) for c in rows]
+    latest = verdicts.latest_for(store, [c.id for c in rows])
+    return [CaseOut.of(c, latest.get(c.id)) for c in rows]
 
 
 @app.get("/api/cases/{case_id}", response_model=CaseOut)
 def get_case(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]):
-    return CaseOut.of(_get_case(case_id))
+    c = _get_case(case_id)
+    return CaseOut.of(c, verdicts.latest_for(store, [c.id]).get(c.id))
+
+
+# ── 담당자 판정 ─────────────────────────────────────────
+@app.get("/api/cases/{case_id}/verdicts", response_model=list[VerdictOut])
+def list_verdicts(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]):
+    _get_case(case_id)
+    return [VerdictOut.of(v) for v in verdicts.history(store, case_id)]
+
+
+@app.post("/api/cases/{case_id}/verdicts", response_model=VerdictOut, status_code=201)
+def save_verdict(case_id: str, body: VerdictIn, p: Annotated[Principal, Depends(need("reviewer", human=True))]):
+    """판정 저장. 검토관 이상의 담당자 계정만 할 수 있다(자동화 토큰·AI 는 확정 불가)."""
+    _get_case(case_id)
+    try:
+        v = verdicts.save(store, case_id, expected_rev=body.rev, decision=body.decision, threat=body.threat,
+                          note=body.note, reviewer=p.name, user_id=p.user_id)
+    except verdicts.VerdictError as e:
+        raise HTTPException(422, str(e)) from None
+    except verdicts.VerdictConflict as e:
+        cur = e.current
+        store.audit(p.name, "verdict.conflict", case_id, f"seen={body.rev} current={cur.rev if cur else 0}")
+        who = f"{cur.reviewer} 님이 " if cur else ""
+        raise HTTPException(409, f"그사이 {who}판정을 바꿨습니다. 최신 판정을 확인한 뒤 다시 저장하세요") from None
+    except LookupError:
+        raise HTTPException(404, "not found") from None
+    detail = f"rev={v.rev} decision={v.decision}" + (f" threat={v.threat}" if v.threat else "")
+    store.audit(p.name, "verdict.save", case_id, f"{detail} ai={v.ai_threat or '-'} head={v.head_seq}")
+    return VerdictOut.of(v)
 
 
 @app.get("/api/cases/{case_id}/events")

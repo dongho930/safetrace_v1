@@ -6,7 +6,8 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, create_engine, select
+from sqlalchemy import (JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine,
+                        select)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
@@ -54,6 +55,26 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(String(64))
     case_id: Mapped[str | None] = mapped_column(String(36))
     detail: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class Verdict(Base):
+    """담당자 판정. 고치지 않고 새 판(rev)을 쌓는다. 마지막 판이 현재 판정이다.
+    (case_id, rev) 가 유일해서, 같은 판을 보고 동시에 저장하면 한쪽만 들어간다(낙관적 잠금)."""
+
+    __tablename__ = "verdicts"
+    __table_args__ = (UniqueConstraint("case_id", "rev"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), index=True)
+    rev: Mapped[int] = mapped_column(Integer)
+    decision: Mapped[str] = mapped_column(String(16))  # threat | benign | hold
+    threat: Mapped[str | None] = mapped_column(String(32))  # decision=threat 일 때 확정한 유형
+    note: Mapped[str | None] = mapped_column(Text)
+    reviewer: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    ai_threat: Mapped[str | None] = mapped_column(String(32))  # 판정 당시 AI 의견(비교용)
+    head_seq: Mapped[int | None] = mapped_column(Integer)  # 판정 당시 증거 체인 끝
+    head_hash: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

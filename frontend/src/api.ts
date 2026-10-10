@@ -25,6 +25,20 @@ export type CaseOut = {
   candidates: string[] | null;
   head_seq: number | null;
   created_at: string;
+  verdict: Verdict | null; // 담당자의 현재 판정(없으면 null)
+};
+
+// 담당자 판정. 덮어쓰지 않고 판(rev)을 쌓는다. 저장할 때 보고 있던 판 번호를 보내 동시 수정을 막는다(409)
+export type Decision = "threat" | "benign" | "hold";
+export type Verdict = {
+  rev: number;
+  decision: Decision;
+  threat: string | null;
+  note: string | null;
+  reviewer: string;
+  ai_threat: string | null;
+  head_seq: number | null;
+  created_at: string;
 };
 
 export type EvidenceEvent = {
@@ -109,7 +123,7 @@ export const createUser = (username: string, password: string, role: Role) =>
 export const patchUser = (username: string, patch: Partial<{ role: Role; active: boolean; password: string; unlock: boolean }>) =>
   req<UserOut>(`/api/users/${encodeURIComponent(username)}`, { method: "PATCH", body: JSON.stringify(patch) });
 
-export const listCases = () =>req<CaseOut[]>("/api/cases?limit=50");
+export const listCases = () => req<CaseOut[]>("/api/cases?limit=50");
 export const getCase = (id: string) => req<CaseOut>(`/api/cases/${encodeURIComponent(id)}`);
 export const createCase = (url: string, source: string) =>
   req<CaseOut>("/api/cases", {
@@ -121,6 +135,10 @@ export const verifyCase = (id: string) =>
   req<{ ok: boolean; records: number; errors: string[] }>(`/api/cases/${encodeURIComponent(id)}/verify`, {
     method: "POST",
   });
+
+export const listVerdicts = (id: string) => req<Verdict[]>(`/api/cases/${encodeURIComponent(id)}/verdicts`);
+export const saveVerdict = (id: string, v: { rev: number; decision: Decision; threat: string | null; note: string }) =>
+  req<Verdict>(`/api/cases/${encodeURIComponent(id)}/verdicts`, { method: "POST", body: JSON.stringify(v) });
 
 // 증거 파일은 인증 헤더가 필요하므로 blob 으로 받아 object URL 로 보여준다
 // preview=true 면 화면 표시용으로 줄인 이미지(증거 아님). 원본 확인·검증은 preview 없이

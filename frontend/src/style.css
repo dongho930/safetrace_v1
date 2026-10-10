@@ -221,6 +221,16 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .integrity-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; font-size: 13px; }
 .verdict { margin-top: auto; }
 .verdict-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.verdict .btn[aria-pressed="true"] { outline: 2px solid var(--blue); outline-offset: 2px; }
+.verdict-now { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--line-soft); background: var(--sunken); }
+.verdict-now.v-threat { border-color: rgba(255, 91, 110, 0.35); }
+.verdict-now.v-threat .verdict-name { color: var(--red-ink); }
+.verdict-now.v-benign .verdict-name { color: var(--teal-ink); }
+.verdict-name { font-size: 15px; font-weight: 700; }
+.verdict-note { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); display: block; }
+.verdict-history summary { cursor: pointer; }
+.verdict-past { display: flex; flex-direction: column; gap: 2px; padding: 6px 0; border-bottom: 1px solid var(--line-soft); }
+.verdict textarea.field { resize: vertical; font-family: var(--sans); }
 
 /* 로그인 */
 .login { display: grid; place-items: center; padding: 24px; }
