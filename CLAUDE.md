@@ -53,7 +53,8 @@ KISA 남은 오답(모두 판단 불가·담당자 검토로 감):
 - 사전준비 최종 점검 완료(2026-10-04): `docs/prep-checklist.md` 14절. 점검 중 끊긴 조사가 '조사 중'에 멈추는 문제를 고쳤다(워커가 끝나지 않은 작업을 FAILED로 마무리).
 - 본선 1주차 ① 계정·권한 완료(#31, 2026-10-08): Argon2id 담당자 계정, 서버 측 세션(DB엔 SHA-256), 5회 실패 15분 잠금, 역할 viewer<investigator<reviewer<admin, 계정 관리는 사람 관리자만(`ST_API_TOKENS`는 자동화 전용). 코드는 `backend/safetrace/accounts.py`, 시험 `tests/test_accounts.py`. 첫 관리자는 `docker compose exec api python -m safetrace.accounts add <아이디> --role admin`(`!`로 실행할 땐 `--password-stdin`). 두 번째 PC 로컬 DB에는 관리자 `dongho`가 있고 시험 계정 `qa.*`는 꺼 두었다.
 - 본선 1주차 ② 담당자 판정 저장(`feat/week1-verdict`, 2026-10-10): `verdicts` 테이블에 판(rev)을 쌓고 (case_id, rev) 유일 제약으로 낙관적 잠금(보고 있던 판 번호를 보내고, 어긋나면 409). 검토관 이상 사람 계정만, 조사 끝난 사건만. 판정에 당시 AI 의견·증거 head 를 묶는다. 콘솔 판정 패널(유형 선택·메모·기록), 대기열 '검토 필요'는 확정된 사건을 뺀다(보류는 남김). 코드 `backend/safetrace/verdicts.py`, 시험 `tests/test_verdicts.py`. 두 번째 PC 로컬 DB의 시험 계정 `qa.rev1`·`qa.rev2`는 꺼 두었다.
-- 다음: 본선 1주차 ③ 검토 패키지(탐색 기록·판단 결과·담당자 판정 묶음, JSON 먼저). main에서 새 브랜치로 PR.
+- 본선 1주차 ③ 검토 패키지(`feat/week1-package`, 2026-10-10): `backend/safetrace/package.py`가 서명된 체인을 단계별(관찰→Jev 선택→게이트→실행·전후 화면)로 묶고, 판단 결과는 체인의 threat 기록(override 포함)을 쓴다. 만들 때마다 무결성을 다시 검증해 넣는다(실패해도 숨기지 않음). ZIP은 받은 쪽이 README 방법만으로 체인·파일을 재계산할 수 있음을 시험으로 고정(`tests/test_package.py`). 콘솔 '외부 평판·증거' 카드에 ZIP 내려받기. 실제 스택에서 smish 1건 탐색→판단→판정→패키지 확인(JSON 13ms, ZIP 25ms·1.3MB).
+- 1주차 범위(계정·RBAC, 판정 저장·화면, 검토 패키지) 완료. 다음: 2주차 연관 후보 큐(발견 링크 후보 기록·한도 준수), Safe Browsing 결과 통합. 보고서 초안(PDF)은 3주차.
 
 ## 남은 개선 후보 (품질 개선은 마침, 참고용)
 

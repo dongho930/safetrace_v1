@@ -19,7 +19,7 @@ TypeSafe의 의사결정 모델 **Jev**가 다음 행동과 위협 유형을 정
 | `backend/safetrace/netguard.py` | SSRF 1차 방어(이동 전 실제 IP 확인) |
 | `backend/safetrace/proxy/egress.py` | SSRF 2차 방어: 검문 프록시(접속 시점 재해석, DNS Rebinding 대비) |
 | `backend/safetrace/evidence.py` | 증거 해시 체인·HMAC 서명·검증 |
-| `backend/safetrace/api/` | FastAPI: 사건 접수·조회, SSE 실시간 진행, 증거 파일·무결성 검증, 담당자 판정 |
+| `backend/safetrace/api/` | FastAPI: 사건 접수·조회, SSE 실시간 진행, 증거 파일·무결성 검증, 담당자 판정, 검토 패키지 |
 | `frontend/` | 실시간 조사 콘솔(React 19 + TypeScript + Vite) |
 | `testpages/` | 단계형 가짜 위협 페이지 + 에이전트 공격 시나리오 10종 + 요청 기록 서버 |
 | `data/normal_sites.csv` | 정상 대조 사이트 168개(정부 허가 사행사업 공식 사이트 6개 포함) |
@@ -62,7 +62,8 @@ docker compose exec api python -m safetrace.accounts add <아이디> --role admi
 - 첫 관리자는 명령줄로 만들고, 그다음 계정은 콘솔의 「계정 관리」에서 만든다. 잊은 비밀번호는 `python -m safetrace.accounts passwd <아이디>`, 잠금 해제는 `unlock <아이디>`.
 - `ST_API_TOKENS`는 자동화(스크립트) 전용이다. 관리자 역할이어도 계정 관리·판정은 할 수 없다.
 - 판정(위협 확정·정상·보류)은 검토관 이상의 담당자 계정만 저장한다(`POST /api/cases/{id}/verdicts`). 덮어쓰지 않고 판(rev)을 쌓으며, 저장할 때 보고 있던 판 번호를 보내 그사이 다른 담당자가 바꿨으면 409로 거절한다. 판정에는 당시 AI 의견과 증거 체인 끝(head)을 함께 남긴다.
-- 로그인 성공·실패(이유 포함), 로그아웃, 계정 생성·변경, 판정 저장·충돌은 감사로그에 남는다. 비밀번호는 남기지 않는다.
+- 검토 패키지: 조사가 끝난 사건의 탐색 기록(단계별 관찰 화면·Jev 선택과 확률·안전 게이트·전후 화면·이동 경로), 판단 결과(위협 유형 후보·확률·근거 증거 ID·Safe Browsing), 담당자 판정 기록·감사로그를 묶는다. `GET /api/cases/{id}/package`(JSON, 열람자 이상), `GET /api/cases/{id}/package.zip`(조사관 이상, 감사로그). ZIP에는 `package.json`·체인 원본·파일·`SHA256SUMS`·`package.sig`(HMAC)·`README.txt`가 들어 있어 받은 쪽이 해시 체인과 파일을 다시 계산해 볼 수 있다. 외부 기관에 자동으로 보내지 않는다.
+- 로그인 성공·실패(이유 포함), 로그아웃, 계정 생성·변경, 판정 저장·충돌, 패키지 내려받기는 감사로그에 남는다. 비밀번호는 남기지 않는다.
 
 - `sandbox` 네트워크는 `internal`: 에이전트는 인터넷에 직접 나갈 수 없고 `egress` 프록시로만 나간다.
 - 에이전트에는 DB 접속 정보와 Jev 키가 없다. Jev 키는 `decision`에만 있다.

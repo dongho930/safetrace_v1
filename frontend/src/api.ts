@@ -140,6 +140,18 @@ export const listVerdicts = (id: string) => req<Verdict[]>(`/api/cases/${encodeU
 export const saveVerdict = (id: string, v: { rev: number; decision: Decision; threat: string | null; note: string }) =>
   req<Verdict>(`/api/cases/${encodeURIComponent(id)}/verdicts`, { method: "POST", body: JSON.stringify(v) });
 
+// 검토 패키지(ZIP: package.json·체인 원본·파일·SHA256SUMS·서명). 인증 헤더가 필요하므로 blob 으로 받아 저장한다
+export async function downloadPackage(caseId: string): Promise<void> {
+  const r = await send(`/api/cases/${encodeURIComponent(caseId)}/package.zip`, {});
+  const name = /filename="([^"]+)"/.exec(r.headers.get("Content-Disposition") ?? "")?.[1] ?? `safetrace-${caseId.slice(0, 8)}.zip`;
+  const url = URL.createObjectURL(await r.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
 // 증거 파일은 인증 헤더가 필요하므로 blob 으로 받아 object URL 로 보여준다
 // preview=true 면 화면 표시용으로 줄인 이미지(증거 아님). 원본 확인·검증은 preview 없이
 export async function fileUrl(caseId: string, name: string, preview = false): Promise<string> {
