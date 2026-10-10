@@ -1,4 +1,4 @@
-"""SafeTrace API: 로그인·계정, 사건 접수·조회, 실시간 진행(SSE), 증거 파일·무결성 검증, 담당자 판정.
+"""SafeTrace API: 로그인·계정, 사건 접수·조회, 실시간 진행(SSE), 증거 파일·무결성 검증, 담당자 판정, 검토 패키지.
 
 실행: uvicorn safetrace.api.main:app --port 8000
 """
@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from .. import accounts, verdicts
+from .. import accounts, package, verdicts
 from ..accounts import ROLES, AccountError
 from ..config import get_settings
 from ..evidence import Head, Signer, verify_case
@@ -35,7 +35,7 @@ from ..live import LocalLive
 from ..masking import mask_secrets
 from ..netguard import BlockedURL, parse_url
 from ..preview import preview_image
-from ..store import Case, Store, Verdict
+from ..store import AuditLog, Case, Store, Verdict
 
 log = logging.getLogger("safetrace.api")
 settings = get_settings()
@@ -578,3 +578,40 @@ def verify(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]):
     res = verify_case(settings.evidence_dir, case_id, signer, head)
     store.audit(p.name, "evidence.verify", case_id, "ok" if res.ok else ";".join(res.errors[:5]))
     return res.as_dict()
+
+
+# ── 검토 패키지 ─────────────────────────────────────────
+def _signer() -> Signer:
+    return Signer(settings.evidence_hmac_key.get_secret_value().encode(), settings.evidence_key_id)
+
+
+def _package(c: Case, who: str) -> dict:
+    if c.status not in TERMINAL:
+        raise HTTPException(409, "조사가 끝난 뒤에 패키지를 만들 수 있습니다")
+    signer = _signer()
+    head = Head(c.head_seq, c.head_hash) if c.head_seq is not None else None
+    res = verify_case(settings.evidence_dir, c.id, signer, head)
+    with store.session() as s:
+        audit = list(s.scalars(select(AuditLog).where(AuditLog.case_id == c.id)))
+    return package.build(c, package.read_chain(settings.evidence_dir, c.id), res, verdicts.history(store, c.id), audit,
+                         generated_by=who, key_id=signer.key_id)
+
+
+@app.get("/api/cases/{case_id}/package")
+def get_package(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]):
+    """검토 패키지(JSON). 콘솔에서 보는 내용과 같은 범위라 열람자도 볼 수 있다."""
+    return _package(_get_case(case_id), p.name)
+
+
+@app.get("/api/cases/{case_id}/package.zip")
+def export_package(case_id: str, p: Annotated[Principal, Depends(need("investigator"))]):
+    """검토 패키지 내려받기(ZIP: package.json·체인 원본·파일·SHA256SUMS·서명). 밖으로 나가는 자료라 조사관 이상, 감사로그."""
+    c = _get_case(case_id)
+    if c.status not in TERMINAL:
+        raise HTTPException(409, "조사가 끝난 뒤에 패키지를 만들 수 있습니다")
+    store.audit(p.name, "package.export", case_id)  # 먼저 남겨서 패키지의 감사로그에도 이번 내보내기가 들어가게
+    pkg = _package(c, p.name)
+    data = package.export_zip(pkg, settings.evidence_dir, case_id, _signer())
+    name = f"safetrace-{case_id[:8]}-{pkg['generated_at'][:10]}.zip"
+    return Response(data, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})

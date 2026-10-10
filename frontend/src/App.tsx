@@ -14,6 +14,7 @@ import {
   clearToken,
   createCase,
   createUser,
+  downloadPackage,
   fileUrl,
   getCase,
   getToken,
@@ -248,6 +249,7 @@ export default function App() {
             key={selected}
             id={selected}
             canDecide={user.kind === "user" && ROLE_RANK[user.role] >= ROLE_RANK.reviewer}
+            canExport={ROLE_RANK[user.role] >= ROLE_RANK.investigator}
             onDecided={refresh}
           />
         ) : (
@@ -662,7 +664,17 @@ function EmptyWorkspace() {
 }
 
 // ── 선택한 사건: 가운데(조사) + 오른쪽(판단·증거) ─────────────────
-const Workspace = memo(function Workspace({ id, canDecide, onDecided }: { id: string; canDecide: boolean; onDecided: () => void }) {
+const Workspace = memo(function Workspace({
+  id,
+  canDecide,
+  canExport,
+  onDecided,
+}: {
+  id: string;
+  canDecide: boolean;
+  canExport: boolean;
+  onDecided: () => void;
+}) {
   const [c, setC] = useState<CaseOut | null>(null);
   const [events, setEvents] = useState<EvidenceEvent[]>([]);
   const [status, setStatus] = useState("");
@@ -699,6 +711,7 @@ const Workspace = memo(function Workspace({ id, canDecide, onDecided }: { id: st
         id={id}
         running={running}
         canDecide={canDecide}
+        canExport={canExport}
         onDecided={() => {
           getCase(id).then(setC).catch(() => undefined);
           onDecided();
@@ -922,18 +935,20 @@ function SidePanel({
   id,
   running,
   canDecide,
+  canExport,
   onDecided,
 }: {
   c: CaseOut | null;
   id: string;
   running: boolean;
   canDecide: boolean;
+  canExport: boolean;
   onDecided: () => void;
 }) {
   return (
     <aside className="side" aria-label="판단과 증거">
       <Opinion c={c} running={running} />
-      <Evidence c={c} id={id} running={running} />
+      <Evidence c={c} id={id} running={running} canExport={canExport} />
       <VerdictPanel c={c} id={id} running={running} canDecide={canDecide} onDecided={onDecided} />
     </aside>
   );
@@ -1173,9 +1188,11 @@ function Opinion({ c, running }: { c: CaseOut | null; running: boolean }) {
   );
 }
 
-function Evidence({ c, id, running }: { c: CaseOut | null; id: string; running: boolean }) {
+function Evidence({ c, id, running, canExport }: { c: CaseOut | null; id: string; running: boolean; canExport: boolean }) {
   const [verify, setVerify] = useState<{ ok: boolean; records: number; errors: string[] } | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pkgBusy, setPkgBusy] = useState(false);
+  const [pkgMsg, setPkgMsg] = useState("");
   const sb = c?.safebrowsing;
   const sbText =
     sb?.status === "match"
@@ -1240,6 +1257,47 @@ function Evidence({ c, id, running }: { c: CaseOut | null; id: string; running: 
           {verify ? "다시 검증" : "검증"}
         </button>
       </div>
+      <div className="integrity">
+        <Icon name="stack" />
+        <span className="integrity-text">
+          <span style={{ color: "var(--ink)" }}>검토 패키지</span>
+          <span className="faint small">
+            {running
+              ? "조사가 끝나면 만들 수 있습니다"
+              : !canExport
+                ? "내려받기는 조사관 이상만 할 수 있습니다"
+                : c?.verdict
+                  ? `탐색 기록 · 판단 결과 · 담당자 판정(판 ${c.verdict.rev}) · 증거 원본`
+                  : "탐색 기록 · 판단 결과 · 증거 원본 (담당자 판정 전)"}
+          </span>
+        </span>
+        {canExport && (
+          <button
+            type="button"
+            className="btn btn-ghost"
+            style={{ padding: "7px 10px", fontSize: 12 }}
+            disabled={pkgBusy || running || !c}
+            onClick={async () => {
+              setPkgBusy(true);
+              setPkgMsg("");
+              try {
+                await downloadPackage(id);
+              } catch (e) {
+                setPkgMsg(e instanceof Error ? e.message : "내려받기 실패");
+              } finally {
+                setPkgBusy(false);
+              }
+            }}
+          >
+            {pkgBusy ? "만드는 중" : "ZIP 내려받기"}
+          </button>
+        )}
+      </div>
+      {pkgMsg && (
+        <p className="err" role="alert" style={{ margin: 0 }}>
+          {pkgMsg}
+        </p>
+      )}
     </section>
   );
 }
