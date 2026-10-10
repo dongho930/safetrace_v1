@@ -17,7 +17,7 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .evidence import Signer, VerifyResult, canonical, sha256_bytes
+from .evidence import _SAFE_NAME, Signer, VerifyResult, canonical, sha256_bytes
 from .store import AuditLog, Case, Verdict
 
 FORMAT = "safetrace.review-package/1"
@@ -125,7 +125,9 @@ def build(case: Case, records: list[dict], verify: VerifyResult, verdicts: list[
           *, generated_by: str, key_id: str) -> dict:
     exploration, top = _exploration(records)
     threat = top.get("threat")
-    files = [{"name": n, "sha256": h, "seq": r["seq"], "kind": r["kind"]} for r in records for n, h in r.get("files", {}).items()]
+    # 체인은 에이전트 컨테이너가 쓴다. 이름 규칙에 맞지 않는 파일(경로 이동 등)은 담지 않는다(검증 결과에는 file_missing 으로 나옴)
+    files = [{"name": n, "sha256": h, "seq": r["seq"], "kind": r["kind"]}
+             for r in records for n, h in r.get("files", {}).items() if _SAFE_NAME.match(n)]
     hist = sorted(verdicts, key=lambda v: v.rev, reverse=True)
     return {
         "format": FORMAT,
@@ -184,9 +186,10 @@ def export_zip(pkg: dict, evidence_dir: Path, case_id: str, signer: Signer) -> b
     chain = d / "chain.jsonl"
     if chain.exists():
         entries.append(("chain.jsonl", chain))
+    files_dir = (d / "files").resolve()
     for f in pkg["files"]:
-        p = d / "files" / f["name"]
-        if p.is_file():
+        p = (files_dir / f["name"]).resolve()
+        if _SAFE_NAME.match(f["name"]) and p.parent == files_dir and p.is_file():
             entries.append((f"files/{f['name']}", p))
     sig = {"package_sha256": digest, "hmac_sha256": signer.sign(digest), "key_id": signer.key_id,
            "case_id": case_id, "generated_at": pkg["generated_at"]}
