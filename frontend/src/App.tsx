@@ -3,11 +3,13 @@ import {
   type AgentEvent,
   ApiError,
   type CaseOut,
+  type Decision,
   type EvidenceEvent,
   type Me,
   ROLE_RANK,
   type Role,
   type UserOut,
+  type Verdict,
   changePassword,
   clearToken,
   createCase,
@@ -17,10 +19,12 @@ import {
   getToken,
   listCases,
   listUsers,
+  listVerdicts,
   login,
   logout,
   me,
   patchUser,
+  saveVerdict,
   streamEvents,
   type Threat,
   verifyCase,
@@ -89,6 +93,8 @@ const NET_CATEGORY_LABEL: Record<string, string> = {
   tls_error: "인증서·TLS 오류",
   other: "기타",
 };
+// 검토가 남은 사건: 검토 필요 상태이고 담당자가 아직 확정(위협·정상)하지 않음(보류는 남는다)
+const needsReview = (c: CaseOut) => c.status === "REVIEW_REQUIRED" && (!c.verdict || c.verdict.decision === "hold");
 const TERMINAL = new Set(["COMPLETED", "REVIEW_REQUIRED", "FAILED", "UNREACHABLE", "BLOCKED"]);
 const MAX_STEPS = 15; // 에이전트 기본 예산(ST_MAX_STEPS)
 
@@ -237,7 +243,16 @@ export default function App() {
             refresh();
           }}
         />
-        {selected ? <Workspace key={selected} id={selected} /> : <EmptyWorkspace />}
+        {selected ? (
+          <Workspace
+            key={selected}
+            id={selected}
+            canDecide={user.kind === "user" && ROLE_RANK[user.role] >= ROLE_RANK.reviewer}
+            onDecided={refresh}
+          />
+        ) : (
+          <EmptyWorkspace />
+        )}
       </div>
     </div>
   );
@@ -464,7 +479,7 @@ function UsersDialog({ me: current, onClose }: { me: Me; onClose: () => void }) 
 function Kpis({ cases }: { cases: CaseOut[] }) {
   const n = (f: (c: CaseOut) => boolean) => cases.filter(f).length;
   const items = [
-    { label: "검토 필요", value: n((c) => c.status === "REVIEW_REQUIRED"), icon: "alert", cls: "glow-orange" },
+    { label: "검토 필요", value: n(needsReview), icon: "alert", cls: "glow-orange" },
     { label: "조사 중", value: n((c) => c.status === "RUNNING" || c.status === "QUEUED"), icon: "clock", cls: "glow-blue" },
     { label: "조사 완료", value: n((c) => c.status === "COMPLETED"), icon: "check", cls: "" },
     {
@@ -510,7 +525,7 @@ function Queue({
 }) {
   const [filter, setFilter] = useState<"all" | "review">("all");
   const [adding, setAdding] = useState(false);
-  const review = cases.filter((c) => c.status === "REVIEW_REQUIRED");
+  const review = cases.filter(needsReview);
   const shown = filter === "review" ? review : cases;
   return (
     <aside className="panel queue" aria-label="사건 대기열">
@@ -559,6 +574,10 @@ function Queue({
 }
 
 function StatusChip({ c }: { c: CaseOut }) {
+  // 담당자가 확정한 사건은 판정을 먼저 보여 준다
+  const v = c.verdict;
+  if (v?.decision === "threat") return <span className="chip st-threat">■ {THREAT_LABEL[v.threat ?? ""] ?? v.threat} 확정</span>;
+  if (v?.decision === "benign") return <span className="chip st-COMPLETED">✓ 정상 확정</span>;
   // 위협으로 판단돼 조사가 끝난 사건은 위협 유형을 위험색으로 보여 준다
   if (c.status === "COMPLETED" && c.threat && !["benign", "unknown"].includes(c.threat.threat)) {
     return (
@@ -577,6 +596,7 @@ function StatusChip({ c }: { c: CaseOut }) {
 function caseSummary(c: CaseOut): string {
   if (c.status === "RUNNING" || c.status === "QUEUED") return "에이전트가 조사하는 중";
   const parts: string[] = [];
+  if (c.verdict?.decision === "hold") parts.push("담당자 보류");
   if (c.threat) parts.push(`${THREAT_LABEL[c.threat.threat] ?? c.threat.threat} ${pct(c.threat.probability)}`);
   if (c.finish_reason) parts.push(REASON_LABEL[c.finish_reason] ?? c.finish_reason);
   return parts.join(" · ") || "-";
@@ -642,7 +662,7 @@ function EmptyWorkspace() {
 }
 
 // ── 선택한 사건: 가운데(조사) + 오른쪽(판단·증거) ─────────────────
-const Workspace = memo(function Workspace({ id }: { id: string }) {
+const Workspace = memo(function Workspace({ id, canDecide, onDecided }: { id: string; canDecide: boolean; onDecided: () => void }) {
   const [c, setC] = useState<CaseOut | null>(null);
   const [events, setEvents] = useState<EvidenceEvent[]>([]);
   const [status, setStatus] = useState("");
@@ -674,7 +694,16 @@ const Workspace = memo(function Workspace({ id }: { id: string }) {
   return (
     <>
       <Investigation c={c} events={sorted} status={st} running={running} id={id} />
-      <SidePanel c={c} id={id} running={running} />
+      <SidePanel
+        c={c}
+        id={id}
+        running={running}
+        canDecide={canDecide}
+        onDecided={() => {
+          getCase(id).then(setC).catch(() => undefined);
+          onDecided();
+        }}
+      />
     </>
   );
 });
@@ -888,29 +917,190 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
 const ACTION_LABEL: Record<string, string> = { scroll: "스크롤", back: "뒤로 가기", close_popup: "팝업 닫기", finish: "조사 끝내기" };
 
 // ── 오른쪽: AI 의견 · 외부 평판·증거 · 판정 ───────────────────────
-function SidePanel({ c, id, running }: { c: CaseOut | null; id: string; running: boolean }) {
+function SidePanel({
+  c,
+  id,
+  running,
+  canDecide,
+  onDecided,
+}: {
+  c: CaseOut | null;
+  id: string;
+  running: boolean;
+  canDecide: boolean;
+  onDecided: () => void;
+}) {
   return (
     <aside className="side" aria-label="판단과 증거">
       <Opinion c={c} running={running} />
       <Evidence c={c} id={id} running={running} />
-      <section className="panel card verdict" aria-label="담당자 판정">
-        <h2 className="panel-title">담당자 판정</h2>
-        <button type="button" className="btn btn-danger" disabled>
-          위협 확정
-        </button>
-        <div className="verdict-row">
-          <button type="button" className="btn btn-ghost" disabled>
-            정상
-          </button>
-          <button type="button" className="btn btn-ghost" disabled>
-            보류
-          </button>
-        </div>
-        <p className="faint small" style={{ margin: 0 }}>
-          판정 저장은 계정·권한 기능과 함께 제공 예정입니다. AI 는 판정을 확정하지 않습니다.
-        </p>
-      </section>
+      <VerdictPanel c={c} id={id} running={running} canDecide={canDecide} onDecided={onDecided} />
     </aside>
+  );
+}
+
+const DECISION_LABEL: Record<Decision, string> = { threat: "위협 확정", benign: "정상", hold: "보류" };
+const THREAT_TYPES = ["phishing", "scam", "illegal_gambling", "malware"];
+const fmtDateTime = (iso: string) =>
+  new Date(iso).toLocaleString("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+
+function verdictText(v: Verdict): string {
+  return v.decision === "threat" ? `위협 확정 · ${THREAT_LABEL[v.threat ?? ""] ?? v.threat}` : DECISION_LABEL[v.decision];
+}
+
+// 담당자 판정: 검토관 이상 담당자 계정만 저장한다. 보고 있던 판(rev)을 함께 보내 다른 담당자의 저장을 덮어쓰지 않는다
+function VerdictPanel({
+  c,
+  id,
+  running,
+  canDecide,
+  onDecided,
+}: {
+  c: CaseOut | null;
+  id: string;
+  running: boolean;
+  canDecide: boolean;
+  onDecided: () => void;
+}) {
+  const cur = c?.verdict ?? null;
+  const [pick, setPick] = useState<Decision | null>(null);
+  const [threat, setThreat] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [history, setHistory] = useState<Verdict[] | null>(null);
+
+  const choose = (d: Decision) => {
+    setMsg("");
+    setPick(d);
+    // AI 가 위협 유형을 냈으면 그 유형을 기본값으로 둔다(담당자가 바꿀 수 있음)
+    const ai = c?.threat?.threat ?? "";
+    if (d === "threat" && !threat) setThreat(THREAT_TYPES.includes(ai) ? ai : "");
+  };
+  const submit = async () => {
+    if (!pick) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      await saveVerdict(id, { rev: cur?.rev ?? 0, decision: pick, threat: pick === "threat" ? threat : null, note });
+      setPick(null);
+      setNote("");
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "저장 실패");
+    } finally {
+      setBusy(false);
+      setHistory(null);
+      onDecided(); // 실패(다른 담당자가 먼저 저장)여도 최신 판정을 다시 받아 보여 준다
+    }
+  };
+
+  return (
+    <section className="panel card verdict" aria-label="담당자 판정">
+      <div className="card-head">
+        <h2 className="panel-title">담당자 판정</h2>
+        {cur && <span className="mono faint small">판 {cur.rev}</span>}
+      </div>
+      {cur ? (
+        <div className={`verdict-now v-${cur.decision}`}>
+          <span className="verdict-name">{verdictText(cur)}</span>
+          <span className="faint small">
+            <span className="mono">{cur.reviewer}</span> · {fmtDateTime(cur.created_at)}
+            {cur.head_seq != null && ` · 증거 EV-${cur.head_seq}까지 확인`}
+          </span>
+          {cur.note && <span className="verdict-note small">{cur.note}</span>}
+        </div>
+      ) : (
+        <p className="muted small" style={{ margin: 0 }}>
+          아직 판정이 없습니다.
+        </p>
+      )}
+
+      {!canDecide ? (
+        <p className="faint small" style={{ margin: 0 }}>
+          판정은 검토관 이상의 담당자 계정만 저장할 수 있습니다. AI 는 판정을 확정하지 않습니다.
+        </p>
+      ) : running || !c ? (
+        <p className="faint small" style={{ margin: 0 }}>
+          조사가 끝나면 판정할 수 있습니다.
+        </p>
+      ) : (
+        <>
+          <button type="button" className="btn btn-danger" aria-pressed={pick === "threat"} onClick={() => choose("threat")}>
+            위협 확정
+          </button>
+          <div className="verdict-row">
+            <button type="button" className="btn btn-ghost" aria-pressed={pick === "benign"} onClick={() => choose("benign")}>
+              정상
+            </button>
+            <button type="button" className="btn btn-ghost" aria-pressed={pick === "hold"} onClick={() => choose("hold")}>
+              보류
+            </button>
+          </div>
+          {pick && (
+            <form
+              className="stack"
+              onSubmit={(e) => {
+                e.preventDefault();
+                submit();
+              }}
+            >
+              {pick === "threat" && (
+                <select className="field" aria-label="위협 유형" value={threat} onChange={(e) => setThreat(e.target.value)} required>
+                  <option value="" disabled>
+                    위협 유형 선택
+                  </option>
+                  {THREAT_TYPES.map((t) => (
+                    <option key={t} value={t}>
+                      {THREAT_LABEL[t]}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <textarea
+                className="field"
+                rows={3}
+                maxLength={1000}
+                placeholder="판단 근거 메모(선택, 1000자까지)"
+                aria-label="판단 근거 메모"
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+              />
+              <div className="verdict-row">
+                <button type="submit" className="btn btn-primary" disabled={busy || (pick === "threat" && !threat)}>
+                  {DECISION_LABEL[pick]} 저장
+                </button>
+                <button type="button" className="btn btn-ghost" onClick={() => setPick(null)}>
+                  취소
+                </button>
+              </div>
+            </form>
+          )}
+        </>
+      )}
+      {msg && (
+        <p className="err" role="alert" style={{ margin: 0 }}>
+          {msg}
+        </p>
+      )}
+      {cur && cur.rev > 1 && (
+        <details
+          className="verdict-history"
+          onToggle={(e) => {
+            if (e.currentTarget.open && !history) listVerdicts(id).then(setHistory, () => setHistory([]));
+          }}
+        >
+          <summary className="faint small">판정 기록 {cur.rev}건</summary>
+          {(history ?? []).map((v) => (
+            <div key={v.rev} className="small verdict-past">
+              <span>
+                <span className="mono faint">판 {v.rev}</span> {verdictText(v)} · <span className="mono">{v.reviewer}</span> · {fmtDateTime(v.created_at)}
+              </span>
+              {v.note && <span className="verdict-note">{v.note}</span>}
+            </div>
+          ))}
+        </details>
+      )}
+    </section>
   );
 }
 
