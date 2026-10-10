@@ -6,7 +6,7 @@
 을 둔다.
 
 hash = sha256(prev || canonical(seq, ts, kind, data, files))
-sig  = HMAC-SHA256(key, hash)   ← 키는 저장소와 분리 보관(에이전트 컨테이너에는 없음)
+sig  = HMAC-SHA256(key, hash)   ← 키는 증거 저장소와 분리 보관(환경 변수). 서명하는 에이전트와 검증하는 API 만 가진다
 
 파일과 해시를 함께 고쳐도, 키가 없으면 서명을 다시 만들 수 없으므로 검증에서 드러난다.
 기록 삭제·순서 변경은 prev 연결과 seq 연속성 검사로, 끝부분 절단은 DB에 따로 둔

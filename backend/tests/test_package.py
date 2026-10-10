@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from safetrace import accounts, package
 from safetrace.evidence import GENESIS, canonical
-from safetrace.store import Case
+from safetrace.store import Case, now
 from tests.conftest import INVESTIGATOR, VIEWER
 
 PW = "correct-horse-battery-9"
@@ -130,6 +130,33 @@ def test_package_permissions_and_state(client, case_id, testpages):
         s.add(running)
     assert client.get(f"/api/cases/{running.id}/package", headers=h(VIEWER)).status_code == 409
     assert client.get(f"/api/cases/{running.id}/package.zip", headers=h(INVESTIGATOR)).status_code == 409
+
+
+def test_unsafe_file_names_from_chain_are_not_exported(tmp_path):
+    """체인은 에이전트 컨테이너(조사 대상 페이지를 다루는 쪽)가 쓰고 API 는 읽기만 한다. 체인에 경로 이동 이름이
+    들어 있어도 API 가 증거 폴더 밖 파일을 패키지에 담지 않아야 한다(서명 검증과 별개인 심층 방어)."""
+    from safetrace.evidence import EvidenceWriter, Signer, verify_case
+
+    signer = Signer(secrets.token_bytes(32), "k1")
+    cid = "cccccccc-0000-0000-0000-000000000000"
+    (tmp_path / "secret.txt").write_text("server secret")
+    w = EvidenceWriter(tmp_path / "ev", cid, signer)
+    w.file_path("s001_observe.png").write_bytes(b"png")
+    w.append("observe", {"step": 0, "url": "http://x/", "title": "", "candidates": []}, ["s001_observe.png"])
+    w.append("finish", {"reason": "agent_finished"})
+    lines = w.chain_path.read_text(encoding="utf-8").splitlines()
+    bad = json.loads(lines[-1])
+    bad["files"] = {"../../secret.txt": hashlib.sha256(b"server secret").hexdigest()}
+    w.chain_path.write_text("\n".join([*lines[:-1], json.dumps(bad)]) + "\n", encoding="utf-8")
+
+    case = Case(id=cid, url="http://x/", source="test", status="COMPLETED", created_by="t", created_at=now())
+    res = verify_case(tmp_path / "ev", cid, signer, None)
+    pkg = package.build(case, package.read_chain(tmp_path / "ev", cid), res, [], [], generated_by="t", key_id="k1")
+    assert [f["name"] for f in pkg["files"]] == ["s001_observe.png"]
+    assert not pkg["integrity"]["verified"]  # 이상한 이름은 검증 실패로 드러난다
+    z = zipfile.ZipFile(io.BytesIO(package.export_zip(pkg, tmp_path / "ev", cid, signer)))
+    assert all(".." not in n for n in z.namelist())
+    assert b"server secret" not in b"".join(z.read(n) for n in z.namelist() if n != "chain.jsonl")
 
 
 def test_tampered_evidence_is_reported_not_hidden(client, case_id):
