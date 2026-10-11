@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -26,7 +27,7 @@ from sqlalchemy.exc import IntegrityError
 from .. import accounts, package, verdicts
 from ..accounts import ROLES, AccountError
 from ..config import get_settings
-from ..evidence import Head, Signer, verify_case
+from ..evidence import Head, Signer, VerifyResult, verify_case
 from ..live import CHANNEL as LIVE_CHANNEL
 from ..live import END as LIVE_END
 from ..live import WATCH_KEY as LIVE_WATCH_KEY
@@ -36,7 +37,7 @@ from ..masking import mask_secrets
 from ..netguard import BlockedURL, parse_url
 from ..preview import preview_image
 from ..signer.client import ChainAdmin, SignerError
-from ..store import AuditLog, Case, Store, Verdict
+from ..store import TERMINAL, AuditLog, Case, Store, Verdict
 
 log = logging.getLogger("safetrace.api")
 settings = get_settings()
@@ -44,7 +45,6 @@ store = Store(settings.database_url)
 
 _FILE_NAME = re.compile(r"^[a-z0-9_\-]{1,64}\.(png|webm)$")
 _CASE_ID = re.compile(r"^[a-f0-9\-]{36}$")
-TERMINAL = {"COMPLETED", "REVIEW_REQUIRED", "FAILED", "UNREACHABLE", "BLOCKED"}
 
 
 def _token_table() -> dict[str, tuple[str, str]]:
@@ -114,24 +114,41 @@ if settings.redis_url:
 _chains = ChainAdmin(settings.signer_url, settings.signer_api_token.get_secret_value()) if settings.signer_url else None
 
 
+_CLOSE_RETRY_S = (0.5, 1.0)  # 닫기가 실패하면 이만큼 기다렸다가 다시 시도한다(잠깐 끊긴 경우)
+
+
+def _close_chain(case_id: str) -> dict | None:
+    """체인을 닫고 서명 서비스의 head 를 받는다. 끝내 실패하면 None(감사 로그를 남긴다)."""
+    for wait in (*_CLOSE_RETRY_S, None):
+        try:
+            return _chains.close(case_id)
+        except SignerError as e:
+            err = e
+        if wait is not None:
+            time.sleep(wait)
+    store.audit("system", "evidence.close_failed", case_id, str(err))
+    return None
+
+
 def record_event(case_id: str, payload: dict) -> None:
     """에이전트 이벤트를 DB 에 반영한다. 조사가 끝나면 체인을 닫고 서명 서비스의 head 를 쓴다.
 
-    에이전트가 보고한 head 는 믿지 않는다: 에이전트가 뚫려 체인 끝을 잘라 내도 서명 서비스의 head 와 어긋나 검증에서 드러난다.
+    운영(서명 서비스)에서는 에이전트가 보고한 head 를 어떤 상태 이벤트에서도 받지 않는다: 에이전트가 뚫려 체인 끝을
+    잘라 내도 서명 서비스의 head 와 어긋나 검증에서 드러난다. 상태 전이는 store 가 검사한다(끝난 사건·모르는 상태는 거절).
+    닫기에 실패하면 head 를 비워 두고, 검증·패키지에서 다시 닫아 받기 전까지 무결성을 성공으로 표시하지 않는다.
     """
-    if _chains is not None and payload.get("type") == "status" and payload.get("status") in TERMINAL:
+    if _chains is not None and payload.get("type") == "status":
         reported = payload.get("head")
-        try:
-            h = _chains.close(case_id)
-            payload = {**payload, "head": {"seq": h["seq"], "hash": h["hash"]}}
-            if reported and (reported.get("seq"), reported.get("hash")) != (h["seq"], h["hash"]):
-                store.audit("system", "evidence.head_mismatch", case_id,
-                            f"agent={reported.get('seq')} signer={h['seq']}")
-        except SignerError as e:
-            # 닫지 못하면 head 를 비워 둔다: 검증에서 '끝부분 절단' 대조를 하지 못한다는 사실이 드러나게
-            payload = {**payload, "head": None}
-            store.audit("system", "evidence.close_failed", case_id, str(e))
-    store.add_event(case_id, payload)
+        payload = {k: v for k, v in payload.items() if k != "head"}
+        if payload.get("status") in TERMINAL:
+            h = _close_chain(case_id)
+            if h is not None:
+                payload["head"] = {"seq": h["seq"], "hash": h["hash"]}
+                if isinstance(reported, dict) and (reported.get("seq"), reported.get("hash")) != (h["seq"], h["hash"]):
+                    store.audit("system", "evidence.head_mismatch", case_id,
+                                f"agent={str(reported.get('seq'))[:12]} signer={h['seq']}")
+    if not store.add_event(case_id, payload):
+        store.audit("system", "event.rejected", case_id, f"status={str(payload.get('status'))[:24]}")
 
 
 def enqueue(case_id: str, url: str):
@@ -452,7 +469,7 @@ def list_verdicts(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]
 @app.post("/api/cases/{case_id}/verdicts", response_model=VerdictOut, status_code=201)
 def save_verdict(case_id: str, body: VerdictIn, p: Annotated[Principal, Depends(need("reviewer", human=True))]):
     """판정 저장. 검토관 이상의 담당자 계정만 할 수 있다(자동화 토큰·AI 는 확정 불가)."""
-    _get_case(case_id)
+    _evidence_head(_get_case(case_id))  # 판정에 묶을 head 가 비어 있으면(닫기 실패) 먼저 받아 둔다
     try:
         v = verdicts.save(store, case_id, expected_rev=body.rev, decision=body.decision, threat=body.threat,
                           note=body.note, reviewer=p.name, user_id=p.user_id)
@@ -602,12 +619,36 @@ async def case_live(ws: WebSocket, case_id: str):
         pass
 
 
+def _evidence_head(c: Case) -> Head | None:
+    """사건의 증거 체인 끝(서명 서비스가 정한 값). 끝난 사건인데 비어 있으면(닫기 실패) 다시 닫아 받아 둔다."""
+    if c.head_seq is not None:
+        return Head(c.head_seq, c.head_hash)
+    if _chains is None or c.status not in TERMINAL:
+        return None
+    try:
+        h = _chains.close(c.id)
+    except SignerError:
+        return None
+    store.set_head(c.id, h["seq"], h["hash"])
+    store.audit("system", "evidence.head_recovered", c.id, f"seq={h['seq']}")
+    c.head_seq, c.head_hash = h["seq"], h["hash"]
+    return Head(h["seq"], h["hash"])
+
+
+def _verify_case(c: Case, signer: Signer) -> VerifyResult:
+    """끝난 사건은 체인 끝을 대조할 head 가 있어야 성공이다(없으면 끝부분을 잘라 내도 알 수 없다)."""
+    head = _evidence_head(c)
+    res = verify_case(settings.evidence_dir, c.id, signer, head)
+    if head is None and c.status in TERMINAL:
+        res = VerifyResult(False, res.records, [*res.errors, "head_unknown (서명 서비스에서 체인 끝을 받지 못함)"])
+    return res
+
+
 @app.post("/api/cases/{case_id}/verify")
 def verify(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]):
     c = _get_case(case_id)
-    head = Head(c.head_seq, c.head_hash) if c.head_seq is not None else None
     signer = Signer(settings.evidence_hmac_key.get_secret_value().encode(), settings.evidence_key_id)
-    res = verify_case(settings.evidence_dir, case_id, signer, head)
+    res = _verify_case(c, signer)
     store.audit(p.name, "evidence.verify", case_id, "ok" if res.ok else ";".join(res.errors[:5]))
     return res.as_dict()
 
@@ -621,8 +662,7 @@ def _package(c: Case, who: str) -> dict:
     if c.status not in TERMINAL:
         raise HTTPException(409, "조사가 끝난 뒤에 패키지를 만들 수 있습니다")
     signer = _signer()
-    head = Head(c.head_seq, c.head_hash) if c.head_seq is not None else None
-    res = verify_case(settings.evidence_dir, c.id, signer, head)
+    res = _verify_case(c, signer)
     with store.session() as s:
         audit = list(s.scalars(select(AuditLog).where(AuditLog.case_id == c.id)))
     return package.build(c, package.read_chain(settings.evidence_dir, c.id), res, verdicts.history(store, c.id), audit,

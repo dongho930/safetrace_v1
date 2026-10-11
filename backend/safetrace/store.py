@@ -15,6 +15,11 @@ def now() -> datetime:
     return datetime.now(UTC)
 
 
+TERMINAL = frozenset({"COMPLETED", "REVIEW_REQUIRED", "FAILED", "UNREACHABLE", "BLOCKED"})
+# 상태는 QUEUED → RUNNING → 종료 상태로만 간다. 끝난 사건의 상태는 다시 바뀌지 않는다(워커가 보낸 이벤트라도)
+_NEXT_STATUS = {"QUEUED": {"RUNNING", *TERMINAL}, "RUNNING": {"RUNNING", *TERMINAL}}
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -118,22 +123,32 @@ class Store:
     def session(self) -> Session:
         return self.Session()
 
-    def add_event(self, case_id: str, payload: dict) -> None:
+    def add_event(self, case_id: str, payload: dict) -> bool:
+        """이벤트를 남긴다. 상태 이벤트가 허용된 전이가 아니면(끝난 사건, 모르는 상태) 남기지 않고 False."""
         with self.session() as s, s.begin():
-            s.add(CaseEvent(case_id=case_id, payload=payload))
             if payload.get("type") == "status":
-                c = s.get(Case, case_id)
-                if c:
-                    c.status = payload["status"]
-                    c.finish_reason = payload.get("reason")
-                    if payload.get("threat") is not None:
-                        c.threat = payload["threat"]
-                    head = payload.get("head") or {}
-                    if "seq" in head:
-                        c.head_seq, c.head_hash = head["seq"], head["hash"]
-                    for k in ("final_url", "candidates", "safebrowsing"):
-                        if k in payload:
-                            setattr(c, k, payload[k])
+                c = s.get(Case, case_id, with_for_update=True)
+                if c is None or payload.get("status") not in _NEXT_STATUS.get(c.status, ()):
+                    return False
+                c.status = payload["status"]
+                c.finish_reason = payload.get("reason")
+                if payload.get("threat") is not None:
+                    c.threat = payload["threat"]
+                head = payload.get("head") or {}
+                if "seq" in head:
+                    c.head_seq, c.head_hash = head["seq"], head["hash"]
+                for k in ("final_url", "candidates", "safebrowsing"):
+                    if k in payload:
+                        setattr(c, k, payload[k])
+            s.add(CaseEvent(case_id=case_id, payload=payload))
+        return True
+
+    def set_head(self, case_id: str, seq: int, hash_: str) -> None:
+        """head 가 비어 있는 사건에 서명 서비스의 head 를 채운다(닫기에 실패했다가 나중에 다시 닫아 받은 값)."""
+        with self.session() as s, s.begin():
+            c = s.get(Case, case_id, with_for_update=True)
+            if c is not None and c.head_seq is None:
+                c.head_seq, c.head_hash = seq, hash_
 
     def events_after(self, case_id: str, after_id: int, limit: int = 200) -> list[CaseEvent]:
         with self.session() as s:

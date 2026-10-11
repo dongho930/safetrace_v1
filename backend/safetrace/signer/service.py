@@ -44,6 +44,19 @@ class AppendIn(BaseModel):
         return v
 
 
+async def _read_limited(request: Request) -> bytes:
+    """본문을 받으면서 크기를 센다. 한도를 넘으면 나머지는 받지 않고 413(다 받은 뒤 재면 메모리가 먼저 찬다)."""
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > MAX_BODY:
+        raise HTTPException(413, "record too large")
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > MAX_BODY:
+            raise HTTPException(413, "record too large")
+    return bytes(buf)
+
+
 def _bearer(expected: str, authorization: str) -> None:
     if not expected:
         raise HTTPException(503, "signer token not configured")
@@ -69,9 +82,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/v1/chains/{case_id}/records", dependencies=[Depends(agent_only)])
     async def append(case_id: CaseId, request: Request):
-        raw = await request.body()
-        if len(raw) > MAX_BODY:
-            raise HTTPException(413, "record too large")
+        raw = await _read_limited(request)
         try:
             req = AppendIn.model_validate_json(raw)
         except ValidationError:

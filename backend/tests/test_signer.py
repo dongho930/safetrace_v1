@@ -128,3 +128,138 @@ def test_api_uses_signer_head_not_agent_report(svc, monkeypatch):
         assert (got.head_seq, got.head_hash) == (w.head.seq, w.head.hash)
         assert s.query(AuditLog).filter_by(case_id=c.id, action="evidence.head_mismatch").count() == 1
     assert svc["admin"].head(c.id)["closed"]
+
+
+# ── Codex 시범 검토(#37) 지적 재현 ─────────────────────────────
+@pytest.fixture
+def api_svc(tmp_path, monkeypatch):
+    """API(main)와 같은 키·증거 폴더를 쓰는 서명 서비스. record_event → verify 를 실제 경로로 확인한다."""
+    from safetrace.api import main
+    from safetrace.store import Case
+
+    s = Settings(evidence_hmac_key=main.settings.evidence_hmac_key.get_secret_value(), evidence_key_id=main.settings.evidence_key_id,
+                 signer_agent_token="agent-" + secrets.token_hex(16), signer_api_token="api-" + secrets.token_hex(16),
+                 signer_state_path=tmp_path / "signer.db", _env_file=None)
+    app = create_app(s)
+    agent = RemoteSealer("", s.signer_agent_token.get_secret_value(), client=TestClient(app))
+    admin = ChainAdmin("", s.signer_api_token.get_secret_value(), client=TestClient(app))
+    monkeypatch.setattr(main, "_chains", admin)
+    with main.store.session() as ses, ses.begin():
+        c = Case(url="http://example.test/", source="manual", created_by="test")
+        ses.add(c)
+    admin.open(c.id)
+    return {"main": main, "case_id": c.id, "agent": agent, "admin": admin, "root": main.settings.evidence_dir}
+
+
+def _api_write(api_svc, n=3):
+    w = EvidenceWriter(api_svc["root"], api_svc["case_id"], api_svc["agent"])
+    for i in range(n):
+        w.append("observe", {"step": i}, [])
+    return w
+
+
+def _truncate(w):
+    lines = w.chain_path.read_text(encoding="utf-8").splitlines()
+    w.chain_path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+    last = json.loads(lines[-2])
+    return {"seq": last["seq"], "hash": last["hash"]}
+
+
+def _verify(api_svc):
+    from safetrace.api.main import Principal
+
+    return api_svc["main"].verify(api_svc["case_id"], Principal(name="t", role="viewer"))
+
+
+def _case(api_svc):
+    from safetrace.store import Case
+
+    with api_svc["main"].store.session() as s:
+        return s.get(Case, api_svc["case_id"])
+
+
+@pytest.mark.parametrize("status", ["DONE", "RUNNING", "COMPLETED"])
+def test_agent_event_cannot_replace_head_after_finish(api_svc, status):
+    """F1: 끝난 사건에 뚫린 에이전트가 head 를 실은 상태 이벤트를 보내 잘라 낸 체인을 정상으로 만들 수 없다."""
+    main, cid = api_svc["main"], api_svc["case_id"]
+    w = _api_write(api_svc)
+    main.record_event(cid, {"type": "status", "status": "COMPLETED", "reason": "done"})
+    fake = _truncate(w)
+    main.record_event(cid, {"type": "status", "status": status, "reason": "x", "head": fake})
+    c = _case(api_svc)
+    assert (c.head_seq, c.status) == (2, "COMPLETED")
+    res = _verify(api_svc)
+    assert not res["ok"] and any("head_mismatch" in e for e in res["errors"])
+
+
+def test_agent_reported_head_ignored_while_running(api_svc):
+    """F1: 조사 중에도 에이전트가 보낸 head 는 DB 에 들어가지 않는다(허용 목록 밖 상태도 거절)."""
+    main, cid = api_svc["main"], api_svc["case_id"]
+    _api_write(api_svc, 1)
+    main.record_event(cid, {"type": "status", "status": "RUNNING", "head": {"seq": 0, "hash": "f" * 64}})
+    main.record_event(cid, {"type": "status", "status": "PWNED"})
+    c = _case(api_svc)
+    assert (c.status, c.head_seq) == ("RUNNING", None)
+
+
+def test_close_failure_does_not_verify(api_svc, monkeypatch):
+    """F2: 체인 닫기가 실패해 head 가 없으면 무결성을 성공으로 표시하지 않고, 서명 서비스가 돌아오면 head 를 받아 대조한다."""
+    main, cid, admin = api_svc["main"], api_svc["case_id"], api_svc["admin"]
+    w = _api_write(api_svc)
+    real_close = admin.close
+    monkeypatch.setattr(main, "_CLOSE_RETRY_S", ())
+
+    def down(_cid):
+        raise SignerError("signer unreachable: ConnectError")
+
+    monkeypatch.setattr(admin, "close", down)
+    _truncate(w)
+    main.record_event(cid, {"type": "status", "status": "COMPLETED", "reason": "done"})
+    res = _verify(api_svc)
+    assert not res["ok"] and any("head_unknown" in e for e in res["errors"])
+    monkeypatch.setattr(admin, "close", real_close)
+    res = _verify(api_svc)
+    assert not res["ok"] and any("head_mismatch" in e for e in res["errors"])
+    assert _case(api_svc).head_seq == 2
+
+
+def test_oversized_body_rejected_while_streaming(svc):
+    """F3: 1MiB 를 넘는 본문은 다 받기 전에 413 으로 끊는다."""
+    import asyncio
+
+    from safetrace.signer.service import MAX_BODY
+
+    agent_tok, _ = svc["tokens"]
+    cid = str(uuid.uuid4())
+    svc["admin"].open(cid)
+    chunk = b"x" * 65536
+    total = MAX_BODY * 4 // len(chunk)
+    calls = {"n": 0}
+    sent: list[dict] = []
+
+    async def receive():
+        calls["n"] += 1
+        return {"type": "http.request", "body": chunk, "more_body": calls["n"] < total}
+
+    async def send(msg):
+        sent.append(msg)
+
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST", "scheme": "http",
+             "path": f"/v1/chains/{cid}/records", "raw_path": f"/v1/chains/{cid}/records".encode(), "query_string": b"",
+             "root_path": "", "headers": [(b"authorization", f"Bearer {agent_tok}".encode()),
+                                          (b"content-type", b"application/json")],
+             "client": ("127.0.0.1", 1), "server": ("signer", 8200)}
+    asyncio.run(svc["app"](scope, receive, send))
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    assert status == 413
+    assert calls["n"] <= MAX_BODY // len(chunk) + 2, calls["n"]
+
+
+def test_oversized_content_length_rejected_early(svc):
+    agent_tok, _ = svc["tokens"]
+    c = TestClient(svc["app"], headers={"Authorization": f"Bearer {agent_tok}"})
+    cid = str(uuid.uuid4())
+    svc["admin"].open(cid)
+    r = c.post(f"/v1/chains/{cid}/records", content=b"{" + b" " * (2 << 20) + b"}",
+               headers={"Content-Type": "application/json"})
+    assert r.status_code == 413
