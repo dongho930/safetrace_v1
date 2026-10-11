@@ -62,6 +62,9 @@ _NET_CATEGORY = {
 # goo.su "Redirecting... Please wait", lrl.kr "곧 원하시는 페이지로 이동됩니다 … 7 초 후 이동합니다"
 _AUTO_REDIRECT = re.compile(r"Redirecting\.\.\.|Please wait|원하시는 페이지로 이동|초 후 이동합니다")
 _AUTO_REDIRECT_WAIT = 10.0  # 대기 화면에서 이동을 기다리는 최대 시간(초)
+# 이동 요청 검사(이름 해석)의 상한(초). 넘으면 열 수 없는 곳으로 막는다(ssrf:dns_timeout).
+# 이름 해석이 느린 회선에서는 검사가 끝나기 전에 관찰·판단을 마쳐 목적지를 놓쳤다(CI 에서 가끔 실패하던 원인)
+_NAV_CHECK_TIMEOUT = 4.0
 
 
 def is_auto_redirect_page(text: str) -> bool:
@@ -165,6 +168,7 @@ class AgentRun:
         self._egress_refused: set[str] = set()  # 검문 프록시가 거부 응답을 돌려준 주소(그 응답 화면은 막다른 곳)
         self._dead_links: set[tuple[str, str]] = set()  # 막다른 곳으로 이어진 (페이지 주소, 버튼 글자)
         self._waited: set[str] = set()  # 자동 이동을 기다려 본 대기 화면 주소(한 번만 기다린다)
+        self._nav_checks = 0  # 검사 중인 주 화면 이동 요청 수
 
     # ── 기록 ──────────────────────────────────────────
     def _record(self, kind: str, data: dict, files: list[str] | None = None) -> int:
@@ -217,15 +221,22 @@ class AgentRun:
             await route.continue_()
             return
         reason = None
+        main_nav = req.is_navigation_request() and _is_main_frame(req)
         if req.method.upper() not in _ALLOWED_METHODS:
             reason = f"method:{req.method.upper()}"
         else:
-            ok, why = await asyncio.to_thread(self._host_allowed, url)
+            self._nav_checks += main_nav
+            try:
+                ok, why = await asyncio.wait_for(asyncio.to_thread(self._host_allowed, url), _NAV_CHECK_TIMEOUT)
+            except TimeoutError:
+                ok, why = False, "ssrf:dns_timeout"
+            finally:
+                self._nav_checks -= main_nav
             if not ok:
                 reason = why
         if reason:
             self.result.blocked_requests += 1
-            if reason.startswith("ssrf:") and req.is_navigation_request() and _is_main_frame(req):
+            if reason.startswith("ssrf:") and main_nav:
                 self._note_blocked_destination(url, reason)
             if req.is_navigation_request() or reason.startswith("method"):
                 self._record("blocked_request", {"url": url[:500], "reason": reason,
@@ -492,6 +503,18 @@ class AgentRun:
                                        "destinations": [b["host"] for b in self.result.blocked_destinations[blocked0:]]})
         return moved
 
+    async def _settle_nav_checks(self, page: Page, step: int) -> None:
+        """주 화면 이동 요청을 검사하는 중이면 끝날 때까지 기다린다(검사 상한만큼).
+        검사 중에 관찰하면 넘어가기 전 화면을 보고, 끝내면 목적지를 기록하기 전에 조사를 마친다."""
+        if not self._nav_checks:
+            return
+        t0 = time.monotonic()
+        while self._nav_checks and time.monotonic() - t0 < _NAV_CHECK_TIMEOUT + 1:
+            await asyncio.sleep(0.05)
+        await self._settle(page)
+        self._record("nav_check_wait", {"step": step, "url": page.url[:2048], "waited_ms": int((time.monotonic() - t0) * 1000),
+                                        "pending": self._nav_checks})
+
     async def _settle(self, page: Page):
         try:
             await page.wait_for_load_state("domcontentloaded", timeout=5000)
@@ -707,6 +730,7 @@ class AgentRun:
             if over:
                 self.result.status, self.result.finish_reason = "COMPLETED", over
                 break
+            await self._settle_nav_checks(page, step)
             if self._is_dead_end(page, blocked_before):
                 # 오류 화면·프록시 거부 화면에서는 할 수 있는 일이 없다('다시 시도'를 누르며 오가지 않는다).
                 # 우리가 누른 링크 때문이면 그 링크를 빼고 원래 페이지로 돌아가 계속하고, 사이트가 스스로 옮겼으면 끝낸다
@@ -757,6 +781,15 @@ class AgentRun:
                     # 대기 화면이 스스로 다음 곳으로 넘어갔다: 끝내지 않고 넘어간 곳(막다른 곳 포함)을 이어서 본다
                     blocked_before = observed_from[1]
                     self.history.append("wait_redirect")
+                    self.budget.steps += 1
+                    step += 1
+                    continue
+                await self._settle_nav_checks(page, step)
+                if self._is_dead_end(page, observed_from[1]) or len(self.result.blocked_destinations) > observed_from[1]:
+                    # 관찰·판단하는 사이에 페이지가 스스로 열리지 않는 곳으로 넘어갔다(대기 문구가 없는 화면):
+                    # 끝내지 않고 막다른 곳으로 처리한다
+                    blocked_before = observed_from[1]
+                    self.history.append("moved")
                     self.budget.steps += 1
                     step += 1
                     continue
@@ -834,6 +867,7 @@ class AgentRun:
 
     async def _wrap_up(self, page: Page, step: int):
         """조사를 마무리한다: 최종 주소·전체 캡처·finish 기록·경유 도메인."""
+        await self._settle_nav_checks(page, step)  # 검사 중인 목적지도 위협 판단에 넣는다
         self.result.steps = step
         # 오류 화면·빈 화면·프록시 거부 화면에서 끝났으면 마지막으로 열린 실제 페이지를 최종 주소로 둔다
         # (열리지 않은 목적지는 blocked_destinations 에 있다)

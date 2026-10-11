@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import secrets
 import statistics
 import subprocess
 import sys
@@ -170,7 +171,9 @@ def run_inside(args) -> None:
     from safetrace.config import Settings
 
     rows = load_set(Path(args.set), args.group)
-    s = Settings(evidence_dir=Path(IN_BOX) / "evidence")
+    # 평가 증거는 임시 폴더에 쓰고 버린다. 서명 서비스의 체인은 API 만 열 수 있으므로(#37) 여기서는
+    # 이 프로세스 안에서 일회용 키로 서명한다(실제 증거 서명 키는 여전히 에이전트에 없다)
+    s = Settings(evidence_dir=Path(IN_BOX) / "evidence", signer_url=None, evidence_hmac_key=secrets.token_hex(32))
     with open(args.out, "a", encoding="utf-8") as f:
         for rep in range(args.repeat):
             for row in rows:  # 한 URL 을 연달아 돌리지 않고 목록을 한 바퀴씩 돈다(시간대 편차 분산)
