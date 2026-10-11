@@ -19,6 +19,7 @@ TypeSafe의 의사결정 모델 **Jev**가 다음 행동과 위협 유형을 정
 | `backend/safetrace/netguard.py` | SSRF 1차 방어(이동 전 실제 IP 확인) |
 | `backend/safetrace/proxy/egress.py` | SSRF 2차 방어: 검문 프록시(접속 시점 재해석, DNS Rebinding 대비) |
 | `backend/safetrace/evidence.py` | 증거 해시 체인·HMAC 서명·검증 |
+| `backend/safetrace/signer/` | 서명 서비스: 증거 서명 키를 에이전트와 분리, seq·시각을 서비스가 정하고 사건별 체인을 열고 닫음 |
 | `backend/safetrace/api/` | FastAPI: 사건 접수·조회, SSE 실시간 진행, 증거 파일·무결성 검증, 담당자 판정, 검토 패키지 |
 | `frontend/` | 실시간 조사 콘솔(React 19 + TypeScript + Vite) |
 | `testpages/` | 단계형 가짜 위협 페이지 + 에이전트 공격 시나리오 10종 + 요청 기록 서버 |
@@ -43,7 +44,8 @@ cd backend && ../.venv/Scripts/uvicorn safetrace.api.main:app --port 8000
 cd frontend && npm install && npm run dev                    # 콘솔 :5173
 ```
 
-개발 모드(`ST_REDIS_URL` 없음)에서는 API 프로세스 안에서 에이전트를 실행한다.
+개발 모드(`ST_REDIS_URL` 없음)에서는 API 프로세스 안에서 에이전트를 실행한다. `ST_SIGNER_URL` 이 없으면 서명도 같은 프로세스에서 한다.
+Compose 에서는 증거 서명 키를 서명 서비스(`signer`)와 API(검증)만 가진다. 에이전트는 키 없이 기록 내용을 서명 서비스에 보내고, 기록 번호와 수집 시각은 서명 서비스가 정한다.
 
 ## 배포 실행 (Docker Compose)
 

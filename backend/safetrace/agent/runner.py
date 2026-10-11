@@ -11,18 +11,25 @@ import httpx
 from ..config import Settings
 from ..decision.client import Decider, HttpDecider, LocalDecider
 from ..decision.engine import Engine, build_providers
-from ..evidence import EvidenceWriter, Signer
+from ..evidence import EvidenceWriter, LocalSealer, Sealer, Signer
 from ..live import LivePublisher, LiveSink
 from ..netguard import remote_resolver
 from ..safebrowsing import lookup
+from ..signer.client import RemoteSealer
 from .loop import AgentRun
 
 log = logging.getLogger("safetrace.runner")
 
 
 def make_signer(s: Settings) -> Signer:
-    key = s.evidence_hmac_key.get_secret_value().encode()
-    return Signer(key, s.evidence_key_id)
+    return Signer(s.evidence_hmac_key.get_secret_value().encode(), s.evidence_key_id)
+
+
+def make_sealer(s: Settings) -> Sealer:
+    # 운영: 서명 서비스에 맡긴다(에이전트에는 키가 없다). 개발 모드: 같은 프로세스에서 서명
+    if s.signer_url:
+        return RemoteSealer(s.signer_url, s.signer_agent_token.get_secret_value())
+    return LocalSealer(make_signer(s))
 
 
 def make_decider(s: Settings) -> Decider:
@@ -35,7 +42,7 @@ def make_decider(s: Settings) -> Decider:
 
 def investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], None],
                 decider: Decider | None = None, resolver=None, live: LivePublisher | None = None) -> dict:
-    writer = EvidenceWriter(s.evidence_dir, case_id, make_signer(s))
+    writer = EvidenceWriter(s.evidence_dir, case_id, make_sealer(s))
     emit({"type": "status", "status": "RUNNING", "reason": None})
     if resolver is None and s.resolver_url:
         resolver = remote_resolver(s.resolver_url)

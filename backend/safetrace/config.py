@@ -2,8 +2,8 @@
 
 시크릿은 서비스별로 필요한 것만 주입한다.
 - Jev/OpenRouter API 키: 판단 서비스(decision)에만
-- 증거 HMAC 키: 에이전트 워커(서명)와 API(검증)에만. DB·증거 저장소에는 두지 않는다
-- 에이전트 워커: DB 접속 정보 없음. 진행 상황은 이벤트로만 내보낸다
+- 증거 HMAC 키: 서명 서비스(signer)와 API(검증)에만. 에이전트 워커·DB·증거 저장소에는 두지 않는다
+- 에이전트 워커: DB 접속 정보·서명 키 없음. 진행 상황은 이벤트로만 내보내고, 기록은 서명 서비스에 맡긴다
 """
 
 from functools import lru_cache
@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     # 증거 서명 키: 저장소 권한과 분리해 보관한다
     evidence_hmac_key: SecretStr = SecretStr("")
     evidence_key_id: str = "k1"
+    # 서명 서비스. 비우면 같은 프로세스에서 서명한다(개발 모드)
+    signer_url: str | None = None  # 예: http://signer:8200
+    signer_agent_token: SecretStr = SecretStr("")  # 에이전트 → 서명 서비스: 기록 추가만
+    signer_api_token: SecretStr = SecretStr("")  # API → 서명 서비스: 체인 열기·닫기·head 조회
+    signer_state_path: Path = Path("./var/signer.db")  # 서명 서비스가 사건별 head 를 두는 곳
 
     # 판단 서비스
     decision_url: str = "http://127.0.0.1:8100"
