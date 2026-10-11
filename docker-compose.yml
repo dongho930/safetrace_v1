@@ -56,7 +56,9 @@ services:
   signer:
     <<: *common
     build: ./backend
-    command: ["uvicorn", "--factory", "safetrace.signer.service:create_app", "--host", "0.0.0.0", "--port", "8200"]
+    # 동시 연결 한도: 뚫린 에이전트가 요청을 몰아 보내도 메모리 한도(기록 1MiB × 연결 수) 안에 머문다
+    command: ["uvicorn", "--factory", "safetrace.signer.service:create_app", "--host", "0.0.0.0", "--port", "8200",
+              "--limit-concurrency", "32"]
     environment:
       # 증거 서명 키는 이 서비스(서명)와 api(검증)만 가진다. DB·증거 파일·외부망에는 닿지 않는다.
       ST_DATABASE_URL: "sqlite:////tmp/unused.db"
@@ -69,6 +71,9 @@ services:
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
+    deploy:
+      resources:
+        limits: {cpus: "1", memory: 256m}
     networks: [signing]
 
   decision:
