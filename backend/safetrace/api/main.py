@@ -130,6 +130,29 @@ def _close_chain(case_id: str) -> dict | None:
     return None
 
 
+_CAND_STR = {"url": 2048, "final_url": 2048, "host": 253, "source": 8, "status": 24, "reason": 64, "threat": 32}
+
+
+def _clean_candidates(v) -> list[dict]:
+    """워커가 보낸 연관 후보 목록(믿지 않는 값)을 정해진 항목·길이·개수로만 받는다(화면에는 글자로만 표시)."""
+    out = []
+    for c in v if isinstance(v, list) else []:
+        if not isinstance(c, dict) or not isinstance(c.get("url"), str):
+            continue
+        d = {k: c[k][:n] for k, n in _CAND_STR.items() if isinstance(c.get(k), str)}
+        for k in ("reputation_match", "hold"):
+            if isinstance(c.get(k), bool):
+                d[k] = c[k]
+        if isinstance(c.get("sub"), int) and 0 < c["sub"] <= 10:
+            d["sub"] = c["sub"]
+        if isinstance(c.get("probability"), (int, float)) and 0 <= c["probability"] <= 1:
+            d["probability"] = float(c["probability"])
+        out.append(d)
+        if len(out) >= 20:
+            break
+    return out
+
+
 def record_event(case_id: str, payload: dict) -> None:
     """에이전트 이벤트를 DB 에 반영한다. 조사가 끝나면 체인을 닫고 서명 서비스의 head 를 쓴다.
 
@@ -137,6 +160,8 @@ def record_event(case_id: str, payload: dict) -> None:
     잘라 내도 서명 서비스의 head 와 어긋나 검증에서 드러난다. 상태 전이는 store 가 검사한다(끝난 사건·모르는 상태는 거절).
     닫기에 실패하면 head 를 비워 두고, 검증·패키지에서 다시 닫아 받기 전까지 무결성을 성공으로 표시하지 않는다.
     """
+    if payload.get("type") == "status" and "candidates" in payload:
+        payload = {**payload, "candidates": _clean_candidates(payload["candidates"])}
     if _chains is not None and payload.get("type") == "status":
         reported = payload.get("head")
         payload = {k: v for k, v in payload.items() if k != "head"}

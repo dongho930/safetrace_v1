@@ -46,8 +46,10 @@ def test_gamble_reaches_hidden_deposit_screen(settings, testpages):
     urls = [urlsplit(r["data"]["url"]).path for r in chain if r["kind"] == "observe"]
     assert "/gamble/deposit.html" in urls, urls
     assert final["threat"]["threat"] == "illegal_gambling"
-    # 127.0.0.1 → localhost 로 넘어간 경유 도메인이 후보로 기록
-    assert "localhost" in final["candidates"]
+    # 127.0.0.1 → localhost 로 넘어갔다. 둘 다 이미 조사한 사이트(시작·최종)라 연관 후보가 아니다
+    fin = next(r["data"] for r in chain if r["kind"] == "finish")
+    assert any(urlsplit(u).hostname == "localhost" for u in fin["nav_chain"])
+    assert not any(c["host"] in ("127.0.0.1", "localhost") for c in final["candidates"])
     # 팝업 닫기 수행
     assert any(r["kind"] == "action" and r["data"]["action"] == "close_popup" for r in chain)
     # 입력칸·제출·결제 버튼은 선택지에 없음
@@ -583,7 +585,9 @@ def test_long_smishing_flow(settings, slow_testpages):
               "/smish/app.html", "/smish/guide.html", "/smish/fee.html"):
         assert p in paths, (p, paths)
     assert any(r["kind"] == "new_window" for r in chain)
-    assert "localhost" in final["candidates"]  # 127.0.0.1 → localhost 경유 도메인
+    fin = next(r["data"] for r in chain if r["kind"] == "finish")
+    assert any(urlsplit(u).hostname == "localhost" for u in fin["nav_chain"])  # 127.0.0.1 → localhost 경유
+    assert not any(c["host"] in ("127.0.0.1", "localhost") for c in final["candidates"])  # 조사한 사이트는 후보가 아님
     app = next(r["data"] for r in chain if r["kind"] == "observe" and r["data"]["url"].split("?")[0].endswith("app.html"))
     assert any(f.startswith("download") for f in app["forbidden"])  # apk 링크는 선택지에서 빠짐
     assert_no_forbidden(chain, testpages)
@@ -689,3 +693,51 @@ def test_slow_dns_does_not_lose_destination(settings, testpages, page, host, dec
     chain = [json.loads(x) for x in (settings.evidence_dir / cid / "chain.jsonl").read_text(encoding="utf-8").splitlines()]
     assert all(r["data"]["url"].startswith(BASE) for r in chain if r["kind"] == "observe")  # 오류 화면은 관찰하지 않음
     assert time.monotonic() - t0 < 40  # 해석이 끝나기를 무작정 기다리지 않는다
+
+
+
+def test_related_candidate_subinvestigation(settings, testpages):
+    """피싱 화면의 다른 사이트 링크를 연관 후보로 골라 같은 체인 안에서 하위 조사하고 따로 판단한다."""
+    from safetrace import package
+    from safetrace.store import Case, now
+
+    settings.max_steps = 6
+    cid, final, chain, events = run(f"{BASE}/phish/related.html", settings, testpages)
+    assert final["threat"]["threat"] != "benign", final
+    cands = final["candidates"]
+    assert [(c["host"], c["source"], c.get("sub")) for c in cands] == [("localhost", "link", 1)], cands
+    assert cands[0]["threat"] in ("phishing", "scam"), cands
+    # 하위 조사 기록은 sub 가 붙고, 파일 이름은 c1_ 로 시작하며, 원래 조사 판단은 하나뿐이다
+    subs = [r for r in chain if r["data"].get("sub") == 1]
+    assert any(r["kind"] == "observe" for r in subs) and any(r["kind"] == "threat" for r in subs)
+    assert all(n.startswith("c1_") for r in subs for n in r["files"])
+    assert len([r for r in chain if r["kind"] == "threat" and "sub" not in r["data"]]) == 1
+    assert any(e.get("sub") == 1 for e in events if e.get("type") == "step")
+    # 체인은 하나로 이어지고 검증된다
+    signer = make_signer(settings)
+    res = verify_case(settings.evidence_dir, cid, signer, Head(final["head"]["seq"], final["head"]["hash"]))
+    assert res.ok, res.errors
+    # 검토 패키지: 원래 조사와 후보 조사를 나눠 묶는다
+    case = Case(id=cid, url=f"{BASE}/phish/related.html", source="test", status=final["status"], created_by="t",
+                created_at=now())
+    pkg = package.build(case, package.read_chain(settings.evidence_dir, cid), res, [], [], generated_by="t", key_id="k1")
+    assert all(s["observe"]["url"].startswith(BASE) for s in pkg["exploration"]["steps"] if "observe" in s)
+    inv = pkg["candidates"]["investigated"]
+    assert len(inv) == 1 and inv[0]["threat"]["threat"] == cands[0]["threat"]
+    assert inv[0]["exploration"]["steps"] and inv[0]["exploration"]["steps"][0]["observe"]["url"].startswith("http://localhost:8900/")
+
+
+def test_reputation_match_holds_benign(settings, testpages, monkeypatch):
+    """AI 가 정상으로 봐도 평판 DB 가 위험으로 표시하면 정상으로 끝내지 않고 담당자 검토로 보낸다."""
+    from safetrace.agent import runner
+
+    def fake_lookup(urls, key, transport=None):
+        return {"status": "match", "matches": [{"url": urls[0], "threat_type": "SOCIAL_ENGINEERING"}]}
+
+    monkeypatch.setattr(runner, "lookup", fake_lookup)
+    cid, final, chain, _ = run(f"{BASE}/benign/", settings, testpages)
+    assert final["threat"]["threat"] == "benign"
+    assert (final["status"], final["reason"]) == ("REVIEW_REQUIRED", "reputation_match")
+    esc = next(r["data"] for r in chain if r["kind"] == "escalation")
+    assert esc["threat_types"] == ["SOCIAL_ENGINEERING"]
+    assert next(r["data"] for r in chain if r["kind"] == "candidates")["followup"] is True

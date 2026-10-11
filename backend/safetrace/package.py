@@ -92,7 +92,7 @@ def _exploration(records: list[dict]) -> tuple[dict, dict]:
                 s["events"].append({"seq": seq, "kind": kind, "data": d, "files": files})
             continue
         if kind in ("start", "browser", "navigation", "finish", "recording", "threat", "safebrowsing",
-                    "unreachable", "threat_error"):
+                    "unreachable", "threat_error", "candidates", "candidate_results"):
             top[kind] = {"seq": seq, **d, **({"files": files} if files else {})}
         else:  # 단계가 없는 기타 기록(새 창 등)도 빠뜨리지 않는다
             other.append({"seq": seq, "kind": kind, "data": d, "files": files})
@@ -121,9 +121,33 @@ def _verdict(v: Verdict) -> dict:
             "created_at": v.created_at.isoformat()}
 
 
+def _candidates(top: dict, records: list[dict]) -> dict | None:
+    """연관 후보: 찾은 목록, 하위 조사를 했는지, 후보마다 탐색 기록과 판단(체인의 sub 기록)."""
+    found = top.get("candidates")
+    if not found:
+        return None
+    subs: dict[int, list[dict]] = {}
+    for r in records:
+        n = r["data"].get("sub")
+        if isinstance(n, int):
+            subs.setdefault(n, []).append(r)
+    results = {r.get("sub"): r for r in (top.get("candidate_results") or {}).get("results", [])}
+    investigated = []
+    for n in sorted(subs):
+        exp, t = _exploration(subs[n])
+        errors = [x for x in exp["other_events"] if x["kind"] == "candidate_error"]
+        investigated.append({"sub": n, "url": (results.get(n) or {}).get("url") or (exp["start"] or {}).get("url"),
+                             "result": results.get(n), "threat": t.get("threat"), "exploration": exp,
+                             "error": errors[0]["data"] if errors else None})
+    return {"seq": found["seq"], "found": found.get("found", []), "followup": found.get("followup"),
+            "investigated": investigated}
+
+
 def build(case: Case, records: list[dict], verify: VerifyResult, verdicts: list[Verdict], audit: list[AuditLog],
           *, generated_by: str, key_id: str) -> dict:
-    exploration, top = _exploration(records)
+    # 연관 후보 하위 조사 기록(data.sub)은 원래 조사와 따로 묶는다
+    main = [r for r in records if not isinstance(r["data"].get("sub"), int)]
+    exploration, top = _exploration(main)
     threat = top.get("threat")
     # 체인은 에이전트 컨테이너가 쓴다. 이름 규칙에 맞지 않는 파일(경로 이동 등)은 담지 않는다(검증 결과에는 file_missing 으로 나옴)
     files = [{"name": n, "sha256": h, "seq": r["seq"], "kind": r["kind"]}
@@ -147,7 +171,9 @@ def build(case: Case, records: list[dict], verify: VerifyResult, verdicts: list[
             "hold": bool(threat and threat.get("hold")),
             "safebrowsing": top.get("safebrowsing"),
             "error": top.get("threat_error"),
+            "escalation": next((x["data"] for x in exploration["other_events"] if x["kind"] == "escalation"), None),
         },
+        "candidates": _candidates(top, records),
         "review": {
             "current": _verdict(hist[0]) if hist else None,
             "history": [_verdict(v) for v in hist],

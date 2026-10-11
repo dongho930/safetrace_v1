@@ -15,6 +15,7 @@
 - Windows에서 Git Bash PATH에 `gh`가 없으면 `"C:/Program Files/GitHub CLI/gh.exe"`를 쓴다.
 - **Codex 보안 검토**(`docs/codex-review.md`): 코드를 바꾼 PR 은 커밋 뒤 `tools/codex_review.sh` 로 검토한다. 지적마다 실패하는 시험으로 재현해 정탐/오탐을 가리고, 정탐만 고친다. 코드 PR 마다 1회 돌리고, 2회째는 정탐을 고친 경우에만 돌린다(최대 2회). 작업 트리를 다른 브랜치로 바꿔 쓰는 중이면 범위를 `tools/codex_review.sh origin/main <브랜치>` 처럼 명시한다(작업 트리가 main 일 때 돌려 빈 범위를 검토한 적이 있다). PR 설명에 `Codex 보안 검토` 절(발견 건수·판정·조치)을 넣는다. 기준은 `tools/codex-review/prompt.md` 이고, 원본 KISA 자료와 기준서 Word 본은 `kisa 가이드 자료/`(gitignore)에 있다.
 
+- **작성 단계의 KISA 기준**: 보안에 닿는 코드(외부 입력·URL·파일·인증·인가·증거·외부 호출·에이전트 행동)를 쓰기 전에 `tools/codex-review/prompt.md` 의 해당 기준(3.2 구현 보안약점, 3.5 불변식, 3.6 Python 점검)을 확인하고, 커밋 전에 스스로 대조한다. Codex 검토는 그다음 사후 확인이다. 원문은 `kisa 가이드 자료/`(git 밖)에 있다.
 - **기획서 업데이트 문서**(`docs/plan-updates.md`): PR 마다 해당하면 한 줄씩 보탠다. 1절 보안 구조 설계(구조로 막은 것, 기획서 2장 → 보안 평가 3순위·3라운드 가점), 2절 기획서와 달라진 점, 3절 측정한 숫자.
 - **약점 밀도**: CI backend 작업의 요약(Summary)에 `tools/weakness_density.py` 결과(bandit 전체 등급, 1,000줄당)가 나온다. 실패시키지는 않으니 PR 마다 서비스 코드 숫자가 늘었는지 본다.
 
@@ -71,7 +72,8 @@ KISA 남은 오답(모두 판단 불가·담당자 검토로 감):
 - 2주차 ① 서명 서비스 분리(`feat/signer-service`, 2026-10-11): `backend/safetrace/signer/`. 증거 서명 키는 `signer`(서명)·`api`(검증)만 갖고 에이전트에는 없다. 에이전트는 기록 내용만 보내고 seq·ts·prev 는 서명 서비스가 정한다. API 가 접수 때 체인을 열고 조사가 끝나면 닫으며, DB head 는 서명 서비스 값을 쓴다(어긋나면 감사 로그 `evidence.head_mismatch`). 새 비밀값 `ST_SIGNER_AGENT_TOKEN`·`ST_SIGNER_API_TOKEN`(두 PC 의 `.env` 에 넣어 둠, 다른 PC 는 직접 추가). 기록 1건 서명 6ms(로컬 0.1ms), smish 조사 시간 31.9초 → 31.9초. #37 병합 뒤 1주차 재점검 21/21(`docs/week1-checklist.md` 7절).
 - Codex 시범 검토(#37) 정탐 3건 수정(`fix/codex-pilot-findings`, 2026-10-11): 워커 head 를 상태 이벤트에서 받지 않고 상태 전이 검사(F1), 닫기 실패 시 검증 `head_unknown`·나중에 다시 닫아 복구(F2), signer 본문을 받으면서 1MiB 초과 시 413·동시 연결 32·메모리 256MB(F3). 실제 스택에서 세 공격 모두 전에는 통하고 후에는 막힘, smish 31.6초 → 31.6초. Codex 보안 기준에 Python 시큐어코딩 가이드(2023)를 넣은 것은 #40.
 - 2라운드 작업 흐름 정리(`chore/round2-workflow`, 2026-10-11): `docs/plan-updates.md` 시작, CI 약점 밀도 보고, 측정·Codex 검토 범위 조정.
-- 다음 세션: 2주차 ② 연관 후보 큐를 main 에서 새 브랜치로 시작한다. `docs/plan-updates.md` 2절의 '예정' 줄을 완료로 바꾼다.
+- 2주차 ② 연관 후보 하위 조사(`feat/candidate-subinvestigation`, 2026-10-12, 사용자 결정: 원 사건 안의 하위 조사): `agent/candidates.py` 가 경유 도메인·외부 링크를 고르고(기록 20), 원래 주소가 확신 있는 정상이 아니면 `runner` 가 후보 최대 3개를 새 브라우저에서 4단계·40초로 조사한다. 같은 체인에 `data.sub` 를 붙이고 파일은 `c<번호>_` 로 시작한다. Safe Browsing 은 후보도 조회하고 AI 정상 + 일치면 보류(`reputation_match`·`candidate_reputation_match`). 패키지 `candidates.investigated`, 콘솔 '연관 후보' 목록. 설정 `candidate_max`·`candidate_max_steps`·`candidate_max_seconds`.
+- 다음 세션: 3주차 PDF/JSON 보고서, 공격 시나리오 15종(시연 장면과 함께 설계).
 
 ## 남은 개선 후보 (품질 개선은 마침, 참고용)
 

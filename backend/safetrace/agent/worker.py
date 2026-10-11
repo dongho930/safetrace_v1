@@ -64,7 +64,8 @@ def main():
         pass
     consumer = socket.gethostname()
     live = RedisLivePublisher(s.redis_url)  # 콘솔 실시간 화면(시청 중일 때만 발행)
-    min_idle_ms = (s.max_seconds + 120) * 1000
+    # 최대 조사 시간(원래 조사 + 연관 후보 하위 조사, 후보마다 브라우저를 새로 띄우는 시간 포함)보다 길게
+    min_idle_ms = (s.max_seconds + s.candidate_max * (s.candidate_max_seconds + 20) + 120) * 1000
     last_recover = 0.0
     while True:
         if time.monotonic() - last_recover >= RECOVER_EVERY:

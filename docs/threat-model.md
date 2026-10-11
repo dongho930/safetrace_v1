@@ -43,6 +43,7 @@
 | **I** 정보 노출 | 검토 패키지(원본 화면·본문 발췌)가 밖으로 나감 | 내려받기는 조사관 이상 + 감사 로그, 외부 기관 자동 전송 없음, AI 판단은 '법적 판단 아님' 표시 | `test_package_permissions_and_state` |
 | **D** 서비스 거부 | 로그인 폭주로 Argon2id 메모리 고갈 | 비밀번호 길이 128자 제한, 해시 계산 동시 4개 제한(`accounts._hash_slots`) | — |
 | **D** 서비스 거부 | 무한 루프, 거대 DOM, 대화상자 폭탄 | 단계·시간·동일 상태 예산, 후보 50개 제한, 대화상자 자동 닫기, 컨테이너 자원 한도 | A4·A5·A8 시험 |
+| **D** 서비스 거부 / **E** | 조사 대상 페이지가 연관 후보(외부 링크·경유 도메인)를 대량으로 내놓아 조사를 늘리거나 내부 주소로 유도, 침해된 워커가 거짓 후보 목록 보고 | 후보는 http·https·허용 포트만, 기록 20·하위 조사 3개, 후보당 4단계·40초, 공식 도메인 제외, 원래 주소가 확신 있는 정상이면 하위 조사 안 함. 하위 조사도 같은 안전 게이트·검문 프록시를 거침. API 는 후보 목록을 정해진 항목·길이로만 저장하고 화면은 글자로만 표시(`agent/candidates.py`, `api/main.py` `_clean_candidates`). 워커 회수 기준 시간을 하위 조사까지 포함해 늘림 | `test_candidates.py`, `test_related_candidate_subinvestigation` |
 | **E** 권한 상승 | 프롬프트 인젝션으로 입력·결제·내부망 이동 | 닫힌 선택지(텍스트 입력 기능 없음), 금지 요소 제외, 안전 게이트, 판정은 담당자만 | A1 시험 |
 | **E** 권한 상승 | 낮은 역할로 접수·계정 관리, 자동화 토큰으로 계정 조작 | 서버 측 역할 검사(`need`), 계정 관리는 사람 관리자만(`human=True`), 역할 변경·비활성화 즉시 세션 폐기, 자기 관리자 권한 해제 금지 | `test_rbac`, `test_inactive_and_role_change_revoke_sessions` |
 | **E** 권한 상승 | SSRF / DNS Rebinding | 이동 전 IP 확인 + 모든 요청 가로채기(1차), 접속 시점 재해석한 IP 로 연결하는 egress(2차), sandbox 는 internal 네트워크 | `test_netguard.py`, `test_egress_proxy.py` |

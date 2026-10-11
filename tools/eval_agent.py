@@ -191,6 +191,9 @@ def run_inside(args) -> None:
                     fin = next((k["data"] for k in kinds if k["kind"] == "finish"), {})
                     rec["steps"] = sum(1 for k in kinds if k["kind"] == "action")
                     rec["blocked_destinations"] = [b["host"] for b in fin.get("blocked_destinations", [])]
+                    cands = final.get("candidates") or []
+                    rec["candidates"] = len(cands)
+                    rec["candidates_investigated"] = sum(1 for c in cands if isinstance(c, dict) and c.get("sub"))
                 except Exception as e:  # 한 건 실패로 전체를 멈추지 않는다
                     rec["error"] = f"{type(e).__name__}: {str(e)[:200]}"
                 rec["seconds"] = round(time.monotonic() - t, 1)

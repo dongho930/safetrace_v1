@@ -46,6 +46,10 @@ class Settings(BaseSettings):
 
     # 에이전트 예산
     max_steps: int = 15
+    # 연관 후보 하위 조사(원래 주소가 확신 있는 정상이 아닐 때만): 사건당 개수와 후보 하나의 단계·시간 한도
+    candidate_max: int = Field(3, ge=0, le=5)
+    candidate_max_steps: int = Field(4, ge=1, le=15)
+    candidate_max_seconds: int = Field(40, ge=10, le=120)
     max_seconds: int = 120
     max_same_state: int = 2
     max_candidates: int = 50
