@@ -21,6 +21,10 @@ jobs:
         run: pytest -q
       - name: bandit
         run: bandit -r safetrace -ll
+      - name: 약점 밀도 (전체 등급, 보고만 하고 실패시키지 않음)
+        if: always()
+        continue-on-error: true
+        run: python ../tools/weakness_density.py >> "$GITHUB_STEP_SUMMARY"
       - name: pip-audit
         run: pip-audit --skip-editable
 
