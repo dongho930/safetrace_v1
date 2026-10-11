@@ -140,7 +140,7 @@ def _clean_candidates(v) -> list[dict]:
         if not isinstance(c, dict) or not isinstance(c.get("url"), str):
             continue
         d = {k: c[k][:n] for k, n in _CAND_STR.items() if isinstance(c.get(k), str)}
-        for k in ("reputation_match", "hold"):
+        for k in ("reputation_match", "reputation_unchecked", "hold"):
             if isinstance(c.get(k), bool):
                 d[k] = c[k]
         if isinstance(c.get("sub"), int) and 0 < c["sub"] <= 10:

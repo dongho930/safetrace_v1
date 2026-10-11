@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from urllib.parse import unquote
 
 import httpx
 
@@ -13,6 +14,7 @@ from ..decision.client import Decider, HttpDecider, LocalDecider
 from ..decision.engine import Engine, build_providers
 from ..evidence import EvidenceWriter, LocalSealer, Sealer, Signer
 from ..live import LivePublisher, LiveSink
+from ..masking import mask_pii
 from ..netguard import remote_resolver
 from ..safebrowsing import lookup
 from ..signer.client import RemoteSealer
@@ -77,19 +79,44 @@ def _investigate_candidates(cands: list[dict], s: Settings, decider: Decider, wr
     return out
 
 
-def _check_candidate_reputation(results: list[dict], s: Settings, transport, writer: EvidenceWriter,
-                                emit: Callable[[dict], None]) -> None:
-    """하위 조사에서 넘어간 경유·최종 주소도 평판을 조회한다(처음 조회는 후보 주소만 봤다). 평판 DB 가 위험으로
-    표시했는데 AI 가 정상으로 봤으면 그 후보를 보류로 표시한다(원래 조사의 규칙과 같다)."""
-    urls = list(dict.fromkeys(u for r in results for u in r["_urls"]))[:10]
+_SB_LIMIT = 10  # 하위 조사 뒤 평판 조회 주소 수
+
+
+def _has_pii(url: str) -> bool:
+    """주소(경로 포함)에 개인정보 형태 문자열이 있는지. 있으면 외부 평판 조회로 보내지 않는다."""
+    return mask_pii(url) != unquote(url)
+
+
+def _reputation_order(results: list[dict]) -> list[str]:
+    """조회 순서: 후보마다 최종 주소 → 시작 주소 → 경유 주소(후보끼리 번갈아). 앞 후보의 긴 이동 경로가
+    뒤 후보의 목적지를 한도 밖으로 밀어내지 않게 한다. 개인정보가 든 주소는 뺀다."""
+    order = [r.get("final_url") for r in results] + [r["url"] for r in results]
+    navs = [r["_urls"] for r in results]
+    for i in range(max((len(n) for n in navs), default=0)):
+        order += [n[i] for n in navs if i < len(n)]
+    return [u for u in dict.fromkeys(u for u in order if u) if not _has_pii(u)]
+
+
+def _check_candidate_reputation(results: list[dict], first_hits: set[str], first_checked: set[str], s: Settings,
+                                transport, writer: EvidenceWriter, emit: Callable[[dict], None]) -> None:
+    """하위 조사에서 넘어간 경유·최종 주소도 평판을 조회한다(첫 조회는 후보 주소만 봤다).
+    - 위험 일치는 첫 조회와 이번 조회를 합쳐 본다(이번 조회가 실패해도 앞서 확인한 위험은 지우지 않는다)
+    - 일치하는데 AI 가 정상으로 봤으면 그 후보를 보류로 표시한다(원래 조사의 규칙과 같다)
+    - 조회하지 못한 주소(실패·한도·개인정보)가 있으면 reputation_unchecked 로 표시한다(정상의 근거로 쓰지 않게)"""
+    urls = _reputation_order(results)[:_SB_LIMIT]
     sb = lookup(urls, s.safebrowsing_api_key.get_secret_value(), transport=transport) if urls else {"status": "no_match", "matches": []}
+    ok = sb.get("status") in ("match", "no_match")
     hits = {m.get("url") for m in sb.get("matches", [])} if sb.get("status") == "match" else set()
+    checked = first_checked | (set(urls) if ok else set())
     _append(writer, emit, "candidate_safebrowsing", {**sb, "urls": urls})
     for r in results:
-        if hits & set(r.pop("_urls")):
+        mine = set(r.pop("_urls"))
+        if (hits | first_hits) & mine:
             r["reputation_match"] = True
-            if r.get("threat") == "benign":
-                r["hold"] = True
+        if mine - checked:
+            r["reputation_unchecked"] = True
+        if r.get("reputation_match") and r.get("threat") == "benign":
+            r["hold"] = True
 
 
 def investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], None],
@@ -115,11 +142,13 @@ def _investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], Non
     # Safe Browsing: 시작·경유·최종 URL 과 연관 후보 조회. 결과도 증거로 남긴다.
     # 격리망에서는 이 조회도 검문 프록시를 거친다
     transport = httpx.HTTPTransport(proxy=s.egress_proxy) if s.egress_proxy else None
-    sb = lookup([url, *result.nav_chain[-10:], *[c["url"] for c in cands[:10]]],
-                s.safebrowsing_api_key.get_secret_value(), transport=transport)
-    _append(writer, emit, "safebrowsing", sb)
+    # 후보 주소 가운데 개인정보가 든 것은 외부로 보내지 않는다(페이지가 링크에 넣은 값이다)
+    cand_urls = [c["url"] for c in cands[:10] if not _has_pii(c["url"])]
+    sb = lookup([url, *result.nav_chain[-10:], *cand_urls], s.safebrowsing_api_key.get_secret_value(), transport=transport)
+    _append(writer, emit, "safebrowsing", {**sb, "excluded_pii": sum(1 for c in cands[:10] if _has_pii(c["url"]))})
     matched = sb.get("status") == "match"
     hits = {m.get("url") for m in sb.get("matches", [])} if matched else set()
+    first_checked = set(cand_urls) if sb.get("status") in ("match", "no_match") else set()
     cand_hits = sorted(hits & {c["url"] for c in cands})
 
     # 페이지는 못 열었지만 평판 DB 가 위험 URL 로 표시한 경우: 사건을 묻지 않고 담당자 검토로 올린다.
@@ -152,11 +181,15 @@ def _investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], Non
         "investigated": len(chosen)})
     results = _investigate_candidates(chosen, s, decider, writer, emit, resolver, sink) if chosen else []
     if results:
-        _check_candidate_reputation(results, s, transport, writer, emit)
+        _check_candidate_reputation(results, hits, first_checked, s, transport, writer, emit)
         _append(writer, emit, "candidate_results", {"results": results})
     by_url = {r["url"]: r for r in results}
-    summary = [{**c, "reputation_match": c["url"] in hits or bool(by_url.get(c["url"], {}).get("reputation_match")),
-                **{k: v for k, v in by_url.get(c["url"], {}).items() if k != "reputation_match"}} for c in cands]
+    summary = []
+    for c in cands:
+        r = by_url.get(c["url"], {})
+        summary.append({**c, "reputation_match": c["url"] in hits or bool(r.get("reputation_match")),
+                        "reputation_unchecked": c["url"] not in first_checked or bool(r.get("reputation_unchecked")),
+                        **{k: v for k, v in r.items() if k not in ("reputation_match", "reputation_unchecked")}})
 
     final = {
         "type": "status", "status": status, "reason": reason, "threat": result.threat,

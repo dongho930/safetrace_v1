@@ -1239,6 +1239,7 @@ function Evidence({ c, id, running, canExport }: { c: CaseOut | null; id: string
               <span className="mono cand-host">{x.host ?? x.url}</span>
               <span className="faint small">{x.source === "via" ? "경유" : x.source === "link" ? "링크" : ""}</span>
               {x.reputation_match && <span className="bad small">평판 위험</span>}
+              {!x.reputation_match && x.reputation_unchecked && <span className="faint small">평판 미확인</span>}
               <span className={`small ${x.threat && x.threat !== "benign" ? "warn" : "faint"}`}>
                 {x.sub
                   ? x.threat

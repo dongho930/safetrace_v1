@@ -19,6 +19,7 @@ export type Candidate = {
   host?: string;
   source?: "via" | "link";
   reputation_match?: boolean;
+  reputation_unchecked?: boolean; // 평판 조회를 못 한 주소가 있음(실패·한도·개인정보 포함 주소)
   sub?: number;
   status?: string;
   reason?: string;

@@ -121,3 +121,81 @@ def test_candidate_redirect_destination_reputation_checked(settings, monkeypatch
     assert any("https://bad.example/x" in urls for urls in seen), seen
     c = final["candidates"][0]
     assert c["sub"] == 1 and c["threat"] == "benign" and c["reputation_match"] is True and c["hold"] is True, c
+
+
+# ── Codex 2회차 지적 재현 ─────────────────────────────
+def _phish_main(cands):
+    return dict(status="COMPLETED", finish_reason="agent_finished", final_url="https://start.example/",
+                threat={"threat": "phishing", "probability": 0.9, "hold": False}, candidates_found=cands)
+
+
+def _benign_sub(final, nav=()):
+    return dict(status="COMPLETED", finish_reason="agent_finished", final_url=final, nav_chain=list(nav),
+                threat={"threat": "benign", "probability": 0.99, "hold": False})
+
+
+def _run(settings, monkeypatch, runs, lookup_fn):
+    import uuid
+
+    from safetrace.agent import runner
+
+    _fake_runs(monkeypatch, runs)
+    monkeypatch.setattr(runner, "lookup", lookup_fn)
+    cid = str(uuid.uuid4())
+    final = runner.investigate(cid, "https://start.example/", settings, lambda e: None, decider=object())
+    import json
+    chain = [json.loads(x) for x in (settings.evidence_dir / cid / "chain.jsonl").read_text(encoding="utf-8").splitlines()]
+    return final, chain
+
+
+def test_candidate_path_pii_not_sent_to_reputation(settings, monkeypatch):
+    """2회차 F1: 경로에 개인정보가 든 후보 주소는 평판 조회로 보내지 않고, 조회하지 못했다고 표시한다."""
+    pii = "https://candidate.example/u/alice%40example.com/010-1234-5678"
+    cands = select("https://start.example/", "https://start.example/", [], [pii], PORTS)
+    sent: list[str] = []
+
+    def lookup(urls, key, transport=None):
+        sent.extend(urls)
+        return {"status": "no_match", "matches": []}
+
+    final, _ = _run(settings, monkeypatch, {"https://start.example/": _phish_main(cands),
+                                            cands[0]["url"]: _benign_sub(cands[0]["url"])}, lookup)
+    assert not any("alice" in u or "1234" in u for u in sent), sent
+    assert final["candidates"][0]["reputation_unchecked"] is True
+
+
+def test_first_match_survives_failed_followup_lookup(settings, monkeypatch):
+    """2회차 F2: 첫 조회에서 위험이 일치한 후보는 두 번째 조회가 실패해도 보류로 남는다."""
+    cand = {"url": "https://hop.example/", "host": "hop.example", "source": "link"}
+    calls = {"n": 0}
+
+    def lookup(urls, key, transport=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"status": "match", "matches": [{"url": "https://hop.example/", "threat_type": "MALWARE"}]}
+        return {"status": "error", "matches": []}
+
+    final, chain = _run(settings, monkeypatch, {"https://start.example/": _phish_main([cand]),
+                                                "https://hop.example/": _benign_sub("https://hop.example/")}, lookup)
+    c = final["candidates"][0]
+    assert (c["reputation_match"], c["hold"]) == (True, True), c
+    res = next(r["data"] for r in chain if r["kind"] == "candidate_results")["results"][0]
+    assert res["hold"] is True
+
+
+def test_every_candidate_destination_checked(settings, monkeypatch):
+    """2회차 F3: 앞 후보의 긴 이동 경로가 뒤 후보의 최종 목적지를 조회 한도 밖으로 밀어내지 않는다."""
+    cands = [{"url": f"https://c{i}.example/", "host": f"c{i}.example", "source": "link"} for i in (1, 2, 3)]
+    runs = {"https://start.example/": _phish_main(cands)}
+    for i in (1, 2):
+        nav = [f"https://c{i}.example/"] + [f"https://c{i}-hop{j}.example/" for j in range(5)]
+        runs[f"https://c{i}.example/"] = _benign_sub(nav[-1], nav)
+    runs["https://c3.example/"] = _benign_sub("https://bad.example/x", ["https://c3.example/", "https://bad.example/x"])
+
+    def lookup(urls, key, transport=None):
+        bad = [u for u in urls if "bad.example" in u]
+        return {"status": "match" if bad else "no_match", "matches": [{"url": u, "threat_type": "MALWARE"} for u in bad]}
+
+    final, _ = _run(settings, monkeypatch, runs, lookup)
+    c3 = next(c for c in final["candidates"] if c["host"] == "c3.example")
+    assert (c3["reputation_match"], c3["hold"]) == (True, True), c3
