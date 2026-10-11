@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type AgentEvent,
   ApiError,
+  type Candidate,
   type CaseOut,
   type Decision,
   type EvidenceEvent,
@@ -71,6 +72,8 @@ function overrideLabel(o: Threat["override"]): string {
   return `공식 사행사업자 도메인${o.operators?.length ? ` · ${o.operators.join(", ")}` : ""}`;
 }
 const REASON_LABEL: Record<string, string> = {
+  reputation_match: "Safe Browsing 위험 일치(AI 는 정상으로 봄)",
+  candidate_reputation_match: "연관 후보가 Safe Browsing 위험 일치(AI 는 정상으로 봄)",
   unreachable_reputation_match: "접속 불가 · Safe Browsing 위험 일치",
   unreachable_network_filtered: "접속 불가 · 회선이 도메인 이름을 보고 차단(이미 차단 목록에 오른 사이트)",
   goto_failed: "최초 접속 실패",
@@ -842,7 +845,14 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
   const quiet: EvidenceEvent[] = [];
   for (const e of events) {
     const d = e.data as Record<string, unknown>;
-    if (e.kind === "observe") {
+    const sub = typeof d.sub === "number" ? d.sub : 0; // 연관 후보 하위 조사 번호
+    const before = lines.length;
+    if (e.kind === "start" && sub) {
+      lines.push({ seq: e.seq, icon: "globe", tone: "orange", text: <>하위 조사 시작 · <span className="mono">{String(d.url)}</span></> });
+    } else if (e.kind === "candidates") {
+      const found = (d.found as unknown[]) ?? [];
+      lines.push({ seq: e.seq, icon: "stack", tone: found.length ? "orange" : "", text: <>연관 후보 {found.length}곳 · {d.followup ? `하위 조사 ${String(d.investigated)}곳` : "정상으로 판단해 기록만"}</> });
+    } else if (e.kind === "observe") {
       candidates = new Map(((d.candidates as { id: string; text: string }[]) ?? []).map((c) => [c.id, c.text]));
       const nf = ((d.forbidden as string[]) ?? []).length;
       const skipped = Number(d.ocr_skipped ?? 0); // 시간이 없어 읽지 않은 이미지 버튼(선택지에서 뺌)
@@ -885,8 +895,12 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
       lines.push({ seq: e.seq, icon: "shieldCheck", tone: d.status === "match" ? "red" : "", text: <>Safe Browsing · {String(d.status)}</> });
     } else if (e.kind === "finish") {
       lines.push({ seq: e.seq, icon: "check", tone: "teal", text: <>탐색 종료 · {REASON_LABEL[String(d.reason)] ?? String(d.reason)}</> });
-    } else if (e.kind === "action_error" || e.kind === "decision_error" || e.kind === "threat_error") {
+    } else if (e.kind === "action_error" || e.kind === "decision_error" || e.kind === "threat_error" || e.kind === "candidate_error") {
       lines.push({ seq: e.seq, icon: "alert", tone: "orange", text: <span className="warn">{e.kind} · {String(d.error ?? "")}</span> });
+    }
+    if (sub && lines.length > before) {
+      const l = lines[lines.length - 1];
+      l.text = <><span className="warn">후보 {sub} · </span>{l.text}</>;
     }
   }
   lines.reverse();
@@ -1194,6 +1208,7 @@ function Evidence({ c, id, running, canExport }: { c: CaseOut | null; id: string
   const [pkgBusy, setPkgBusy] = useState(false);
   const [pkgMsg, setPkgMsg] = useState("");
   const sb = c?.safebrowsing;
+  const cands: Candidate[] = (c?.candidates ?? []).map((x) => (typeof x === "string" ? { url: x, host: x } : x));
   const sbText =
     sb?.status === "match"
       ? sb.matches.map((m) => m.threat_type).join(", ")
@@ -1211,10 +1226,31 @@ function Evidence({ c, id, running, canExport }: { c: CaseOut | null; id: string
           <span className={`mono ${sb?.status === "match" ? "bad" : ""}`}>{sbText}</span>
         </div>
         <div className="sunken tile">
-          <span className="muted">경유 도메인</span>
-          <span className={`mono ${c?.candidates?.length ? "warn" : ""}`}>{c?.candidates?.length ? c.candidates.join(", ") : "없음"}</span>
+          <span className="muted">연관 후보</span>
+          <span className={`mono ${cands.length ? "warn" : ""}`}>
+            {cands.length ? `${cands.length}곳 · 하위 조사 ${cands.filter((x) => x.sub).length}곳` : "없음"}
+          </span>
         </div>
       </div>
+      {cands.length > 0 && (
+        <ul className="cand-list">
+          {cands.map((x) => (
+            <li key={x.url} className="sunken">
+              <span className="mono cand-host">{x.host ?? x.url}</span>
+              <span className="faint small">{x.source === "via" ? "경유" : x.source === "link" ? "링크" : ""}</span>
+              {x.reputation_match && <span className="bad small">평판 위험</span>}
+              {!x.reputation_match && x.reputation_unchecked && <span className="faint small">평판 미확인</span>}
+              <span className={`small ${x.threat && x.threat !== "benign" ? "warn" : "faint"}`}>
+                {x.sub
+                  ? x.threat
+                    ? `${THREAT_LABEL[x.threat] ?? x.threat}${x.hold ? "(보류)" : ""} ${x.probability != null ? pct(x.probability) : ""}`
+                    : (REASON_LABEL[x.reason ?? ""] ?? x.status ?? "")
+                  : "기록만"}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
       {sb?.status === "no_match" && <p className="faint small" style={{ margin: 0 }}>일치 없음은 정상이라는 뜻이 아닙니다.</p>}
       <div className={`integrity ${verify ? (verify.ok ? "good" : "fail") : ""}`}>
         <Icon name="lock" />

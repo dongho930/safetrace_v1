@@ -33,6 +33,7 @@ from ..evidence import EvidenceWriter
 from ..masking import mask_pii
 from ..proxy.egress import EGRESS_HEADER
 from . import netfilter
+from .candidates import select as select_candidates
 from .gate import Budget, ElementInfo, SafetyGate, classify_forbidden
 from .observe import CLOSE_POPUP_JS, COLLECT_JS, READ_ONE_JS, RECTS_JS
 from .recorder import ScreencastRecorder, find_ffmpeg
@@ -130,7 +131,8 @@ class RunResult:
     threat: dict | None = None
     steps: int = 0
     nav_chain: list[str] = field(default_factory=list)
-    candidates_found: list[str] = field(default_factory=list)
+    candidates_found: list[dict] = field(default_factory=list)  # 연관 후보 {url, host, source}(candidates.select)
+    links_found: list[str] = field(default_factory=list)  # 관찰한 화면의 링크 주소(외부 링크 후보의 원천)
     blocked_requests: int = 0
     forbidden_seen: list[str] = field(default_factory=list)
     blocked_destinations: list[dict] = field(default_factory=list)  # 열리지 않은 이동 목적지 {host, reason}
@@ -148,8 +150,14 @@ class _Observation:
 
 class AgentRun:
     def __init__(self, url: str, settings: Settings, decider: Decider, writer: EvidenceWriter, emit: Emit,
-                 resolver=None, live=None):
+                 resolver=None, live=None, sub: int = 0):
+        """sub: 연관 후보 하위 조사 번호(1부터). 0 이면 원래 조사. 하위 조사는 같은 증거 체인에 쓰고,
+        기록·이벤트에 sub 를 붙이고 파일 이름 앞에 c<번호>_ 를 붙여 원래 조사와 섞이지 않게 한다."""
         self.start_url = url
+        self.sub = sub
+        self._tag = f"c{sub}_" if sub else ""
+        if sub:
+            emit = (lambda e, _emit=emit: _emit({**e, "sub": sub}))
         self.s = settings
         self.decider = decider
         self.ev = writer
@@ -172,6 +180,8 @@ class AgentRun:
 
     # ── 기록 ──────────────────────────────────────────
     def _record(self, kind: str, data: dict, files: list[str] | None = None) -> int:
+        if self.sub:
+            data = {**data, "sub": self.sub}
         rec = self.ev.append(kind, data, files)
         self.emit({"type": "evidence", "seq": rec["seq"], "kind": kind, "data": data,
                    "files": list(rec["files"].keys()), "hash": rec["hash"]})
@@ -180,7 +190,7 @@ class AgentRun:
     async def _screenshot(self, page: Page, label: str, full: bool = False) -> str | None:
         """full=True 면 페이지 전체(세로 screenshot_max_height 까지), 아니면 보이는 창만."""
         self._shot += 1
-        name = f"s{self._shot:03d}_{label}.png"
+        name = f"{self._tag}s{self._shot:03d}_{label}.png"
         try:
             if full:
                 if self.rec:
@@ -496,6 +506,9 @@ class AgentRun:
                 break
             await asyncio.sleep(0.25)
         moved = page.url != url or len(self.result.blocked_destinations) > blocked0
+        if not moved and self._nav_checks:  # 기다리는 시간이 끝날 때 이동 검사가 진행 중이면 그 결과까지 본다
+            await self._settle_nav_checks(page, step)
+            moved = page.url != url or len(self.result.blocked_destinations) > blocked0
         if moved:
             await self._settle(page)
         self._record("wait_redirect", {"step": step, "url": url[:2048], "moved": moved,
@@ -591,7 +604,7 @@ class AgentRun:
         if not g.allowed:
             return self._finish("BLOCKED", g.reason)
 
-        video_tmp = self.ev.dir / "video_tmp"
+        video_tmp = self.ev.dir / f"{self._tag}video_tmp"
         async with async_playwright() as p:
             launch = {"headless": True, "args": _CHROMIUM_ARGS}
             if self.s.browser_channel:
@@ -624,7 +637,7 @@ class AgentRun:
             page.on("dialog", self._on_dialog)
             rec_info = None
             if ffmpeg:
-                self.rec = ScreencastRecorder(ffmpeg, self.ev.dir / "recording.tmp.webm",
+                self.rec = ScreencastRecorder(ffmpeg, self.ev.dir / f"{self._tag}recording.tmp.webm",
                                               live=self.live)
                 try:
                     await self.rec.start(page)
@@ -643,7 +656,7 @@ class AgentRun:
                 await ctx.close()
                 await browser.close()
         if self.rec:
-            self._save_recording(self.ev.dir / "recording.tmp.webm", rec_info)
+            self._save_recording(self.ev.dir / f"{self._tag}recording.tmp.webm", rec_info)
         else:
             self._save_video(video_tmp)
         await asyncio.to_thread(self._judge)
@@ -750,6 +763,7 @@ class AgentRun:
             observed_from = (page.url, len(self.result.blocked_destinations))
             obs = await self._observe(page, step)
             last_real = (page, page.url)
+            self._note_links(obs)
             self.result.forbidden_seen.extend(x for x in obs.forbidden if x not in self.result.forbidden_seen)
             self.page_summaries.append(f"[{step}] {obs.state.title} | {obs.state.url} | {obs.state.text[:600]}")
             self.summary_evidence.append(obs.evidence_seq)
@@ -883,19 +897,23 @@ class AgentRun:
                      [final] if final else [])
         self._collect_candidates()
 
+    def _note_links(self, obs: _Observation):
+        """관찰한 화면의 링크 주소를 모은다(외부 링크 후보). 값은 페이지에서 온 것이라 candidates.select 가 다시 검사한다."""
+        seen = self.result.links_found
+        for info in obs.infos.values():
+            href = info.href
+            if href and href.startswith(("http://", "https://")) and href not in seen and len(seen) < 100:
+                seen.append(href[:2048])
+
     def _collect_candidates(self):
-        """보조 기능: 경유 도메인 기록(추가 조사는 담당자 요청 시에만)."""
-        start_host = urlsplit(self.start_url).hostname
-        hosts = []
-        for u in self.result.nav_chain:
-            h = urlsplit(u).hostname
-            if h and h != start_host and h not in hosts:
-                hosts.append(h)
-        self.result.candidates_found = hosts[:20]
+        """보조 기능: 연관 후보(경유 도메인·외부 링크). 하위 조사는 runner 가 정한다."""
+        self.result.candidates_found = select_candidates(
+            self.start_url, self.result.final_url, self.result.nav_chain, self.result.links_found,
+            self.s.allowed_ports, self.s.test_allowlist)
 
     def _save_recording(self, tmp: Path, info: dict | None):
         if info and tmp.exists():
-            name = "recording.webm"
+            name = f"{self._tag}recording.webm"
             shutil.move(str(tmp), self.ev.file_path(name))
             self._record("recording", info, [name])
         else:
@@ -906,7 +924,7 @@ class AgentRun:
             return
         vids = sorted(tmp.glob("*.webm"), key=lambda p: p.stat().st_mtime)
         if vids:
-            name = "recording.webm"
+            name = f"{self._tag}recording.webm"
             shutil.move(str(vids[-1]), self.ev.file_path(name))
             self._record("recording", {"format": "webm"}, [name])
         shutil.rmtree(tmp, ignore_errors=True)

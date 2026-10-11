@@ -215,6 +215,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .tiles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; font-size: 12px; }
 .tile { padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .tile .mono { overflow-wrap: anywhere; }
+.cand-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.cand-list li { display: flex; align-items: baseline; gap: 8px; padding: 6px 10px; border-radius: var(--radius-sm); min-width: 0; }
+.cand-host { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .integrity { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--line-soft); background: var(--sunken); }
 .integrity.good { background: rgba(45, 212, 191, 0.06); border-color: rgba(45, 212, 191, 0.25); color: var(--teal-ink); }
 .integrity.fail { background: rgba(255, 91, 110, 0.06); border-color: rgba(255, 91, 110, 0.35); color: var(--red-ink); }

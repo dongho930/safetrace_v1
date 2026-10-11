@@ -13,6 +13,22 @@ export type Threat = {
   override?: { reason: string; operators?: string[]; brand?: string; destination?: string; original: { threat: string; probability: number; provider: string } };
 };
 
+// 연관 후보(경유 도메인·외부 링크). sub 가 있으면 1단계 하위 조사를 한 후보다. 모든 값은 조사 대상 페이지에서 온 글자다
+export type Candidate = {
+  url: string;
+  host?: string;
+  source?: "via" | "link";
+  reputation_match?: boolean;
+  reputation_unchecked?: boolean; // 평판 조회를 못 한 주소가 있음(실패·한도·개인정보 포함 주소)
+  sub?: number;
+  status?: string;
+  reason?: string;
+  final_url?: string;
+  threat?: string | null;
+  probability?: number | null;
+  hold?: boolean | null;
+};
+
 export type CaseOut = {
   id: string;
   url: string;
@@ -22,7 +38,7 @@ export type CaseOut = {
   final_url: string | null;
   threat: Threat | null;
   safebrowsing: { status: string; matches: { url: string; threat_type: string }[] } | null;
-  candidates: string[] | null;
+  candidates: (Candidate | string)[] | null; // 예전 사건은 도메인 이름 목록
   head_seq: number | null;
   created_at: string;
   verdict: Verdict | null; // 담당자의 현재 판정(없으면 null)
