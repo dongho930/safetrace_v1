@@ -1,6 +1,7 @@
 """외부(Jev)로 보내는 텍스트와 로그에서 개인정보 형태 문자열을 가린다."""
 
 import re
+from urllib.parse import unquote
 
 
 def _account(m: re.Match) -> str:
@@ -24,6 +25,8 @@ _SECRET_KEYS = re.compile(r"(?i)(authorization|api[_-]?key|token|secret|password
 
 
 def mask_pii(text: str) -> str:
+    if "%" in text:  # 주소 속 URL 인코딩(alice%40example.com)도 풀어서 가린다
+        text = unquote(text)
     for pat, repl in _PATTERNS:
         text = pat.sub(repl, text)
     return text

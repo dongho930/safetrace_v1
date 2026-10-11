@@ -67,12 +67,29 @@ def _investigate_candidates(cands: list[dict], s: Settings, decider: Decider, wr
         except Exception as e:  # 브라우저를 띄우지 못한 경우 등. 원래 조사 결과는 그대로 둔다
             log.exception("candidate investigation failed")
             _append(writer, emit, "candidate_error", {"sub": i, "url": c["url"], "error": type(e).__name__})
-            out.append({**res, "status": "FAILED", "reason": f"error:{type(e).__name__}"})
+            out.append({**res, "status": "FAILED", "reason": f"error:{type(e).__name__}", "_urls": [c["url"]]})
             continue
         th = r.threat or {}
+        urls = list(dict.fromkeys(u for u in [c["url"], *r.nav_chain[-5:], r.final_url] if u))
         out.append({**res, "status": r.status, "reason": r.finish_reason, "final_url": r.final_url[:2048],
-                    "threat": th.get("threat"), "probability": th.get("probability"), "hold": th.get("hold")})
+                    "threat": th.get("threat"), "probability": th.get("probability"), "hold": th.get("hold"),
+                    "_urls": urls})
     return out
+
+
+def _check_candidate_reputation(results: list[dict], s: Settings, transport, writer: EvidenceWriter,
+                                emit: Callable[[dict], None]) -> None:
+    """하위 조사에서 넘어간 경유·최종 주소도 평판을 조회한다(처음 조회는 후보 주소만 봤다). 평판 DB 가 위험으로
+    표시했는데 AI 가 정상으로 봤으면 그 후보를 보류로 표시한다(원래 조사의 규칙과 같다)."""
+    urls = list(dict.fromkeys(u for r in results for u in r["_urls"]))[:10]
+    sb = lookup(urls, s.safebrowsing_api_key.get_secret_value(), transport=transport) if urls else {"status": "no_match", "matches": []}
+    hits = {m.get("url") for m in sb.get("matches", [])} if sb.get("status") == "match" else set()
+    _append(writer, emit, "candidate_safebrowsing", {**sb, "urls": urls})
+    for r in results:
+        if hits & set(r.pop("_urls")):
+            r["reputation_match"] = True
+            if r.get("threat") == "benign":
+                r["hold"] = True
 
 
 def investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], None],
@@ -135,9 +152,11 @@ def _investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], Non
         "investigated": len(chosen)})
     results = _investigate_candidates(chosen, s, decider, writer, emit, resolver, sink) if chosen else []
     if results:
+        _check_candidate_reputation(results, s, transport, writer, emit)
         _append(writer, emit, "candidate_results", {"results": results})
     by_url = {r["url"]: r for r in results}
-    summary = [{**c, "reputation_match": c["url"] in hits, **by_url.get(c["url"], {})} for c in cands]
+    summary = [{**c, "reputation_match": c["url"] in hits or bool(by_url.get(c["url"], {}).get("reputation_match")),
+                **{k: v for k, v in by_url.get(c["url"], {}).items() if k != "reputation_match"}} for c in cands]
 
     final = {
         "type": "status", "status": status, "reason": reason, "threat": result.threat,

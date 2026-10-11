@@ -506,6 +506,9 @@ class AgentRun:
                 break
             await asyncio.sleep(0.25)
         moved = page.url != url or len(self.result.blocked_destinations) > blocked0
+        if not moved and self._nav_checks:  # 기다리는 시간이 끝날 때 이동 검사가 진행 중이면 그 결과까지 본다
+            await self._settle_nav_checks(page, step)
+            moved = page.url != url or len(self.result.blocked_destinations) > blocked0
         if moved:
             await self._settle(page)
         self._record("wait_redirect", {"step": step, "url": url[:2048], "moved": moved,

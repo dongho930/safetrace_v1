@@ -1,7 +1,7 @@
 """연관 후보: 조사 중에 거친 경유 도메인과 페이지의 외부 링크 가운데 더 조사할 곳을 고른다(기획서 2.2 보조 기능).
 
 후보 주소는 조사 대상 페이지에서 온 값이다(공격자가 고를 수 있다). 그래서
-- http·https 와 허용 포트만, 길이를 제한해 받는다(목록은 최대 MAX_FOUND 개)
+- http·https 와 허용 포트만, 길이를 제한해 받는다(목록은 최대 MAX_FOUND 개). 쿼리·조각은 버린다
 - 사칭 대상이 되는 공식 도메인(브랜드·사행사업자)과 이미 조사한 사이트는 뺀다
 - 실제로 열 때는 원래 조사와 같은 안전 게이트·검문 프록시를 거친다(여기서는 고르기만 한다)
 """
@@ -47,7 +47,9 @@ def _clean(url: str, allowed_ports: list[int], test_allowlist: list[str]) -> tup
         return None
     if port not in allowed_ports and f"{host}:{port}" not in test_allowlist:
         return None
-    return url, host.lower()
+    # 쿼리·조각은 버린다: 페이지가 링크에 넣은 개인정보(이메일·전화번호·추적값)가 평판 조회·판단 모델로 나가지 않게
+    p = urlsplit(url.strip())
+    return f"{scheme}://{p.netloc}{p.path or '/'}", host.lower()
 
 
 def select(start_url: str, final_url: str, nav_chain: list[str], links: list[str],
