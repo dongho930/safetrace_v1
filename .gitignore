@@ -14,3 +14,6 @@ frontend/dist/
 *.docx
 *.pdf
 models/
+
+# KISA·행안부 원본 자료(무단 전재 금지)와 그 정리본: 저장소에 올리지 않는다
+kisa 가이드 자료/

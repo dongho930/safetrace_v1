@@ -11,6 +11,7 @@
 - 원격 브랜치 삭제처럼 자동 모드에서 막히는 명령은 사용자가 `! git ...`로 직접 실행하도록 안내한다.
 - 개발 PC는 배포 대상이 아니다. 성능은 PC 사양 말고 Docker 제한(에이전트 CPU 2 / 메모리 2GB) 안에서 잰다.
 - Windows에서 Git Bash PATH에 `gh`가 없으면 `"C:/Program Files/GitHub CLI/gh.exe"`를 쓴다.
+- **Codex 보안 검토**(`docs/codex-review.md`): 코드를 바꾼 PR 은 커밋 뒤 `tools/codex_review.sh` 로 검토한다. 지적마다 실패하는 시험으로 재현해 정탐/오탐을 가리고, 정탐만 고친다. 검토는 최대 2회다. PR 설명에 `Codex 보안 검토` 절(발견 건수·판정·조치)을 넣는다. 기준은 `tools/codex-review/prompt.md` 이고, 원본 KISA 자료와 기준서 Word 본은 `kisa 가이드 자료/`(gitignore)에 있다.
 
 ## 새 PC 준비 (git에 없는 것)
 
