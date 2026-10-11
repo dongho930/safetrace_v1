@@ -1,4 +1,4 @@
-# API · 판단 서비스 · 검문 프록시 공용 이미지 (브라우저 없음)
+# API · 판단 서비스 · 검문 프록시 · 서명 서비스 공용 이미지 (브라우저 없음)
 FROM python:3.13-slim AS base
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 RUN useradd --create-home --uid 10001 app
@@ -9,6 +9,8 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY safetrace ./safetrace
 RUN pip install --no-cache-dir . && rm -rf /root/.cache
+# 서명 서비스 상태 볼륨: 새 볼륨이 이 디렉터리의 소유자(app)를 이어받는다
+RUN mkdir /state && chown app:app /state
 USER app
 EXPOSE 8000
 CMD ["uvicorn", "safetrace.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers"]

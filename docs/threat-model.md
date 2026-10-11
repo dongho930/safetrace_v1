@@ -10,7 +10,7 @@
                                                     [redis] (작업·이벤트)
                                                         │
       sandbox(internal) ───────────────────────────── [agent] ──HTTP── [decision] ──> Jev API
-                                                        │
+                                                        │   └──HTTP── [signer] ──── [api] (signing, internal)
                                                     [egress] ──> 인터넷(조사 대상)
 ```
 
@@ -20,6 +20,7 @@
 | 에이전트 → 판단 서비스 → Jev | 마스킹한 텍스트 상태 | 외부 전송(최소화) |
 | Jev → 판단 서비스 → 에이전트 | 선택지·확률 | 신뢰하지 않음(스키마 검증) |
 | 에이전트 → API | 이벤트(진행 상황) | 워커 침해 가능성 고려 |
+| 에이전트 → 서명 서비스 | 기록 내용(종류·데이터·파일 해시) | 워커 침해 가능성 고려: seq·시각·prev 는 서비스가 정함 |
 | 담당자 → API | 접수 URL, 조회 | 인증·인가 필요 |
 
 ## STRIDE
@@ -29,6 +30,7 @@
 | **S** 위장 | 토큰 없이 API 호출, 판단 서비스 사칭 | 담당자 로그인 세션(서버 측, DB 에는 SHA-256 만, 30분 무사용·12시간 만료), 자동화 토큰(해시 비교, 상수 시간), 판단 서비스 내부 토큰(`decision/service.py`) | `test_auth_required`, `test_login_me_logout`, `test_idle_and_absolute_expiry` |
 | **S** 위장 | 비밀번호 추측·DB 유출 뒤 해시 크래킹, 계정 존재 여부 탐색 | Argon2id(m=64MiB, t=3, p=4), 12자 이상, 5회 실패 시 15분 잠금, 없는 계정도 같은 응답·같은 해시 계산(`accounts.py`) | `test_failed_login_same_answer_and_lockout`, `test_stored_as_argon2id_and_token_hash_only` |
 | **T** 변조 | 증거 파일·기록 수정, 내부자가 해시까지 다시 계산 | 해시 체인 + 분리된 키의 HMAC, DB의 head 와 대조(`evidence.py`) | `test_evidence.py` 전체 |
+| **T** 변조 | 워커가 침해돼 앞 기록을 다시 서명받거나, 끝난 사건에 기록을 더하거나, 체인 끝을 잘라 내고 head 를 거짓 보고, 수집 시각 조작 | 서명 서비스가 seq·ts·prev 를 정하고 seq 는 앞으로만 감, API 가 연 사건에만 기록, 조사가 끝나면 API 가 닫음, DB head 는 서명 서비스 값을 씀(어긋나면 감사 로그 `evidence.head_mismatch`)(`signer/`) | `test_signer.py` 전체 |
 | **T** 변조 | 담당자 판정을 덮어쓰기, 두 담당자가 동시에 저장해 한쪽 판정이 사라짐 | 판정은 고치지 않고 판(rev)을 쌓음, 보고 있던 판 번호를 보내 어긋나면 409, `(case_id, rev)` 유일 제약(`verdicts.py`) | `test_revisions_and_optimistic_lock`, `test_concurrent_save_same_rev_only_one_wins` |
 | **T** 변조 | 관찰 뒤 요소를 결제 버튼으로 바꿔치기 | 클릭 직전 재조회·지문 비교·재분류(`gate.check_click`) | `test_swap_after_observe_blocked` |
 | **R** 부인 | 누가 언제 접수·검증·로그인했는지 불명확 | 개인 계정 + 감사 로그(`store.AuditLog`: 로그인 성공·실패 이유, 계정 변경), 증거에 시각·모델 버전 기록 | `test_audit_log` |
@@ -45,7 +47,7 @@
 | **E** 권한 상승 | 낮은 역할로 접수·계정 관리, 자동화 토큰으로 계정 조작 | 서버 측 역할 검사(`need`), 계정 관리는 사람 관리자만(`human=True`), 역할 변경·비활성화 즉시 세션 폐기, 자기 관리자 권한 해제 금지 | `test_rbac`, `test_inactive_and_role_change_revoke_sessions` |
 | **E** 권한 상승 | SSRF / DNS Rebinding | 이동 전 IP 확인 + 모든 요청 가로채기(1차), 접속 시점 재해석한 IP 로 연결하는 egress(2차), sandbox 는 internal 네트워크 | `test_netguard.py`, `test_egress_proxy.py` |
 | **E** 권한 상승 | AI·자동화 토큰이 판정을 확정 | 판정 저장은 검토관 이상 + 사람 계정만(`need("reviewer", human=True)`), 관리자 역할 자동화 토큰도 403 | `test_only_human_reviewers_can_decide` |
-| **E** 권한 상승 | 워커 침해 시 DB·키 탈취 | 워커에는 DB 접속 정보·Jev 키 없음, `cap_drop: ALL`, 비 root. **증거 서명 키는 워커에 있다**(워커가 서명). 워커가 뚫리면 그 뒤 기록은 위조 서명될 수 있으나 DB 의 head 와 이미 내보낸 패키지로 이전 기록은 대조 가능. 서명 서비스 분리는 남은 과제 | compose 설정 |
+| **E** 권한 상승 | 워커 침해 시 DB·키 탈취 | 워커에는 DB 접속 정보·Jev 키·증거 서명 키 없음, `cap_drop: ALL`, 비 root. 서명은 별도 서명 서비스(`signer`, internal 네트워크 `signing`)가 하고, 워커 토큰으로는 기록 추가만 가능(체인 열기·닫기·head 조회는 API 토큰만). 남은 위험: 워커가 뚫리면 **조사 중인 사건**에는 거짓 기록을 더할 수 있다(서명 서비스는 화면 내용을 알 수 없음) | `test_roles_are_separated`, 실제 스택 점검 |
 
 ## AI 관련 잔여 위험
 

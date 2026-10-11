@@ -6,7 +6,10 @@
 을 둔다.
 
 hash = sha256(prev || canonical(seq, ts, kind, data, files))
-sig  = HMAC-SHA256(key, hash)   ← 키는 증거 저장소와 분리 보관(환경 변수). 서명하는 에이전트와 검증하는 API 만 가진다
+sig  = HMAC-SHA256(key, hash)   ← 키는 증거 저장소와 분리 보관(환경 변수). 서명 서비스와 검증하는 API 만 가진다
+
+운영에서 에이전트는 키를 갖지 않는다. 기록 내용을 서명 서비스(safetrace.signer)에 보내면 서비스가 seq·ts·prev 를
+직접 정하고 서명해 돌려준다(RemoteSealer). 개발 모드(서명 서비스 없음)에서는 같은 프로세스에서 서명한다(LocalSealer).
 
 파일과 해시를 함께 고쳐도, 키가 없으면 서명을 다시 만들 수 없으므로 검증에서 드러난다.
 기록 삭제·순서 변경은 prev 연결과 seq 연속성 검사로, 끝부분 절단은 DB에 따로 둔
@@ -23,6 +26,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 
 GENESIS = "0" * 64
 _SAFE_NAME = re.compile(r"^[a-z0-9_\-]{1,64}\.(png|webm|json|txt)$")
@@ -68,17 +72,46 @@ class Head:
     hash: str
 
 
+def make_record(prev: Head, kind: str, data: dict, files: dict[str, str], signer: Signer,
+                ts: str | None = None) -> dict:
+    """prev 다음에 올 기록을 만들고 서명한다. 서명 서비스와 개발 모드가 같은 함수를 쓴다."""
+    body = {
+        "seq": prev.seq + 1,
+        "ts": ts or datetime.now(UTC).isoformat(timespec="milliseconds"),
+        "kind": kind,
+        "data": data,
+        "files": files,
+    }
+    digest = _record_hash(prev.hash, body)
+    return {**body, "prev": prev.hash, "hash": digest, "sig": signer.sign(digest), "key_id": signer.key_id}
+
+
+class Sealer(Protocol):
+    def seal(self, case_id: str, head: Head, kind: str, data: dict, files: dict[str, str]) -> dict: ...
+
+
+class LocalSealer:
+    """개발 모드: 같은 프로세스에서 서명한다."""
+
+    def __init__(self, signer: Signer):
+        self._signer = signer
+
+    def seal(self, case_id: str, head: Head, kind: str, data: dict, files: dict[str, str]) -> dict:
+        return make_record(head, kind, data, files, self._signer)
+
+
 class EvidenceWriter:
     """한 사건의 증거를 순서대로 추가한다. 스레드 안전."""
 
-    def __init__(self, root: Path, case_id: str, signer: Signer):
+    def __init__(self, root: Path, case_id: str, sealer: Signer | Sealer):
         if not re.fullmatch(r"[a-f0-9\-]{8,64}", case_id):
             raise ValueError("invalid case id")
+        self.case_id = case_id
         self.dir = root / case_id
         self.files_dir = self.dir / "files"
         self.files_dir.mkdir(parents=True, exist_ok=True)
         self.chain_path = self.dir / "chain.jsonl"
-        self._signer = signer
+        self._sealer = LocalSealer(sealer) if isinstance(sealer, Signer) else sealer
         self._lock = threading.Lock()
         self.head = Head(-1, GENESIS)
 
@@ -90,19 +123,15 @@ class EvidenceWriter:
     def append(self, kind: str, data: dict, files: list[str] | None = None) -> dict:
         with self._lock:
             file_hashes = {n: sha256_file(self.file_path(n)) for n in (files or [])}
-            body = {
-                "seq": self.head.seq + 1,
-                "ts": datetime.now(UTC).isoformat(timespec="milliseconds"),
-                "kind": kind,
-                "data": data,
-                "files": file_hashes,
-            }
-            digest = _record_hash(self.head.hash, body)
-            rec = {**body, "prev": self.head.hash, "hash": digest, "sig": self._signer.sign(digest),
-                   "key_id": self._signer.key_id}
+            rec = self._sealer.seal(self.case_id, self.head, kind, data, file_hashes)
+            # 서명 서비스가 돌려준 기록이 이 체인에 이어지는지 확인한다(서명은 키가 없어 확인하지 못함)
+            body = {k: rec[k] for k in ("seq", "ts", "kind", "data", "files")}
+            if (rec["seq"] != self.head.seq + 1 or rec["prev"] != self.head.hash
+                    or rec["hash"] != _record_hash(self.head.hash, body)):
+                raise ValueError("sealed record does not extend the chain")
             with self.chain_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            self.head = Head(body["seq"], digest)
+            self.head = Head(rec["seq"], rec["hash"])
             return rec
 
 

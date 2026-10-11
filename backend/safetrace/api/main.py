@@ -35,6 +35,7 @@ from ..live import LocalLive
 from ..masking import mask_secrets
 from ..netguard import BlockedURL, parse_url
 from ..preview import preview_image
+from ..signer.client import ChainAdmin, SignerError
 from ..store import AuditLog, Case, Store, Verdict
 
 log = logging.getLogger("safetrace.api")
@@ -109,7 +110,38 @@ if settings.redis_url:
     _redis = _redis_mod.Redis.from_url(settings.redis_url, decode_responses=True, socket_timeout=30)  # XREADGROUP block(5초)보다 길게
 
 
+# 서명 서비스(운영): 접수 때 체인을 열고 조사가 끝나면 닫는다. 비어 있으면 개발 모드(같은 프로세스에서 서명)
+_chains = ChainAdmin(settings.signer_url, settings.signer_api_token.get_secret_value()) if settings.signer_url else None
+
+
+def record_event(case_id: str, payload: dict) -> None:
+    """에이전트 이벤트를 DB 에 반영한다. 조사가 끝나면 체인을 닫고 서명 서비스의 head 를 쓴다.
+
+    에이전트가 보고한 head 는 믿지 않는다: 에이전트가 뚫려 체인 끝을 잘라 내도 서명 서비스의 head 와 어긋나 검증에서 드러난다.
+    """
+    if _chains is not None and payload.get("type") == "status" and payload.get("status") in TERMINAL:
+        reported = payload.get("head")
+        try:
+            h = _chains.close(case_id)
+            payload = {**payload, "head": {"seq": h["seq"], "hash": h["hash"]}}
+            if reported and (reported.get("seq"), reported.get("hash")) != (h["seq"], h["hash"]):
+                store.audit("system", "evidence.head_mismatch", case_id,
+                            f"agent={reported.get('seq')} signer={h['seq']}")
+        except SignerError as e:
+            # 닫지 못하면 head 를 비워 둔다: 검증에서 '끝부분 절단' 대조를 하지 못한다는 사실이 드러나게
+            payload = {**payload, "head": None}
+            store.audit("system", "evidence.close_failed", case_id, str(e))
+    store.add_event(case_id, payload)
+
+
 def enqueue(case_id: str, url: str):
+    if _chains is not None:
+        try:
+            _chains.open(case_id)
+        except SignerError as e:
+            log.error("signer open failed: %s", e)
+            store.add_event(case_id, {"type": "status", "status": "FAILED", "reason": "error:signer_unavailable"})
+            return
     if _redis is not None:
         _redis.xadd("st:jobs", {"case_id": case_id, "url": url})
         return
@@ -118,10 +150,10 @@ def enqueue(case_id: str, url: str):
 
     def job():
         try:
-            investigate(case_id, url, settings, lambda ev: store.add_event(case_id, ev), live=_live_local)
+            investigate(case_id, url, settings, lambda ev: record_event(case_id, ev), live=_live_local)
         except Exception as e:
             log.exception("inline investigation failed")
-            store.add_event(case_id, {"type": "status", "status": "FAILED", "reason": f"error:{type(e).__name__}"})
+            record_event(case_id, {"type": "status", "status": "FAILED", "reason": f"error:{type(e).__name__}"})
 
     _executor.submit(job)
 
@@ -140,7 +172,7 @@ def _consume_events_forever():
                 for mid, f in msgs:
                     cid = f.get("case_id", "")
                     if _CASE_ID.match(cid):
-                        store.add_event(cid, json.loads(f.get("payload", "{}")))
+                        record_event(cid, json.loads(f.get("payload", "{}")))
                     _redis.xack("st:events", group, mid)
         except Exception:
             log.exception("event consumer error")

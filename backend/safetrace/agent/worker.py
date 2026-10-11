@@ -1,6 +1,6 @@
 """에이전트 워커: Redis Streams 에서 작업을 받아 조사하고, 이벤트를 다시 Redis 로 보낸다.
 
-워커는 DB 접속 정보도 Jev API 키도 갖지 않는다.
+워커는 DB 접속 정보도 Jev API 키도 증거 서명 키도 갖지 않는다(서명은 서명 서비스에 맡긴다).
 실행: python -m safetrace.agent.worker
 """
 
