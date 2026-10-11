@@ -643,3 +643,49 @@ def test_recording_is_full_size_and_follows_new_window(settings, testpages):
     assert investigated - 5 <= duration <= until_saved, (data, investigated, until_saved)
     verify = verify_case(settings.evidence_dir, cid, make_signer(settings), None)
     assert verify.ok, verify.errors
+
+
+def _slow_invalid_dns(host, port):
+    """느린 회선의 이름 해석 흉내: .invalid 이름은 8초 뒤에야 실패한다(CI 에서 가끔 보이던 지연)."""
+    from safetrace.netguard import BlockedURL, resolve
+
+    if host.endswith(".invalid"):
+        time.sleep(8)
+        raise BlockedURL("dns_failure", host)
+    return resolve(host, port)
+
+
+@pytest.mark.parametrize("page, host, decision", [
+    ("short-js.html", "name.n-payviv.invalid", "rules"),     # 0.2초 뒤 스크립트 이동
+    ("short-wait.html", "name.n-paywait.invalid", "finish"),  # 대기 화면, 4초 뒤 이동
+])
+def test_slow_dns_does_not_lose_destination(settings, testpages, page, host, decision):
+    """이동 요청 검사(이름 해석)가 느려도 목적지를 놓치지 않는다: 검사에 상한을 두고, 검사 중이면 관찰·종료 전에 기다린다."""
+    from safetrace.agent.runner import make_decider
+    from safetrace.decision.schema import ActionDecision, ActionKind
+
+    inner = make_decider(settings)
+
+    class D:
+        req = None
+
+        def action(self, state):
+            if decision == "finish":
+                return ActionDecision(choice="finish", probabilities={"finish": 0.9}, model="t", provider="t",
+                                      latency_ms=0, action=ActionKind.FINISH)
+            return inner.action(state)
+
+        def threat(self, req):
+            self.req = req
+            return inner.threat(req)
+
+    settings.max_steps = 4
+    testpages.clear()
+    cid, d = str(uuid.uuid4()), D()
+    t0 = time.monotonic()
+    final = investigate(cid, f"{BASE}/phish/{page}", settings, lambda e: None, decider=d, resolver=_slow_invalid_dns)
+    assert final["reason"] == "dead_end", final
+    assert [(b.host, b.reason) for b in d.req.blocked_destinations] == [(host, "ssrf:dns_timeout")]
+    chain = [json.loads(x) for x in (settings.evidence_dir / cid / "chain.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert all(r["data"]["url"].startswith(BASE) for r in chain if r["kind"] == "observe")  # 오류 화면은 관찰하지 않음
+    assert time.monotonic() - t0 < 40  # 해석이 끝나기를 무작정 기다리지 않는다
