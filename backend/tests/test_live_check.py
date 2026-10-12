@@ -44,3 +44,11 @@ def test_attack_results_need_every_requested_scenario_and_clean_exit():
         lc.attack_checks(code, out, ["AT-01", "AT-04"])
         assert not all(r["ok"] for r in lc.results), (code, out)
     lc.results.clear()
+
+
+def test_admin_automation_token_is_used_for_admin_checks():
+    """조사관 토큰이 앞에 있어도 '관리자 역할 자동화 토큰' 항목에는 관리자 토큰을 쓴다. 없으면 미검증(실패)으로."""
+    toks = lc.service_tokens('ST_API_TOKENS=["inv-tok:investigator","adm-tok:admin","view-tok:viewer"]')
+    assert toks == {"investigator": "inv-tok", "admin": "adm-tok", "viewer": "view-tok"}
+    assert lc.service_tokens('ST_API_TOKENS=["a:admin"]') == {"admin": "a"}
+    assert lc.service_tokens("OTHER=1") == {}

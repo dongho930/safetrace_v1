@@ -57,13 +57,15 @@ def set_accounts(active: bool, pw: str = "") -> None:
     api_py(code, pw + "\n")
 
 
-def service_token() -> str:
-    m = re.search(r"^ST_API_TOKENS=(.*)$", (ROOT / ".env").read_text(encoding="utf-8"), re.M)
+def service_tokens(env_text: str) -> dict[str, str]:
+    """.env 의 ST_API_TOKENS 에서 역할별 첫 자동화 토큰. 인가 시험은 그 역할의 토큰으로 해야 의미가 있다."""
+    m = re.search(r"^ST_API_TOKENS=(.*)$", env_text, re.M)
+    out: dict[str, str] = {}
     for entry in (m.group(1) if m else "").strip().strip("[]").replace('"', "").split(","):
         t, _, role = entry.strip().rpartition(":")
-        if role in ("investigator", "admin") and t:
-            return t
-    sys.exit("자동화 토큰이 없음(.env ST_API_TOKENS)")
+        if t and role:
+            out.setdefault(role, t)
+    return out
 
 
 def call(method, path, tok=None, body=None, raw=False):
@@ -136,7 +138,7 @@ def attack_checks(returncode: int, stdout: str, want: list[str]) -> None:
     check("공격", "공격 시험 도구 정상 종료", returncode == 0, f"종료 코드 {returncode}")
 
 
-def run(pw: str, svc: str) -> str:
+def run(pw: str, svc: str, admin_svc: str | None) -> str:
     # ── 1주차 ① 계정·권한 ──
     _, rev1 = login("qa.rev1", pw)
     _, rev2 = login("qa.rev2", pw)
@@ -152,7 +154,9 @@ def run(pw: str, svc: str) -> str:
     check("권한", "인증 없이 사건 목록 401", call("GET", "/api/cases")[0] == 401)
     check("권한", "열람자는 접수 불가 403", call("POST", "/api/cases", viewer, {"url": f"{TP}/smish/"})[0] == 403)
     check("권한", "열람자는 계정 관리 불가 403", call("GET", "/api/users", viewer)[0] == 403)
-    check("권한", "자동화 토큰(관리자 역할)도 계정 관리 불가 403", call("GET", "/api/users", svc)[0] == 403)
+    check("권한", "자동화 토큰(관리자 역할)도 계정 관리 불가 403",
+          bool(admin_svc) and call("GET", "/api/users", admin_svc)[0] == 403,
+          "" if admin_svc else "관리자 역할 자동화 토큰이 없어 미검증")
 
     # ── 전체 흐름: 신고 URL 1건 ──
     t0 = time.time()
@@ -168,7 +172,9 @@ def run(pw: str, svc: str) -> str:
           f"{c['status']} {th.get('threat')} {th.get('probability')} {time.time() - t0:.0f}초")
 
     # ── 1주차 ② 판정 ──
-    check("판정", "자동화 토큰 판정 403", call("POST", f"/api/cases/{cid}/verdicts", svc, {"rev": 0, "decision": "benign"})[0] == 403)
+    check("판정", "자동화 토큰(관리자 역할) 판정 403", bool(admin_svc) and call(
+        "POST", f"/api/cases/{cid}/verdicts", admin_svc, {"rev": 0, "decision": "benign"})[0] == 403,
+        "" if admin_svc else "관리자 역할 자동화 토큰이 없어 미검증")
     check("판정", "열람자 판정 403", call("POST", f"/api/cases/{cid}/verdicts", viewer, {"rev": 0, "decision": "benign"})[0] == 403)
     s, v, _ = call("POST", f"/api/cases/{cid}/verdicts", rev1, {"rev": 0, "decision": "hold", "note": "first look"})
     check("판정", "검토관 판정 저장(판 1)", s == 201 and v["rev"] == 1)
@@ -245,10 +251,13 @@ def main() -> None:
     ap.add_argument("--attacks", action="store_true", help="공격 시나리오 AT-01·04·07·15 도 함께 돌린다")
     a = ap.parse_args()
     pw = "Qa-" + secrets.token_urlsafe(18)
-    svc = service_token()
+    toks = service_tokens((ROOT / ".env").read_text(encoding="utf-8"))
+    svc = toks.get("investigator") or toks.get("admin")
+    if not svc:
+        sys.exit("조사관 이상 자동화 토큰이 없음(.env ST_API_TOKENS)")
     set_accounts(True, pw)
     try:
-        cid = run(pw, svc)
+        cid = run(pw, svc, toks.get("admin"))
     finally:
         set_accounts(False)
     print("시험 계정을 다시 껐다", flush=True)
