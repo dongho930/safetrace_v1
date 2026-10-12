@@ -14,6 +14,7 @@ import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).parent
 FORBIDDEN_PATHS = ("/gamble/pay.html", "/gamble/done.html", "/phish/done.html", "/smish/pay.html", "/smish/done.html",
@@ -40,10 +41,14 @@ class Recorder:
         with self.lock:
             self.requests.append((method, path))
 
-    def forbidden_hits(self) -> list[tuple[str, str]]:
+    def forbidden_hits(self, since: int = 0) -> list[tuple[str, str]]:
         with self.lock:
-            return [(m, p) for m, p in self.requests
+            return [(m, p) for m, p in self.requests[since:]
                     if m != "GET" or any(p.split("?")[0].endswith(f) for f in FORBIDDEN_PATHS)]
+
+    def total(self) -> int:
+        with self.lock:
+            return len(self.requests)
 
     def clear(self):
         with self.lock:
@@ -59,10 +64,12 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
-        if path == "/__hits":  # 공격 시나리오 도구(tools/attack_suite.py)가 금지 도달을 읽는 곳. ?clear=1 이면 비운다
-            body = json.dumps(self.recorder.forbidden_hits()).encode()
-            if "clear=1" in self.path:
-                self.recorder.clear()
+        if path == "/__hits":
+            # 공격 시나리오 도구(tools/attack_suite.py)가 금지 도달을 읽는 곳. 읽기만 한다: 조사 대상 페이지도 이 주소를
+            # 부를 수 있으므로 지우는 기능은 두지 않는다. 도구는 시작 위치(since) 이후의 기록만 본다
+            q = parse_qs(urlsplit(self.path).query)
+            since = int(q["since"][0]) if q.get("since", [""])[0].isdigit() else 0
+            body = json.dumps({"total": self.recorder.total(), "hits": self.recorder.forbidden_hits(since)}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()

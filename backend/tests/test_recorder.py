@@ -92,3 +92,29 @@ def test_video_follows_given_capture_times(tmp_path):
     assert len(times) == 5  # 복제 없이 넣은 프레임 수 그대로
     assert times == pytest.approx([0.0, 0.5, 3.0, 3.001, 4.0], abs=0.002)
     assert duration == pytest.approx(4.0, abs=0.01)  # 영상 끝 = 녹화 끝
+
+
+def test_cancelled_stop_still_reaps_ffmpeg(tmp_path):
+    """Codex F2: 정리 제한 시간(_bounded)에 stop() 이 취소돼도 ffmpeg 가 남지 않아야 한다(반복 조사에서 프로세스 누적)."""
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        pytest.skip("ffmpeg not available")
+
+    async def go():
+        rec = ScreencastRecorder(ffmpeg, tmp_path / "r.webm")
+        await rec._spawn()
+
+        async def hang():  # 응답 없는 페이지에서 CDP 녹화 중지가 돌아오지 않는 경우
+            await asyncio.sleep(3600)
+
+        rec._detach = hang
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(rec.stop(), 0.5)
+        for _ in range(50):
+            if rec._proc.returncode is not None:
+                break
+            await asyncio.sleep(0.1)
+        return rec._proc.returncode, rec._writer.done()
+
+    code, writer_done = asyncio.run(go())
+    assert code is not None and writer_done

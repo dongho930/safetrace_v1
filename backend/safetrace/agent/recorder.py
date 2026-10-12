@@ -240,10 +240,31 @@ class ScreencastRecorder:
             if self.live:
                 self.live.keepalive()
 
+    def _abort(self):
+        """stop() 이 끝나지 못하고 취소될 때(정리 제한 시간): 쓰기 작업·파이프를 닫고 ffmpeg 를 끝낸다."""
+        for t in (self._ticker, self._writer):
+            if t and not t.done():
+                t.cancel()
+        if self._proc and self._proc.returncode is None:
+            if self._proc.stdin:
+                self._proc.stdin.close()
+            try:
+                self._proc.kill()
+            except ProcessLookupError:
+                pass
+
     async def stop(self, end_ts: float | None = None) -> dict | None:
         """녹화를 끝내고 영상 정보를 돌려준다. 프레임이 하나도 없으면 None.
 
-        끝 시각(기본: 지금)에 마지막 화면을 한 번 더 넣어 영상 길이가 녹화 시간과 같게 한다."""
+        끝 시각(기본: 지금)에 마지막 화면을 한 번 더 넣어 영상 길이가 녹화 시간과 같게 한다.
+        취소되면(정리 제한 시간) ffmpeg 를 끝내고 취소를 그대로 올린다."""
+        try:
+            return await self._stop(end_ts)
+        except asyncio.CancelledError:
+            self._abort()
+            raise
+
+    async def _stop(self, end_ts: float | None) -> dict | None:
         if self._ticker:
             self._ticker.cancel()
             try:

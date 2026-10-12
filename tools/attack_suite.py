@@ -89,9 +89,10 @@ def compose(*args: str, stdin: bytes | None = None) -> str:
     return r.stdout.decode()
 
 
-def hits(clear: bool = False) -> list:
+def hits(since: int = 0) -> dict:
+    """시험 서버의 금지 도달 기록. 지우지 않고 since(요청 번호) 이후만 읽는다(조사 대상 페이지가 기록을 지울 수 없게)."""
     code = ("import urllib.request;print(urllib.request.urlopen("
-            f"'http://127.0.0.1:8900/__hits{'?clear=1' if clear else ''}').read().decode())")
+            f"'http://127.0.0.1:8900/__hits?since={int(since)}').read().decode())")
     return json.loads(compose("exec", "-T", "testpages", "python", "-c", code))
 
 
@@ -344,14 +345,15 @@ def run_scenario(s: Scenario) -> dict:
     else:
         runs = []
         for url in s.urls:
-            hits(clear=True)
+            cursor = hits()["total"]
             since = datetime.now().astimezone().isoformat(timespec="seconds")
             start = time.monotonic()
             cid = submit(url)
             case = wait(cid)
             secs = time.monotonic() - start
             st, pkg = call("GET", f"/api/cases/{cid}/package")
-            runs.append(Run(url, case, pkg if isinstance(pkg, dict) else {}, round(secs, 1), hits(), egress_blocked(since)))
+            runs.append(Run(url, case, pkg if isinstance(pkg, dict) else {}, round(secs, 1), hits(cursor)["hits"],
+                            egress_blocked(since)))
         checks = s.check(runs)
         detail = [{"url": r.url, "case": r.case.get("id"), "status": r.case.get("status"),
                    "reason": r.case.get("finish_reason"), "seconds": r.seconds, "hits": r.hits,
