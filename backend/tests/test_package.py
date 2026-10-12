@@ -115,8 +115,9 @@ def test_zip_can_be_verified_by_receiver(client, case_id):
     from safetrace.api.main import _signer
 
     sig = json.loads(z.read("package.sig"))
-    assert package.verify_sig(z.read("package.json"), sig, _signer())
-    assert not package.verify_sig(z.read("package.json").replace(b"phishing", b"benign!!"), sig, _signer())
+    assert package.verify_sig(z.read("package.json"), z.read("SHA256SUMS"), sig, _signer())
+    assert not package.verify_sig(z.read("package.json").replace(b"phishing", b"benign!!"), z.read("SHA256SUMS"), sig, _signer())
+    assert package.verify_zip(r.content, _signer())
 
 
 def test_package_permissions_and_state(client, case_id, testpages):
@@ -236,6 +237,104 @@ def test_report_pdf_does_not_interpret_page_markup(tmp_path):
     }
     pdf = report.render_pdf(rep, tmp_path)
     assert pdf.startswith(b"%PDF") and _images(pdf) == 0
+
+
+def test_report_uses_verified_snapshot(client, case_id, monkeypatch):
+    """Codex F1: 검증한 체인과 보고서를 만든 체인이 같아야 한다. 에이전트가 증거 볼륨에 쓸 수 있으므로,
+    API 가 읽는 순간에만 바뀐 체인을 두었다가 검증 직전에 되돌려도 '검증 통과 + 바뀐 의견'이 나오면 안 된다."""
+    from safetrace.api import main
+    from safetrace.config import get_settings
+
+    chain = get_settings().evidence_dir / case_id / "chain.jsonl"
+    original = chain.read_text(encoding="utf-8")
+    lines = []
+    for line in original.splitlines():
+        rec = json.loads(line)
+        if rec["kind"] == "threat" and "sub" not in rec["data"]:
+            rec["data"]["threat"] = "benign"
+        lines.append(json.dumps(rec, ensure_ascii=False))
+    tampered = "\n".join(lines) + "\n"
+    real = main.verify_case
+
+    def swap_back(*a, **k):  # 검증하는 순간에는 원래 체인
+        chain.write_text(original, encoding="utf-8")
+        return real(*a, **k)
+
+    monkeypatch.setattr(main, "verify_case", swap_back)
+    try:
+        chain.write_text(tampered, encoding="utf-8")
+        rep = client.get(f"/api/cases/{case_id}/report.json", headers=h(INVESTIGATOR)).json()
+        assert not (rep["assessment"]["ai"]["threat"] == "benign" and rep["integrity"]["verified"])
+        chain.write_text(tampered, encoding="utf-8")
+        z = zipfile.ZipFile(io.BytesIO(client.get(f"/api/cases/{case_id}/package.zip", headers=h(INVESTIGATOR)).content))
+        pkg = json.loads(z.read("package.json"))
+        assert not (pkg["assessment"]["threat"]["threat"] == "benign" and pkg["integrity"]["verified"])
+    finally:
+        chain.write_text(original, encoding="utf-8")
+
+
+def test_zip_signature_covers_report(client, case_id):
+    """Codex F2: ZIP 의 보고서를 바꾸고 SHA256SUMS 를 다시 계산해도 서명 검증에서 드러나야 한다."""
+    from safetrace.api.main import _signer
+
+    data = client.get(f"/api/cases/{case_id}/package.zip", headers=h(INVESTIGATOR)).content
+    assert package.verify_zip(data, _signer())
+
+    src = zipfile.ZipFile(io.BytesIO(data))
+    for target in ("report.json", "report.pdf", "SHA256SUMS"):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as out:
+            items = {n: src.read(n) for n in src.namelist()}
+            if target == "report.json":
+                items[target] = items[target].replace(b'"draft": true', b'"draft": false').replace(b"phishing", b"benign")
+            elif target == "report.pdf":
+                items[target] = items[target] + b"%tampered"
+            else:
+                items[target] = items[target].replace(b"report.pdf", b"report.PDF")
+            if target != "SHA256SUMS":
+                items["SHA256SUMS"] = "".join(
+                    f"{hashlib.sha256(items[n]).hexdigest()}  {n}\n" for n in items if n != "SHA256SUMS").encode()
+            for n, b in items.items():
+                out.writestr(n, b)
+        assert not package.verify_zip(buf.getvalue(), _signer()), target
+
+
+def test_malformed_signed_records_do_not_break_exports(tmp_path, client, case_id, monkeypatch):
+    """Codex F3: 서명은 자료형을 보장하지 않는다. 침해된 에이전트가 이상한 자료형을 서명받아 넣어도
+    보고서는 500 없이 만들어지거나, 적어도 원본 증거 ZIP 내보내기는 막히지 않아야 한다."""
+    from safetrace.evidence import EvidenceWriter, Signer, verify_case
+
+    signer = Signer(secrets.token_bytes(32), "k1")
+    cid = "dddddddd-0000-0000-0000-000000000000"
+    w = EvidenceWriter(tmp_path / "ev", cid, signer)
+    w.append("start", {"url": ["x"]})
+    w.append("observe", {"step": 0, "url": {"a": 1}, "title": ["t"], "candidates": "x", "forbidden": 3})
+    w.append("decision", {"step": 0, "choice": ["click_e1"], "probability": "high"})
+    w.append("action", {"step": 0, "action": {"x": 1}, "element": [1], "result_url": 5})
+    w.append("finish", {"reason": "agent_finished", "nav_chain": "abc", "final_url": ["u"]})
+    w.append("threat", {"threat": ["benign"], "probability": "1", "hold": "no", "override": {"x": 1}})
+    w.append("safebrowsing", {"status": ["match"], "matches": "abc"})
+    w.append("candidates", {"found": 3})
+    w.append("candidate_results", {"results": [1, "x", {"sub": [1], "threat": ["scam"]}]})
+    case = Case(id=cid, url="http://x/", source="test", status="COMPLETED", created_by="t", created_at=now())
+    res = verify_case(tmp_path / "ev", cid, signer, None)
+    assert res.ok
+    pkg = package.build(case, package.read_chain(tmp_path / "ev", cid), res, [], [], generated_by="t", key_id="k1")
+    assert pkg["assessment"]["threat"].get("threat") is None and any("threat.threat" in m for m in pkg["integrity"]["malformed"])
+    rep = report.build(pkg, package.read_chain(tmp_path / "ev", cid) + [{"seq": 99, "ts": 1, "kind": "x", "data": []}])
+    json.dumps(rep)
+    assert report.render_pdf(rep, tmp_path / "ev").startswith(b"%PDF")
+
+    # 그래도 보고서를 만들지 못하는 경우: 보고서 요청은 오류로 알리고 ZIP 은 보고서 없이 나간다
+    def boom(*a, **k):
+        raise TypeError("bad record")
+
+    monkeypatch.setattr(report, "build", boom)
+    assert client.get(f"/api/cases/{case_id}/report.json", headers=h(INVESTIGATOR)).status_code == 422
+    r = client.get(f"/api/cases/{case_id}/package.zip", headers=h(INVESTIGATOR))
+    assert r.status_code == 200
+    z = zipfile.ZipFile(io.BytesIO(r.content))
+    assert "report.json" not in z.namelist() and "package.json" in z.namelist()
 
 
 def test_tampered_evidence_is_reported_not_hidden(client, case_id):

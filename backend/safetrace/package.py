@@ -25,17 +25,107 @@ _STEP_KINDS = {"observe", "decision", "gate", "action", "action_error", "new_win
                "decision_error", "escalation"}
 
 
-def read_chain(evidence_dir: Path, case_id: str) -> list[dict]:
+def read_chain_text(evidence_dir: Path, case_id: str) -> str | None:
     p = evidence_dir / case_id / "chain.jsonl"
-    if not p.exists():
-        return []
+    return p.read_text(encoding="utf-8") if p.exists() else None
+
+
+def read_chain(evidence_dir: Path, case_id: str) -> list[dict]:
+    return parse_chain(read_chain_text(evidence_dir, case_id) or "")
+
+
+# 패키지·보고서가 읽는 필드의 자료형. 서명은 내용이 바뀌지 않았음만 보장하고 자료형은 보장하지 않는다
+# (기록 내용은 조사 대상 페이지를 다루는 에이전트가 정한다). 어긋난 필드는 버리고 integrity.malformed 에 적는다.
+_STR, _NUM, _BOOL, _INT, _DICT = str, (int, float), bool, int, dict
+_SCHEMA: dict[str, dict[str, object]] = {
+    "*": {"step": _INT, "sub": _INT, "url": _STR, "reason": _STR, "error": _STR, "category": _STR},
+    "start": {"url": _STR},
+    "browser": {"version": _STR},
+    "navigation": {"final_url": _STR},
+    "observe": {"title": _STR, "candidates": [_DICT], "forbidden": [_STR], "has_popup": _BOOL,
+                "text_excerpt": _STR, "text_sha256": _STR},
+    "decision": {"choice": _STR, "probability": _NUM, "probabilities": _DICT, "provider": _STR, "model": _STR},
+    "gate": {"action": _STR, "element": _STR, "allowed": _BOOL},
+    "action": {"action": _STR, "element": _STR, "outcome": _STR, "result_url": _STR},
+    "finish": {"nav_chain": [_STR], "final_url": _STR},
+    "threat": {"threat": _STR, "probability": _NUM, "probabilities": _DICT, "hold": _BOOL, "override": _STR,
+               "provider": _STR, "model": _STR, "evidence_seqs": [_INT]},
+    "safebrowsing": {"status": _STR, "matches": [_DICT]},
+    "candidates": {"found": [_DICT], "followup": _BOOL},
+    "candidate_results": {"results": [_DICT]},
+    "blocked_request": {"navigation": _BOOL},
+}
+_ITEM = {  # 목록 안 사전의 필드
+    "candidates": {"id": _STR, "text": _STR},
+    "found": {"url": _STR},
+    "matches": {"url": _STR, "threatType": _STR},
+    "results": {"sub": _INT, "url": _STR, "final_url": _STR, "threat": _STR, "probability": _NUM, "hold": _BOOL,
+                "status": _STR, "reason": _STR, "reputation_match": _BOOL, "reputation_unchecked": _BOOL},
+}
+
+
+def _ok(v: object, t: object) -> bool:
+    if t is _NUM or t is _INT:
+        return isinstance(v, t) and not isinstance(v, bool)  # type: ignore[arg-type]
+    return isinstance(v, t)  # type: ignore[arg-type]
+
+
+def _clean_item(field: str, x: object) -> dict | None:
+    if not isinstance(x, dict):
+        return None
+    return {k: v for k, v in x.items() if k not in _ITEM.get(field, {}) or _ok(v, _ITEM[field][k])}
+
+
+def sanitize(rec: dict, bad: list[str]) -> dict | None:
+    """기록 하나의 자료형을 맞춘다. 기록 틀이 어긋나면 None(이후 기록은 믿지 않는다)."""
+    if not (isinstance(rec, dict) and _ok(rec.get("seq"), _INT) and isinstance(rec.get("kind"), str)
+            and isinstance(rec.get("ts"), str) and isinstance(rec.get("data"), dict)
+            and isinstance(rec.get("files", {}), dict)):
+        return None
+    data = {}
+    schema = {**_SCHEMA["*"], **_SCHEMA.get(rec["kind"], {})}
+    for k, v in rec["data"].items():
+        t = schema.get(k)
+        if t is None or v is None:
+            data[k] = v
+        elif isinstance(t, list):
+            if not isinstance(v, list):
+                bad.append(f"seq {rec['seq']}: {rec['kind']}.{k}")
+                continue
+            items = [_clean_item(k, x) for x in v] if t[0] is _DICT else [x for x in v if _ok(x, t[0])]
+            items = [x for x in items if x is not None]
+            if len(items) != len(v):
+                bad.append(f"seq {rec['seq']}: {rec['kind']}.{k}[]")
+            data[k] = items
+        elif _ok(v, t):
+            data[k] = v
+        else:
+            bad.append(f"seq {rec['seq']}: {rec['kind']}.{k}")
+    files = {n: h for n, h in rec.get("files", {}).items() if isinstance(h, str)}
+    return {**rec, "data": data, "files": files}
+
+
+def parse_chain(text: str) -> list[dict]:
     out = []
-    for line in p.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         try:
             out.append(json.loads(line))
         except ValueError:
             break  # 깨진 줄 이후는 믿지 않는다(검증 결과에 malformed 로 나온다)
     return out
+
+
+def clean_records(records: list) -> tuple[list[dict], list[str]]:
+    """패키지·보고서가 쓰기 전에 모든 기록의 자료형을 맞춘다. 반환: (기록, 버린 필드 목록)"""
+    bad: list[str] = []
+    out = []
+    for r in records:
+        c = sanitize(r, bad)
+        if c is None:
+            bad.append(f"record {len(out)}: malformed")
+            break
+        out.append(c)
+    return out, bad
 
 
 def _element_text(observe: dict | None, element: str | None) -> str | None:
@@ -145,6 +235,7 @@ def _candidates(top: dict, records: list[dict]) -> dict | None:
 
 def build(case: Case, records: list[dict], verify: VerifyResult, verdicts: list[Verdict], audit: list[AuditLog],
           *, generated_by: str, key_id: str) -> dict:
+    records, malformed = clean_records(records)
     # 연관 후보 하위 조사 기록(data.sub)은 원래 조사와 따로 묶는다
     main = [r for r in records if not isinstance(r["data"].get("sub"), int)]
     exploration, top = _exploration(main)
@@ -163,6 +254,7 @@ def build(case: Case, records: list[dict], verify: VerifyResult, verdicts: list[
                  "finish_reason": case.finish_reason, "final_url": case.final_url, "created_by": case.created_by,
                  "created_at": case.created_at.isoformat()},
         "integrity": {"verified": verify.ok, "records": verify.records, "errors": verify.errors,
+                      "malformed": malformed,  # 서명은 맞지만 자료형이 어긋나 버린 필드(침해된 에이전트의 흔적일 수 있음)
                       "head_seq": case.head_seq, "head_hash": case.head_hash, "key_id": key_id,
                       "method": "sha256 해시 체인 + HMAC-SHA256 서명(키는 저장소와 분리 보관)"},
         "exploration": exploration,
@@ -193,7 +285,8 @@ files/         스크린샷·녹화 원본(체인에 sha256 이 적혀 있음)
 report.json    보고서 초안(기관 양식으로 옮기기 쉬운 요약, package.json 에서 뽑음)
 report.pdf     같은 내용의 PDF
 SHA256SUMS     이 묶음 안 모든 파일의 sha256
-package.sig    package.json 의 sha256 과 HMAC-SHA256 서명(키 {key_id}, SafeTrace 서버에서만 확인 가능)
+package.sig    package.json·SHA256SUMS 의 sha256 에 건 HMAC-SHA256 서명(키 {key_id}, SafeTrace 서버에서만 확인 가능).
+               SHA256SUMS 가 보고서·체인·파일을 모두 담으므로 어느 하나만 바꿔도 서명이 맞지 않는다
 
 받은 쪽에서 할 수 있는 확인
 1) sha256sum -c SHA256SUMS                → 파일이 바뀌지 않았는지
@@ -206,24 +299,32 @@ AI 판단은 기술적 의심 유형이며 법적 판단이 아니다. 최종 �
 """
 
 
+SIG_FORMAT = "safetrace.package-sig/2"
+_SIG_FIELDS = ("format", "case_id", "generated_at", "package_sha256", "sums_sha256", "key_id")
+
+
+def _sig_digest(sig: dict) -> str:
+    return sha256_bytes(canonical({k: sig.get(k) for k in _SIG_FIELDS}))
+
+
 def export_zip(pkg: dict, evidence_dir: Path, case_id: str, signer: Signer,
-               extra: list[tuple[str, bytes]] | None = None) -> bytes:
-    """extra: 같이 담을 파생 문서(보고서 초안 report.json·report.pdf). SHA256SUMS 에 함께 들어간다."""
+               extra: list[tuple[str, bytes]] | None = None, *, chain_text: str | None = None) -> bytes:
+    """extra: 같이 담을 파생 문서(보고서 초안 report.json·report.pdf).
+    chain_text: 패키지를 만들 때 검증한 체인 스냅숏(따로 다시 읽으면 그 사이에 바뀔 수 있다).
+    서명은 SHA256SUMS(묶음 안 모든 파일의 해시)와 package.json 에 함께 건다. 보고서만 바꿔도 서명이 맞지 않는다."""
     d = evidence_dir / case_id
     body = json.dumps(pkg, ensure_ascii=False, indent=2).encode()
-    digest = sha256_bytes(body)
     entries: list[tuple[str, bytes | Path]] = [("package.json", body), *(extra or [])]
     chain = d / "chain.jsonl"
-    if chain.exists():
+    if chain_text is not None:
+        entries.append(("chain.jsonl", chain_text.encode()))
+    elif chain.exists():
         entries.append(("chain.jsonl", chain))
     files_dir = (d / "files").resolve()
     for f in pkg["files"]:
         p = (files_dir / f["name"]).resolve()
         if _SAFE_NAME.match(f["name"]) and p.parent == files_dir and p.is_file():
             entries.append((f"files/{f['name']}", p))
-    sig = {"package_sha256": digest, "hmac_sha256": signer.sign(digest), "key_id": signer.key_id,
-           "case_id": case_id, "generated_at": pkg["generated_at"]}
-    entries.append(("package.sig", canonical(sig)))
     entries.append(("README.txt", _README.format(fmt=FORMAT, key_id=signer.key_id).encode()))
 
     buf = io.BytesIO()
@@ -234,9 +335,45 @@ def export_zip(pkg: dict, evidence_dir: Path, case_id: str, signer: Signer,
             # 녹화·PNG 는 이미 압축돼 있으니 그대로 담는다
             z.writestr(name, data, zipfile.ZIP_STORED if name.endswith((".png", ".webm")) else zipfile.ZIP_DEFLATED)
             sums.append(f"{sha256_bytes(data)}  {name}")
-        z.writestr("SHA256SUMS", "\n".join(sums) + "\n")
+        sums_body = ("\n".join(sums) + "\n").encode()
+        z.writestr("SHA256SUMS", sums_body)
+        sig = {"format": SIG_FORMAT, "case_id": case_id, "generated_at": pkg["generated_at"],
+               "package_sha256": sha256_bytes(body), "sums_sha256": sha256_bytes(sums_body), "key_id": signer.key_id}
+        sig["hmac_sha256"] = signer.sign(_sig_digest(sig))
+        z.writestr("package.sig", canonical(sig))
     return buf.getvalue()
 
 
-def verify_sig(pkg_json: bytes, sig: dict, signer: Signer) -> bool:
-    return sha256_bytes(pkg_json) == sig.get("package_sha256") and signer.verify(sig["package_sha256"], sig.get("hmac_sha256", ""))
+def verify_sig(pkg_json: bytes, sums: bytes, sig: dict, signer: Signer) -> bool:
+    """package.json·SHA256SUMS 가 서명과 맞는지(서명 키가 있는 서버에서만)."""
+    try:
+        pkg = json.loads(pkg_json)
+        return (sig.get("format") == SIG_FORMAT and sha256_bytes(pkg_json) == sig.get("package_sha256")
+                and sha256_bytes(sums) == sig.get("sums_sha256") and pkg["case"]["id"] == sig.get("case_id")
+                and pkg["generated_at"] == sig.get("generated_at")
+                and signer.verify(_sig_digest(sig), str(sig.get("hmac_sha256", ""))))
+    except (ValueError, KeyError, TypeError):
+        return False
+
+
+def verify_zip(data: bytes, signer: Signer) -> bool:
+    """내보낸 ZIP 전체 확인: 서명 → SHA256SUMS 에 package.sig 를 뺀 모든 파일이 정확히 한 번씩 있고 해시가 맞는지."""
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+        names = z.namelist()
+        if len(names) != len(set(names)):
+            return False
+        sums = z.read("SHA256SUMS")
+        if not verify_sig(z.read("package.json"), sums, json.loads(z.read("package.sig")), signer):
+            return False
+        listed = {}
+        for line in sums.decode().splitlines():
+            digest, name = line.split("  ", 1)
+            if name in listed:
+                return False
+            listed[name] = digest
+        if set(listed) != set(names) - {"SHA256SUMS", "package.sig"}:
+            return False
+        return all(sha256_bytes(z.read(n)) == h for n, h in listed.items())
+    except (zipfile.BadZipFile, KeyError, ValueError):
+        return False

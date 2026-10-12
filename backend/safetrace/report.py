@@ -20,6 +20,7 @@ from PIL import Image as PILImage
 
 from . import preview as _preview  # noqa: F401  Image.MAX_IMAGE_PIXELS 제한을 함께 쓴다
 from .evidence import _SAFE_NAME, sha256_bytes
+from .package import clean_records
 
 FORMAT = "safetrace.report/1"
 KST = timezone(timedelta(hours=9), "KST")
@@ -65,7 +66,7 @@ def _kst(ts: str | None) -> str | None:
         return None
     try:
         return datetime.fromisoformat(ts).astimezone(KST).strftime("%Y-%m-%d %H:%M:%S KST")
-    except ValueError:
+    except (TypeError, ValueError):
         return None
 
 
@@ -121,7 +122,8 @@ def _screens(exp: dict, files: dict[str, str]) -> list[dict]:
 def build(pkg: dict, records: list[dict]) -> dict:
     """검토 패키지(package.build 결과)와 체인 기록으로 보고서 초안 JSON 을 만든다."""
     case, exp, a, review = pkg["case"], pkg["exploration"], pkg["assessment"], pkg["review"]
-    main = [r for r in records if not isinstance(r.get("data", {}).get("sub"), int)]
+    records, _ = clean_records(records)  # 자료형이 어긋난 기록은 패키지와 같은 규칙으로 버린다
+    main = [r for r in records if not isinstance(r["data"].get("sub"), int)]
     started = next((r["ts"] for r in main if r["kind"] == "start"), None)
     finished = next((r["ts"] for r in reversed(main) if r["kind"] in ("finish", "threat", "safebrowsing")), None)
     steps, forbidden = _steps(exp)

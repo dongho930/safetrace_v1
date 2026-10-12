@@ -660,10 +660,11 @@ def _evidence_head(c: Case) -> Head | None:
     return Head(h["seq"], h["hash"])
 
 
-def _verify_case(c: Case, signer: Signer) -> VerifyResult:
-    """끝난 사건은 체인 끝을 대조할 head 가 있어야 성공이다(없으면 끝부분을 잘라 내도 알 수 없다)."""
+def _verify_case(c: Case, signer: Signer, text: str | None = None) -> VerifyResult:
+    """끝난 사건은 체인 끝을 대조할 head 가 있어야 성공이다(없으면 끝부분을 잘라 내도 알 수 없다).
+    text: 패키지·보고서를 만들 체인 스냅숏. 검증한 내용 그대로 쓰도록 한 번만 읽어 넘긴다."""
     head = _evidence_head(c)
-    res = verify_case(settings.evidence_dir, c.id, signer, head)
+    res = verify_case(settings.evidence_dir, c.id, signer, head, text=text)
     if head is None and c.status in TERMINAL:
         res = VerifyResult(False, res.records, [*res.errors, "head_unknown (서명 서비스에서 체인 끝을 받지 못함)"])
     return res
@@ -683,21 +684,31 @@ def _signer() -> Signer:
     return Signer(settings.evidence_hmac_key.get_secret_value().encode(), settings.evidence_key_id)
 
 
-def _package(c: Case, who: str, records: list[dict] | None = None) -> dict:
+def _package_snapshot(c: Case, who: str) -> tuple[dict, list[dict], str]:
+    """체인을 한 번만 읽고, 그 내용을 검증한 뒤 같은 내용으로 패키지를 만든다(에이전트가 증거 볼륨에 쓸 수 있어서
+    따로 읽으면 검증한 체인과 내보내는 체인이 달라질 수 있다). 반환: (패키지, 기록, 체인 원문)"""
     if c.status not in TERMINAL:
         raise HTTPException(409, "조사가 끝난 뒤에 패키지를 만들 수 있습니다")
     signer = _signer()
-    res = _verify_case(c, signer)
+    text = package.read_chain_text(settings.evidence_dir, c.id)
+    res = _verify_case(c, signer, text)
     with store.session() as s:
         audit = list(s.scalars(select(AuditLog).where(AuditLog.case_id == c.id)))
-    records = package.read_chain(settings.evidence_dir, c.id) if records is None else records
-    return package.build(c, records, res, verdicts.history(store, c.id), audit, generated_by=who, key_id=signer.key_id)
+    records = package.parse_chain(text or "")
+    pkg = package.build(c, records, res, verdicts.history(store, c.id), audit, generated_by=who, key_id=signer.key_id)
+    return pkg, records, text or ""
 
 
-def _report(c: Case, who: str) -> tuple[dict, dict]:
-    records = package.read_chain(settings.evidence_dir, c.id)
-    pkg = _package(c, who, records)
-    return pkg, report.build(pkg, records)
+def _package(c: Case, who: str) -> dict:
+    return _package_snapshot(c, who)[0]
+
+
+def _report_of(pkg: dict, records: list[dict]) -> dict:
+    try:
+        return report.build(pkg, records)
+    except (TypeError, ValueError, KeyError, AttributeError) as e:  # 자료형이 어긋난 기록(서명은 자료형을 보장하지 않음)
+        log.warning("report build failed: %s", type(e).__name__)
+        raise HTTPException(422, "이 사건의 기록으로는 보고서를 만들 수 없습니다(검토 패키지로 원본 확인)") from e
 
 
 def _report_pdf(rep: dict) -> bytes:
@@ -721,9 +732,13 @@ def export_package(case_id: str, p: Annotated[Principal, Depends(need("investiga
     if c.status not in TERMINAL:
         raise HTTPException(409, "조사가 끝난 뒤에 패키지를 만들 수 있습니다")
     store.audit(p.name, "package.export", case_id)  # 먼저 남겨서 패키지의 감사로그에도 이번 내보내기가 들어가게
-    pkg, rep = _report(c, p.name)
-    extra = [("report.json", json.dumps(rep, ensure_ascii=False, indent=2).encode()), ("report.pdf", _report_pdf(rep))]
-    data = package.export_zip(pkg, settings.evidence_dir, case_id, _signer(), extra)
+    pkg, records, text = _package_snapshot(c, p.name)
+    try:  # 보고서를 만들지 못해도 원본 증거 내보내기는 막지 않는다
+        rep = _report_of(pkg, records)
+        extra = [("report.json", json.dumps(rep, ensure_ascii=False, indent=2).encode()), ("report.pdf", _report_pdf(rep))]
+    except HTTPException:
+        extra = []
+    data = package.export_zip(pkg, settings.evidence_dir, case_id, _signer(), extra, chain_text=text)
     name = f"safetrace-{case_id[:8]}-{pkg['generated_at'][:10]}.zip"
     return Response(data, media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
@@ -738,7 +753,8 @@ def export_report(case_id: str, fmt: str, p: Annotated[Principal, Depends(need("
     if c.status not in TERMINAL:
         raise HTTPException(409, "조사가 끝난 뒤에 보고서를 만들 수 있습니다")
     store.audit(p.name, "report.export", case_id, fmt)
-    _, rep = _report(c, p.name)
+    pkg, records, _ = _package_snapshot(c, p.name)
+    rep = _report_of(pkg, records)
     name = f"safetrace-report-{case_id[:8]}-{rep['generated_at'][:10]}.{fmt}"
     headers = {"Content-Disposition": f'attachment; filename="{name}"'}
     if fmt == "json":
