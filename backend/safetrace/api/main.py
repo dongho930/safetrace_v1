@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from .. import accounts, package, verdicts
+from .. import accounts, package, report, verdicts
 from ..accounts import ROLES, AccountError
 from ..config import get_settings
 from ..evidence import Head, Signer, VerifyResult, verify_case
@@ -683,15 +683,29 @@ def _signer() -> Signer:
     return Signer(settings.evidence_hmac_key.get_secret_value().encode(), settings.evidence_key_id)
 
 
-def _package(c: Case, who: str) -> dict:
+def _package(c: Case, who: str, records: list[dict] | None = None) -> dict:
     if c.status not in TERMINAL:
         raise HTTPException(409, "조사가 끝난 뒤에 패키지를 만들 수 있습니다")
     signer = _signer()
     res = _verify_case(c, signer)
     with store.session() as s:
         audit = list(s.scalars(select(AuditLog).where(AuditLog.case_id == c.id)))
-    return package.build(c, package.read_chain(settings.evidence_dir, c.id), res, verdicts.history(store, c.id), audit,
-                         generated_by=who, key_id=signer.key_id)
+    records = package.read_chain(settings.evidence_dir, c.id) if records is None else records
+    return package.build(c, records, res, verdicts.history(store, c.id), audit, generated_by=who, key_id=signer.key_id)
+
+
+def _report(c: Case, who: str) -> tuple[dict, dict]:
+    records = package.read_chain(settings.evidence_dir, c.id)
+    pkg = _package(c, who, records)
+    return pkg, report.build(pkg, records)
+
+
+def _report_pdf(rep: dict) -> bytes:
+    try:
+        return report.render_pdf(rep, settings.evidence_dir)
+    except report.FontMissing as e:
+        log.error("report font missing")
+        raise HTTPException(503, "보고서를 만들 수 없습니다(서버 설정)") from e
 
 
 @app.get("/api/cases/{case_id}/package")
@@ -707,8 +721,26 @@ def export_package(case_id: str, p: Annotated[Principal, Depends(need("investiga
     if c.status not in TERMINAL:
         raise HTTPException(409, "조사가 끝난 뒤에 패키지를 만들 수 있습니다")
     store.audit(p.name, "package.export", case_id)  # 먼저 남겨서 패키지의 감사로그에도 이번 내보내기가 들어가게
-    pkg = _package(c, p.name)
-    data = package.export_zip(pkg, settings.evidence_dir, case_id, _signer())
+    pkg, rep = _report(c, p.name)
+    extra = [("report.json", json.dumps(rep, ensure_ascii=False, indent=2).encode()), ("report.pdf", _report_pdf(rep))]
+    data = package.export_zip(pkg, settings.evidence_dir, case_id, _signer(), extra)
     name = f"safetrace-{case_id[:8]}-{pkg['generated_at'][:10]}.zip"
     return Response(data, media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@app.get("/api/cases/{case_id}/report.{fmt}")
+def export_report(case_id: str, fmt: str, p: Annotated[Principal, Depends(need("investigator"))]):
+    """보고서 초안(JSON·PDF). 기관 양식으로 옮기기 쉬운 요약본. 밖으로 나가는 자료라 조사관 이상, 감사로그."""
+    if fmt not in ("json", "pdf"):
+        raise HTTPException(404, "not found")
+    c = _get_case(case_id)
+    if c.status not in TERMINAL:
+        raise HTTPException(409, "조사가 끝난 뒤에 보고서를 만들 수 있습니다")
+    store.audit(p.name, "report.export", case_id, fmt)
+    _, rep = _report(c, p.name)
+    name = f"safetrace-report-{case_id[:8]}-{rep['generated_at'][:10]}.{fmt}"
+    headers = {"Content-Disposition": f'attachment; filename="{name}"'}
+    if fmt == "json":
+        return JSONResponse(rep, headers=headers)
+    return Response(_report_pdf(rep), media_type="application/pdf", headers=headers)

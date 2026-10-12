@@ -15,7 +15,7 @@ import {
   clearToken,
   createCase,
   createUser,
-  downloadPackage,
+  downloadExport,
   fileUrl,
   getCase,
   getToken,
@@ -1205,7 +1205,7 @@ function Opinion({ c, running }: { c: CaseOut | null; running: boolean }) {
 function Evidence({ c, id, running, canExport }: { c: CaseOut | null; id: string; running: boolean; canExport: boolean }) {
   const [verify, setVerify] = useState<{ ok: boolean; records: number; errors: string[] } | null>(null);
   const [busy, setBusy] = useState(false);
-  const [pkgBusy, setPkgBusy] = useState(false);
+  const [pkgBusy, setPkgBusy] = useState("");
   const [pkgMsg, setPkgMsg] = useState("");
   const sb = c?.safebrowsing;
   const cands: Candidate[] = (c?.candidates ?? []).map((x) => (typeof x === "string" ? { url: x, host: x } : x));
@@ -1296,37 +1296,49 @@ function Evidence({ c, id, running, canExport }: { c: CaseOut | null; id: string
       <div className="integrity">
         <Icon name="stack" />
         <span className="integrity-text">
-          <span style={{ color: "var(--ink)" }}>검토 패키지</span>
+          <span style={{ color: "var(--ink)" }}>보고서 · 검토 패키지</span>
           <span className="faint small">
             {running
               ? "조사가 끝나면 만들 수 있습니다"
               : !canExport
                 ? "내려받기는 조사관 이상만 할 수 있습니다"
                 : c?.verdict
-                  ? `탐색 기록 · 판단 결과 · 담당자 판정(판 ${c.verdict.rev}) · 증거 원본`
-                  : "탐색 기록 · 판단 결과 · 증거 원본 (담당자 판정 전)"}
+                  ? `보고서 · 탐색 기록 · 판단 결과 · 담당자 판정(판 ${c.verdict.rev}) · 증거 원본`
+                  : "보고서 초안 · 탐색 기록 · 판단 결과 · 증거 원본 (담당자 판정 전)"}
           </span>
         </span>
         {canExport && (
-          <button
-            type="button"
-            className="btn btn-ghost"
-            style={{ padding: "7px 10px", fontSize: 12 }}
-            disabled={pkgBusy || running || !c}
-            onClick={async () => {
-              setPkgBusy(true);
-              setPkgMsg("");
-              try {
-                await downloadPackage(id);
-              } catch (e) {
-                setPkgMsg(e instanceof Error ? e.message : "내려받기 실패");
-              } finally {
-                setPkgBusy(false);
-              }
-            }}
-          >
-            {pkgBusy ? "만드는 중" : "ZIP 내려받기"}
-          </button>
+          <span style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+            {(
+              [
+                ["report.pdf", "보고서 PDF"],
+                ["report.json", "JSON"],
+                ["package.zip", "ZIP"],
+              ] as const
+            ).map(([kind, label]) => (
+              <button
+                key={kind}
+                type="button"
+                className="btn btn-ghost"
+                style={{ padding: "7px 10px", fontSize: 12 }}
+                title={kind === "package.zip" ? "검토 패키지: 체인 원본·파일·보고서 포함" : "보고서 초안(기관 양식용 요약)"}
+                disabled={pkgBusy !== "" || running || !c}
+                onClick={async () => {
+                  setPkgBusy(kind);
+                  setPkgMsg("");
+                  try {
+                    await downloadExport(id, kind);
+                  } catch (e) {
+                    setPkgMsg(e instanceof Error ? e.message : "내려받기 실패");
+                  } finally {
+                    setPkgBusy("");
+                  }
+                }}
+              >
+                {pkgBusy === kind ? "만드는 중" : label}
+              </button>
+            ))}
+          </span>
         )}
       </div>
       {pkgMsg && (

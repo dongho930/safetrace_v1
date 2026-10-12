@@ -190,6 +190,8 @@ _README = """SafeTrace 검토 패키지
 package.json   탐색 기록·판단 결과·담당자 판정 묶음 (형식: {fmt})
 chain.jsonl    서명된 증거 체인 원본(한 줄 = 기록 하나)
 files/         스크린샷·녹화 원본(체인에 sha256 이 적혀 있음)
+report.json    보고서 초안(기관 양식으로 옮기기 쉬운 요약, package.json 에서 뽑음)
+report.pdf     같은 내용의 PDF
 SHA256SUMS     이 묶음 안 모든 파일의 sha256
 package.sig    package.json 의 sha256 과 HMAC-SHA256 서명(키 {key_id}, SafeTrace 서버에서만 확인 가능)
 
@@ -204,11 +206,13 @@ AI 판단은 기술적 의심 유형이며 법적 판단이 아니다. 최종 �
 """
 
 
-def export_zip(pkg: dict, evidence_dir: Path, case_id: str, signer: Signer) -> bytes:
+def export_zip(pkg: dict, evidence_dir: Path, case_id: str, signer: Signer,
+               extra: list[tuple[str, bytes]] | None = None) -> bytes:
+    """extra: 같이 담을 파생 문서(보고서 초안 report.json·report.pdf). SHA256SUMS 에 함께 들어간다."""
     d = evidence_dir / case_id
     body = json.dumps(pkg, ensure_ascii=False, indent=2).encode()
     digest = sha256_bytes(body)
-    entries: list[tuple[str, bytes | Path]] = [("package.json", body)]
+    entries: list[tuple[str, bytes | Path]] = [("package.json", body), *(extra or [])]
     chain = d / "chain.jsonl"
     if chain.exists():
         entries.append(("chain.jsonl", chain))

@@ -9,7 +9,7 @@ import zipfile
 import pytest
 from fastapi.testclient import TestClient
 
-from safetrace import accounts, package
+from safetrace import accounts, package, report
 from safetrace.evidence import GENESIS, canonical
 from safetrace.store import Case, now
 from tests.conftest import INVESTIGATOR, VIEWER
@@ -159,6 +159,85 @@ def test_unsafe_file_names_from_chain_are_not_exported(tmp_path):
     assert b"server secret" not in b"".join(z.read(n) for n in z.namelist() if n != "chain.jsonl")
 
 
+def _images(pdf: bytes) -> int:
+    return pdf.count(b"/Subtype /Image")
+
+
+def test_report_json_and_pdf(client, case_id):
+    """보고서 초안: 패키지에서 뽑은 요약(JSON)과 같은 내용의 PDF. 내보내기는 조사관 이상, 감사로그."""
+    r = client.get(f"/api/cases/{case_id}/report.json", headers=h(INVESTIGATOR))
+    assert r.status_code == 200 and f"safetrace-report-{case_id[:8]}-" in r.headers["content-disposition"]
+    rep = r.json()
+    pkg = client.get(f"/api/cases/{case_id}/package", headers=h(VIEWER)).json()
+    assert rep["format"] == report.FORMAT and rep["case"]["url"] == "http://127.0.0.1:8900/smish/"
+    inv = rep["investigation"]
+    assert inv["started_at"] and inv["finished_at"] and inv["duration_seconds"] > 0
+    assert inv["status"] == pkg["case"]["status"] and inv["final_url"] == pkg["exploration"]["final_url"]
+    click = next(s for s in inv["steps"] if s["action"] == "click")
+    assert click["element_text"]
+    assert rep["assessment"]["ai"]["threat"] == pkg["assessment"]["threat"]["threat"]
+    assert rep["assessment"]["safebrowsing"]["status"]
+    # 판정이 있으면 확정 여부에 따라 초안 표시
+    cur = pkg["review"]["current"]
+    assert rep["draft"] == (not cur or cur["decision"] == "hold")
+    # 주요 화면은 체인에 적힌 파일과 해시 그대로
+    files = {f["name"]: f["sha256"] for f in pkg["files"]}
+    assert rep["key_screens"] and all(files[x["file"]] == x["sha256"] for x in rep["key_screens"])
+    assert rep["integrity"]["verified"] is True and rep["integrity"]["head_hash"] == pkg["integrity"]["head_hash"]
+
+    r = client.get(f"/api/cases/{case_id}/report.pdf", headers=h(INVESTIGATOR))
+    assert r.status_code == 200 and r.headers["content-type"] == "application/pdf"
+    assert r.content.startswith(b"%PDF") and _images(r.content) == len(rep["key_screens"])
+
+    pkg = client.get(f"/api/cases/{case_id}/package", headers=h(VIEWER)).json()
+    assert [x["detail"] for x in pkg["review"]["audit"] if x["action"] == "report.export"][-2:] == ["json", "pdf"]
+    assert client.get(f"/api/cases/{case_id}/report.pdf", headers=h(VIEWER)).status_code == 403
+    assert client.get(f"/api/cases/{case_id}/report.html", headers=h(INVESTIGATOR)).status_code == 404
+
+    z = zipfile.ZipFile(io.BytesIO(client.get(f"/api/cases/{case_id}/package.zip", headers=h(INVESTIGATOR)).content))
+    sums = z.read("SHA256SUMS").decode()
+    assert "  report.json" in sums and "  report.pdf" in sums
+    assert json.loads(z.read("report.json"))["integrity"]["head_hash"] == rep["integrity"]["head_hash"]
+
+
+def test_report_pdf_does_not_interpret_page_markup(tmp_path):
+    """페이지 제목·버튼 글자는 공격자 값이다. reportlab 문단 마크업(<img src> 등)으로 해석되면 서버의 로컬 파일을
+    PDF 에 넣을 수 있다. 글자 그대로만 들어가야 한다."""
+    from PIL import Image
+
+    secret = tmp_path / "secret.png"
+    Image.new("RGB", (40, 40), "red").save(secret)
+    evil = f'<img src="{secret.as_posix()}" width="40" height="40"/><font color="red">x</font> &amp;'
+    rep = {
+        "format": report.FORMAT, "generated_at": "2026-10-12T00:00:00+00:00", "generated_by": evil, "draft": True,
+        "notice": report.NOTICE,
+        "case": {"id": "c" * 36, "url": evil, "source": evil, "received_at": "2026-10-12T00:00:00+00:00",
+                 "received_by": evil},
+        "investigation": {"started_at": None, "finished_at": None, "duration_seconds": None, "status": "COMPLETED",
+                          "status_ko": evil, "finish_reason": None, "finish_reason_ko": evil, "final_url": evil,
+                          "path": [evil], "browser": evil,
+                          "steps": [{"step": 0, "url": evil, "title": evil, "action": "click", "element_text": evil,
+                                     "outcome": None, "result_url": evil, "screenshot": None}],
+                          "steps_total": 1, "forbidden_elements": 0, "blocked_navigations": [],
+                          "blocked_navigations_total": 0, "unreachable": None},
+        "assessment": {"ai": {"threat": "phishing", "threat_ko": evil, "probability": 0.9, "hold": False,
+                              "override": evil, "provider": "x", "model": "x"},
+                       "error": False, "escalation": evil,
+                       "safebrowsing": {"status": "match", "status_ko": evil, "matches": [{"url": evil, "type": evil}]}},
+        "related": {"found": 1, "investigated": [{"sub": 1, "url": evil, "final_url": evil, "threat": "scam",
+                                                  "threat_ko": evil, "probability": 0.5, "hold": False,
+                                                  "reputation_match": False, "reputation_unchecked": True,
+                                                  "status": "COMPLETED", "error": False}]},
+        "verdict": {"rev": 1, "decision": "hold", "decision_ko": evil, "threat": None, "threat_ko": None,
+                    "note": evil + "<b> 닫히지 않은 태그", "reviewer": evil, "at": "2026-10-12T00:00:00+00:00"},
+        "key_screens": [],
+        "integrity": {"verified": True, "records": 1, "errors": 0, "head_seq": 0, "head_hash": evil, "key_id": evil,
+                      "method": evil},
+    }
+    pdf = report.render_pdf(rep, tmp_path)
+    assert pdf.startswith(b"%PDF") and _images(pdf) == 0
+
+
 def test_tampered_evidence_is_reported_not_hidden(client, case_id):
     """증거가 바뀌면 패키지는 만들되 검증 실패를 그대로 적는다(이 시험은 증거를 망가뜨리므로 마지막에 둔다)."""
     from safetrace.config import get_settings
@@ -169,3 +248,9 @@ def test_tampered_evidence_is_reported_not_hidden(client, case_id):
     pkg = client.get(f"/api/cases/{case_id}/package", headers=h(VIEWER)).json()
     assert pkg["integrity"]["verified"] is False
     assert any("file_modified" in e for e in pkg["integrity"]["errors"])
+    # 보고서도 검증 실패를 적고, 해시가 맞지 않는 화면은 PDF 에 넣지 않는다
+    rep = client.get(f"/api/cases/{case_id}/report.json", headers=h(INVESTIGATOR)).json()
+    assert rep["integrity"]["verified"] is False and rep["integrity"]["errors"] >= 1
+    assert shot in [x["file"] for x in rep["key_screens"]]
+    pdf = client.get(f"/api/cases/{case_id}/report.pdf", headers=h(INVESTIGATOR)).content
+    assert _images(pdf) == len(rep["key_screens"]) - 1

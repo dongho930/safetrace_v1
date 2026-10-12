@@ -73,7 +73,8 @@ KISA 남은 오답(모두 판단 불가·담당자 검토로 감):
 - Codex 시범 검토(#37) 정탐 3건 수정(`fix/codex-pilot-findings`, 2026-10-11): 워커 head 를 상태 이벤트에서 받지 않고 상태 전이 검사(F1), 닫기 실패 시 검증 `head_unknown`·나중에 다시 닫아 복구(F2), signer 본문을 받으면서 1MiB 초과 시 413·동시 연결 32·메모리 256MB(F3). 실제 스택에서 세 공격 모두 전에는 통하고 후에는 막힘, smish 31.6초 → 31.6초. Codex 보안 기준에 Python 시큐어코딩 가이드(2023)를 넣은 것은 #40.
 - 2라운드 작업 흐름 정리(`chore/round2-workflow`, 2026-10-11): `docs/plan-updates.md` 시작, CI 약점 밀도 보고, 측정·Codex 검토 범위 조정.
 - 2주차 ② 연관 후보 하위 조사(`feat/candidate-subinvestigation`, 2026-10-12, 사용자 결정: 원 사건 안의 하위 조사): `agent/candidates.py` 가 경유 도메인·외부 링크를 고르고(기록 20), 원래 주소가 확신 있는 정상이 아니면 `runner` 가 후보 최대 3개를 새 브라우저에서 4단계·40초로 조사한다. 같은 체인에 `data.sub` 를 붙이고 파일은 `c<번호>_` 로 시작한다. Safe Browsing 은 후보도 조회하고 AI 정상 + 일치면 보류(`reputation_match`·`candidate_reputation_match`). 패키지 `candidates.investigated`, 콘솔 '연관 후보' 목록. 설정 `candidate_max`·`candidate_max_steps`·`candidate_max_seconds`.
-- 다음 세션: 3주차 PDF/JSON 보고서, 공격 시나리오 15종(시연 장면과 함께 설계).
+- 3주차 ① 보고서 초안(`feat/week3-report`, 2026-10-12): `backend/safetrace/report.py`. 검토 패키지에서 기관 양식용 요약(JSON `safetrace.report/1`)을 뽑고 reportlab 으로 PDF(대상·개요, 판단 결과·담당자 판정, 탐색 경위, 주요 화면 최대 4장 2열, 연관 사이트, 증거 무결성)를 그린다. API `GET /api/cases/{id}/report.json|pdf`(조사관 이상, 감사로그 `report.export`), 검토 패키지 ZIP 에도 `report.json`·`report.pdf` 포함. 페이지 글자는 이스케이프(마크업의 `<img src>` 로 서버 파일을 읽을 수 있음), 화면 사진은 체인 해시가 맞을 때만. 글꼴은 API 이미지의 `fonts-nanum`(로컬은 맑은 고딕, `ST_REPORT_FONT` 로 바꿀 수 있음). 측정: JSON 13ms, PDF 0.12~0.14초, ZIP 25ms → 0.13~0.16초. 로컬 측정은 `localhost` 대신 `127.0.0.1`(Windows 에서 이름 해석이 200ms 더해진다).
+- 다음: 3주차 ② 공격 시나리오 15종(시연 장면과 함께 설계), ③ 시연 시나리오 점검.
 
 ## 남은 개선 후보 (품질 개선은 마침, 참고용)
 

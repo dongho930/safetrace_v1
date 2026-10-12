@@ -157,9 +157,12 @@ export const saveVerdict = (id: string, v: { rev: number; decision: Decision; th
   req<Verdict>(`/api/cases/${encodeURIComponent(id)}/verdicts`, { method: "POST", body: JSON.stringify(v) });
 
 // 검토 패키지(ZIP: package.json·체인 원본·파일·SHA256SUMS·서명). 인증 헤더가 필요하므로 blob 으로 받아 저장한다
-export async function downloadPackage(caseId: string): Promise<void> {
-  const r = await send(`/api/cases/${encodeURIComponent(caseId)}/package.zip`, {});
-  const name = /filename="([^"]+)"/.exec(r.headers.get("Content-Disposition") ?? "")?.[1] ?? `safetrace-${caseId.slice(0, 8)}.zip`;
+// 검토 패키지(ZIP) 또는 보고서 초안(PDF·JSON) 내려받기
+export type ExportKind = "package.zip" | "report.pdf" | "report.json";
+
+export async function downloadExport(caseId: string, kind: ExportKind): Promise<void> {
+  const r = await send(`/api/cases/${encodeURIComponent(caseId)}/${kind}`, {});
+  const name = /filename="([^"]+)"/.exec(r.headers.get("Content-Disposition") ?? "")?.[1] ?? `safetrace-${caseId.slice(0, 8)}-${kind}`;
   const url = URL.createObjectURL(await r.blob());
   const a = document.createElement("a");
   a.href = url;
