@@ -22,6 +22,11 @@ from . import preview as _preview  # noqa: F401  Image.MAX_IMAGE_PIXELS 제한�
 from .evidence import _SAFE_NAME, sha256_bytes
 from .package import clean_records
 
+try:  # 그리는 중 배치 실패(지나치게 긴 표 칸 등)는 보고서 오류로 다룬다
+    from reportlab.platypus.doctemplate import LayoutError
+except ImportError:  # pragma: no cover
+    LayoutError = RuntimeError  # type: ignore[assignment,misc]
+
 FORMAT = "safetrace.report/1"
 KST = timezone(timedelta(hours=9), "KST")
 
@@ -240,7 +245,8 @@ def _shot(path: Path, sha: str, width_px: int = 800, max_h_px: int = 560) -> io.
 
 
 def _pct(p: object) -> str:
-    return f"{float(p) * 100:.0f}%" if isinstance(p, (int, float)) else "-"
+    ok = isinstance(p, (int, float)) and not isinstance(p, bool) and 0 <= p <= 1
+    return f"{float(p) * 100:.0f}%" if ok else "-"  # type: ignore[arg-type]
 
 
 def render_pdf(rep: dict, evidence_dir: Path) -> bytes:

@@ -37,6 +37,7 @@ def read_chain(evidence_dir: Path, case_id: str) -> list[dict]:
 # 패키지·보고서가 읽는 필드의 자료형. 서명은 내용이 바뀌지 않았음만 보장하고 자료형은 보장하지 않는다
 # (기록 내용은 조사 대상 페이지를 다루는 에이전트가 정한다). 어긋난 필드는 버리고 integrity.malformed 에 적는다.
 _STR, _NUM, _BOOL, _INT, _DICT = str, (int, float), bool, int, dict
+_PROB = "prob"  # 0 이상 1 이하의 유한한 수
 _SCHEMA: dict[str, dict[str, object]] = {
     "*": {"step": _INT, "sub": _INT, "url": _STR, "reason": _STR, "error": _STR, "category": _STR},
     "start": {"url": _STR},
@@ -44,11 +45,11 @@ _SCHEMA: dict[str, dict[str, object]] = {
     "navigation": {"final_url": _STR},
     "observe": {"title": _STR, "candidates": [_DICT], "forbidden": [_STR], "has_popup": _BOOL,
                 "text_excerpt": _STR, "text_sha256": _STR},
-    "decision": {"choice": _STR, "probability": _NUM, "probabilities": _DICT, "provider": _STR, "model": _STR},
+    "decision": {"choice": _STR, "probability": _PROB, "probabilities": _DICT, "provider": _STR, "model": _STR},
     "gate": {"action": _STR, "element": _STR, "allowed": _BOOL},
     "action": {"action": _STR, "element": _STR, "outcome": _STR, "result_url": _STR},
     "finish": {"nav_chain": [_STR], "final_url": _STR},
-    "threat": {"threat": _STR, "probability": _NUM, "probabilities": _DICT, "hold": _BOOL, "override": _STR,
+    "threat": {"threat": _STR, "probability": _PROB, "probabilities": _DICT, "hold": _BOOL, "override": _STR,
                "provider": _STR, "model": _STR, "evidence_seqs": [_INT]},
     "safebrowsing": {"status": _STR, "matches": [_DICT]},
     "candidates": {"found": [_DICT], "followup": _BOOL},
@@ -59,12 +60,14 @@ _ITEM = {  # 목록 안 사전의 필드
     "candidates": {"id": _STR, "text": _STR},
     "found": {"url": _STR},
     "matches": {"url": _STR, "threatType": _STR},
-    "results": {"sub": _INT, "url": _STR, "final_url": _STR, "threat": _STR, "probability": _NUM, "hold": _BOOL,
+    "results": {"sub": _INT, "url": _STR, "final_url": _STR, "threat": _STR, "probability": _PROB, "hold": _BOOL,
                 "status": _STR, "reason": _STR, "reputation_match": _BOOL, "reputation_unchecked": _BOOL},
 }
 
 
 def _ok(v: object, t: object) -> bool:
+    if t is _PROB:
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 1  # 거대한 int·nan 도 걸러짐
     if t is _NUM or t is _INT:
         return isinstance(v, t) and not isinstance(v, bool)  # type: ignore[arg-type]
     return isinstance(v, t)  # type: ignore[arg-type]
@@ -313,6 +316,22 @@ def export_zip(pkg: dict, evidence_dir: Path, case_id: str, signer: Signer,
     chain_text: 패키지를 만들 때 검증한 체인 스냅숏(따로 다시 읽으면 그 사이에 바뀔 수 있다).
     서명은 SHA256SUMS(묶음 안 모든 파일의 해시)와 package.json 에 함께 건다. 보고서만 바꿔도 서명이 맞지 않는다."""
     d = evidence_dir / case_id
+    # 증거 파일은 한 번 읽은 바이트를 체인의 해시와 대조하고 그 바이트를 담는다(검증 뒤에 바뀐 파일은 빼고 실패로 적음)
+    files: list[tuple[str, bytes]] = []
+    changed: list[str] = []
+    files_dir = (d / "files").resolve()
+    for f in pkg["files"]:
+        p = (files_dir / f["name"]).resolve()
+        if _SAFE_NAME.match(f["name"]) and p.parent == files_dir and p.is_file():
+            data = p.read_bytes()
+            if sha256_bytes(data) == f["sha256"]:
+                files.append((f"files/{f['name']}", data))
+            else:
+                changed.append(f["name"])
+    if changed:
+        integ = pkg["integrity"]
+        pkg = {**pkg, "integrity": {**integ, "verified": False,
+                                    "errors": [*integ["errors"], *(f"file_changed_at_export {n}" for n in changed)]}}
     body = json.dumps(pkg, ensure_ascii=False, indent=2).encode()
     entries: list[tuple[str, bytes | Path]] = [("package.json", body), *(extra or [])]
     chain = d / "chain.jsonl"
@@ -320,11 +339,7 @@ def export_zip(pkg: dict, evidence_dir: Path, case_id: str, signer: Signer,
         entries.append(("chain.jsonl", chain_text.encode()))
     elif chain.exists():
         entries.append(("chain.jsonl", chain))
-    files_dir = (d / "files").resolve()
-    for f in pkg["files"]:
-        p = (files_dir / f["name"]).resolve()
-        if _SAFE_NAME.match(f["name"]) and p.parent == files_dir and p.is_file():
-            entries.append((f"files/{f['name']}", p))
+    entries += files
     entries.append(("README.txt", _README.format(fmt=FORMAT, key_id=signer.key_id).encode()))
 
     buf = io.BytesIO()
@@ -374,6 +389,13 @@ def verify_zip(data: bytes, signer: Signer) -> bool:
             listed[name] = digest
         if set(listed) != set(names) - {"SHA256SUMS", "package.sig"}:
             return False
-        return all(sha256_bytes(z.read(n)) == h for n, h in listed.items())
-    except (zipfile.BadZipFile, KeyError, ValueError):
+        if not all(sha256_bytes(z.read(n)) == h for n, h in listed.items()):
+            return False
+        # 담긴 증거 파일은 체인에 적힌 해시와도 같아야 한다
+        want: dict[str, str] = {}
+        if "chain.jsonl" in listed:
+            for line in z.read("chain.jsonl").decode().splitlines():
+                want.update(json.loads(line).get("files") or {})
+        return all(want.get(n.removeprefix("files/")) == sha256_bytes(z.read(n)) for n in listed if n.startswith("files/"))
+    except (zipfile.BadZipFile, KeyError, ValueError, TypeError, AttributeError):
         return False

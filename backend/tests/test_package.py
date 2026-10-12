@@ -337,6 +337,72 @@ def test_malformed_signed_records_do_not_break_exports(tmp_path, client, case_id
     assert "report.json" not in z.namelist() and "package.json" in z.namelist()
 
 
+def test_zip_uses_verified_file_bytes(client, case_id, monkeypatch):
+    """Codex 2회차 F1: 검증 뒤(보고서 PDF 를 만드는 사이) 증거 파일을 바꿔도, 바뀐 파일이 '검증 통과'·서명된 ZIP 에
+    들어가면 안 된다. 받은 쪽 확인(verify_zip)도 체인의 파일 해시와 대조해 잡아야 한다."""
+    from safetrace.api import main
+    from safetrace.config import get_settings
+
+    pkg = client.get(f"/api/cases/{case_id}/package", headers=h(VIEWER)).json()
+    shot = pkg["exploration"]["steps"][0]["observe"]["screenshot"]
+    path = get_settings().evidence_dir / case_id / "files" / shot
+    original = path.read_bytes()
+    real = main._report_pdf
+
+    def swap_after_pdf(rep):
+        out = real(rep)
+        path.write_bytes(b"swapped after verification")
+        return out
+
+    monkeypatch.setattr(main, "_report_pdf", swap_after_pdf)
+    try:
+        data = client.get(f"/api/cases/{case_id}/package.zip", headers=h(INVESTIGATOR)).content
+    finally:
+        path.write_bytes(original)
+    z = zipfile.ZipFile(io.BytesIO(data))
+    got = json.loads(z.read("package.json"))
+    exported = f"files/{shot}" in z.namelist() and z.read(f"files/{shot}") != original
+    assert not (exported and got["integrity"]["verified"])
+    assert not exported  # 검증한 해시와 다른 파일은 담지 않는다
+
+    # 받은 쪽 확인: SHA256SUMS·서명이 맞아도 체인의 파일 해시와 다르면 실패
+    from safetrace.api.main import _signer
+    from safetrace.evidence import Signer
+
+    s2 = Signer(secrets.token_bytes(32), "k1")
+    pkg2 = {"generated_at": "t", "case": {"id": case_id}, "files": []}
+    chain = '{"seq":0,"files":{"a.png":"' + hashlib.sha256(b"right").hexdigest() + '"}}\n'
+    bad = package.export_zip(pkg2, get_settings().evidence_dir, case_id, s2, [("files/a.png", b"wrong")], chain_text=chain)
+    assert not package.verify_zip(bad, s2)
+    assert package.verify_zip(client.get(f"/api/cases/{case_id}/package.zip", headers=h(INVESTIGATOR)).content, _signer())
+
+
+def test_out_of_range_probability_keeps_zip_exportable(tmp_path, client, case_id, monkeypatch):
+    """Codex 2회차 F2: 확률이 범위 밖(거대한 수·음수)이면 버리고 malformed 에 적는다. PDF 를 그리다 실패해도 ZIP 은 나간다."""
+    from safetrace.evidence import EvidenceWriter, Signer, verify_case
+
+    signer = Signer(secrets.token_bytes(32), "k1")
+    cid = "eeeeeeee-0000-0000-0000-000000000000"
+    w = EvidenceWriter(tmp_path / "ev", cid, signer)
+    w.append("decision", {"step": 0, "choice": "finish", "probability": -3})
+    w.append("threat", {"threat": "phishing", "probability": 10**400, "hold": False})
+    case = Case(id=cid, url="http://x/", source="test", status="COMPLETED", created_by="t", created_at=now())
+    pkg = package.build(case, package.read_chain(tmp_path / "ev", cid), verify_case(tmp_path / "ev", cid, signer, None),
+                        [], [], generated_by="t", key_id="k1")
+    assert "probability" not in pkg["assessment"]["threat"]
+    assert {"seq 0: decision.probability", "seq 1: threat.probability"} <= set(pkg["integrity"]["malformed"])
+    assert report.render_pdf(report.build(pkg, package.read_chain(tmp_path / "ev", cid)), tmp_path).startswith(b"%PDF")
+    assert report._pct(10**400) == "-"
+
+    def boom(rep):
+        raise OverflowError("render")
+
+    monkeypatch.setattr(report, "render_pdf", boom)
+    assert client.get(f"/api/cases/{case_id}/report.pdf", headers=h(INVESTIGATOR)).status_code == 422
+    r = client.get(f"/api/cases/{case_id}/package.zip", headers=h(INVESTIGATOR))
+    assert r.status_code == 200 and "report.pdf" not in zipfile.ZipFile(io.BytesIO(r.content)).namelist()
+
+
 def test_tampered_evidence_is_reported_not_hidden(client, case_id):
     """증거가 바뀌면 패키지는 만들되 검증 실패를 그대로 적는다(이 시험은 증거를 망가뜨리므로 마지막에 둔다)."""
     from safetrace.config import get_settings

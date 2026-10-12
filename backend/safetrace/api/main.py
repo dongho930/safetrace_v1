@@ -706,7 +706,7 @@ def _package(c: Case, who: str) -> dict:
 def _report_of(pkg: dict, records: list[dict]) -> dict:
     try:
         return report.build(pkg, records)
-    except (TypeError, ValueError, KeyError, AttributeError) as e:  # 자료형이 어긋난 기록(서명은 자료형을 보장하지 않음)
+    except (TypeError, ValueError, KeyError, AttributeError, OverflowError) as e:  # 자료형이 어긋난 기록(서명은 자료형을 보장하지 않음)
         log.warning("report build failed: %s", type(e).__name__)
         raise HTTPException(422, "이 사건의 기록으로는 보고서를 만들 수 없습니다(검토 패키지로 원본 확인)") from e
 
@@ -717,6 +717,9 @@ def _report_pdf(rep: dict) -> bytes:
     except report.FontMissing as e:
         log.error("report font missing")
         raise HTTPException(503, "보고서를 만들 수 없습니다(서버 설정)") from e
+    except (TypeError, ValueError, KeyError, AttributeError, OverflowError, report.LayoutError) as e:
+        log.warning("report render failed: %s", type(e).__name__)
+        raise HTTPException(422, "이 사건의 기록으로는 보고서를 만들 수 없습니다(검토 패키지로 원본 확인)") from e
 
 
 @app.get("/api/cases/{case_id}/package")
