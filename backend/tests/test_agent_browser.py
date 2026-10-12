@@ -445,6 +445,27 @@ def test_no_response_within_limit_is_unreachable(settings, testpages):
     assert next(r["data"] for r in chain if r["kind"] == "unreachable")["category"] == "timeout"
 
 
+def test_unresponsive_page_ends_within_time_budget(settings, testpages):
+    """공격 시나리오 AT-13: 화면이 뜬 뒤 while(true) 로 메인 스레드를 붙잡는 페이지. 관찰(evaluate)이 돌아오지 않아도
+    시간 예산 + 여유 안에 조사를 끝내고 워커를 놓아줘야 한다(전에는 사건이 '조사 중'에 멈추고 대기열이 막혔다)."""
+    import concurrent.futures
+    import time
+
+    from safetrace.agent import loop as agent_loop
+
+    settings.max_seconds = 12
+    t0 = time.monotonic()
+    ex = concurrent.futures.ThreadPoolExecutor(1)
+    fut = ex.submit(run, f"{BASE}/attack/cpu.html", settings, testpages)
+    try:
+        _, final, chain, _ = fut.result(timeout=settings.max_seconds + agent_loop._HARD_GRACE_S + 40)
+    finally:
+        ex.shutdown(wait=False)
+    assert time.monotonic() - t0 < settings.max_seconds + agent_loop._HARD_GRACE_S + 30
+    assert (final["status"], final["reason"]) == ("REVIEW_REQUIRED", "page_unresponsive"), final
+    assert any(r["kind"] == "page_unresponsive" for r in chain)
+
+
 def test_dialogs_dismissed(settings, testpages):
     _, final, chain, _ = run(f"{BASE}/attack/dialogs.html", settings, testpages)
     assert final["status"] in {"COMPLETED", "REVIEW_REQUIRED"}

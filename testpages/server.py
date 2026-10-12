@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import threading
 import time
 from functools import partial
@@ -18,7 +19,11 @@ ROOT = Path(__file__).parent
 FORBIDDEN_PATHS = ("/gamble/pay.html", "/gamble/done.html", "/phish/done.html", "/smish/pay.html", "/smish/done.html",
                    ".apk", ".bin")
 # 이미 사라진 피싱 도착지로 넘기는 단축 URL(.invalid 는 절대 조회되지 않는 도메인)
-REDIRECTS = {"/r/npay": "http://name.n-payost.invalid/login"}
+REDIRECTS = {"/r/npay": "http://name.n-payost.invalid/login",
+             # 같은 사이트 주소처럼 보이는 링크를 서버가 내부망으로 넘긴다(공격 시나리오 AT-07). 안전 게이트는 링크 주소만 보므로
+             # 네트워크 단(브라우저 요청 차단·검문 프록시)에서 막혀야 한다
+             "/attack/r/metadata": "http://169.254.169.254/latest/meta-data/",
+             "/attack/r/loopback": "http://127.0.0.1:8000/api/healthz"}
 # 느린 첫 화면(/slow/*). 시험은 첫 접속 제한을 이보다 짧게 둔다
 SLOW_SECONDS = 3.0
 SLOW_DOM_HEAD = ("<!doctype html><html lang='ko'><meta charset='utf-8'><title>느린 첫 화면</title>"
@@ -53,8 +58,17 @@ class Handler(SimpleHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        self.recorder.add("GET", self.path)
         path = self.path.split("?")[0]
+        if path == "/__hits":  # 공격 시나리오 도구(tools/attack_suite.py)가 금지 도달을 읽는 곳. ?clear=1 이면 비운다
+            body = json.dumps(self.recorder.forbidden_hits()).encode()
+            if "clear=1" in self.path:
+                self.recorder.clear()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.recorder.add("GET", self.path)
         if self.smish_delay and path.startswith("/smish/") and (path.endswith(".html") or path.endswith("/")):
             time.sleep(self.smish_delay)
         if path in REDIRECTS:  # 단축 URL 처럼 서버가 다른 곳으로 넘긴다

