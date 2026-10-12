@@ -6,6 +6,8 @@ RUN useradd --create-home --uid 10001 app
 ARG PIP_DEFAULT_TIMEOUT=60
 ARG PIP_RETRIES=8
 WORKDIR /app
+# 보고서 PDF 용 한국어 글꼴(나눔고딕, OFL)
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-nanum && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml ./
 COPY safetrace ./safetrace
 RUN pip install --no-cache-dir . && rm -rf /root/.cache

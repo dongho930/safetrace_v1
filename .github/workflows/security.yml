@@ -17,6 +17,7 @@ jobs:
         with: {python-version: "3.13"}
       - run: pip install -e ".[ocr,dev]"
       - run: python -m playwright install --with-deps chromium
+      - run: sudo apt-get install -y --no-install-recommends fonts-nanum  # 보고서 PDF 시험
       - name: tests (단위 + 브라우저 통합)
         run: pytest -q
       - name: bandit

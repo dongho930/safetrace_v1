@@ -145,15 +145,17 @@ class VerifyResult:
         return {"ok": self.ok, "records": self.records, "errors": self.errors}
 
 
-def verify_case(root: Path, case_id: str, signer: Signer, expected_head: Head | None) -> VerifyResult:
+def verify_case(root: Path, case_id: str, signer: Signer, expected_head: Head | None,
+                text: str | None = None) -> VerifyResult:
+    """text: 이미 읽은 체인 내용. 검증한 내용과 쓰는 내용이 같아야 할 때(패키지·보고서) 같은 스냅숏을 넘긴다."""
     d = root / case_id
     chain = d / "chain.jsonl"
     errors: list[str] = []
-    if not chain.exists():
+    if text is None and not chain.exists():
         return VerifyResult(False, 0, ["chain_missing"])
     prev = GENESIS
     seq = -1
-    lines = chain.read_text(encoding="utf-8").splitlines()
+    lines = (chain.read_text(encoding="utf-8") if text is None else text).splitlines()
     for i, line in enumerate(lines):
         try:
             rec = json.loads(line)

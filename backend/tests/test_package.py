@@ -9,7 +9,7 @@ import zipfile
 import pytest
 from fastapi.testclient import TestClient
 
-from safetrace import accounts, package
+from safetrace import accounts, package, report
 from safetrace.evidence import GENESIS, canonical
 from safetrace.store import Case, now
 from tests.conftest import INVESTIGATOR, VIEWER
@@ -115,8 +115,9 @@ def test_zip_can_be_verified_by_receiver(client, case_id):
     from safetrace.api.main import _signer
 
     sig = json.loads(z.read("package.sig"))
-    assert package.verify_sig(z.read("package.json"), sig, _signer())
-    assert not package.verify_sig(z.read("package.json").replace(b"phishing", b"benign!!"), sig, _signer())
+    assert package.verify_sig(z.read("package.json"), z.read("SHA256SUMS"), sig, _signer())
+    assert not package.verify_sig(z.read("package.json").replace(b"phishing", b"benign!!"), z.read("SHA256SUMS"), sig, _signer())
+    assert package.verify_zip(r.content, _signer())
 
 
 def test_package_permissions_and_state(client, case_id, testpages):
@@ -159,6 +160,249 @@ def test_unsafe_file_names_from_chain_are_not_exported(tmp_path):
     assert b"server secret" not in b"".join(z.read(n) for n in z.namelist() if n != "chain.jsonl")
 
 
+def _images(pdf: bytes) -> int:
+    return pdf.count(b"/Subtype /Image")
+
+
+def test_report_json_and_pdf(client, case_id):
+    """보고서 초안: 패키지에서 뽑은 요약(JSON)과 같은 내용의 PDF. 내보내기는 조사관 이상, 감사로그."""
+    r = client.get(f"/api/cases/{case_id}/report.json", headers=h(INVESTIGATOR))
+    assert r.status_code == 200 and f"safetrace-report-{case_id[:8]}-" in r.headers["content-disposition"]
+    rep = r.json()
+    pkg = client.get(f"/api/cases/{case_id}/package", headers=h(VIEWER)).json()
+    assert rep["format"] == report.FORMAT and rep["case"]["url"] == "http://127.0.0.1:8900/smish/"
+    inv = rep["investigation"]
+    assert inv["started_at"] and inv["finished_at"] and inv["duration_seconds"] > 0
+    assert inv["status"] == pkg["case"]["status"] and inv["final_url"] == pkg["exploration"]["final_url"]
+    click = next(s for s in inv["steps"] if s["action"] == "click")
+    assert click["element_text"]
+    assert rep["assessment"]["ai"]["threat"] == pkg["assessment"]["threat"]["threat"]
+    assert rep["assessment"]["safebrowsing"]["status"]
+    # 판정이 있으면 확정 여부에 따라 초안 표시
+    cur = pkg["review"]["current"]
+    assert rep["draft"] == (not cur or cur["decision"] == "hold")
+    # 주요 화면은 체인에 적힌 파일과 해시 그대로
+    files = {f["name"]: f["sha256"] for f in pkg["files"]}
+    assert rep["key_screens"] and all(files[x["file"]] == x["sha256"] for x in rep["key_screens"])
+    assert rep["integrity"]["verified"] is True and rep["integrity"]["head_hash"] == pkg["integrity"]["head_hash"]
+
+    r = client.get(f"/api/cases/{case_id}/report.pdf", headers=h(INVESTIGATOR))
+    assert r.status_code == 200 and r.headers["content-type"] == "application/pdf"
+    assert r.content.startswith(b"%PDF") and _images(r.content) == len(rep["key_screens"])
+
+    pkg = client.get(f"/api/cases/{case_id}/package", headers=h(VIEWER)).json()
+    assert [x["detail"] for x in pkg["review"]["audit"] if x["action"] == "report.export"][-2:] == ["json", "pdf"]
+    assert client.get(f"/api/cases/{case_id}/report.pdf", headers=h(VIEWER)).status_code == 403
+    assert client.get(f"/api/cases/{case_id}/report.html", headers=h(INVESTIGATOR)).status_code == 404
+
+    z = zipfile.ZipFile(io.BytesIO(client.get(f"/api/cases/{case_id}/package.zip", headers=h(INVESTIGATOR)).content))
+    sums = z.read("SHA256SUMS").decode()
+    assert "  report.json" in sums and "  report.pdf" in sums
+    assert json.loads(z.read("report.json"))["integrity"]["head_hash"] == rep["integrity"]["head_hash"]
+
+
+def test_report_pdf_does_not_interpret_page_markup(tmp_path):
+    """페이지 제목·버튼 글자는 공격자 값이다. reportlab 문단 마크업(<img src> 등)으로 해석되면 서버의 로컬 파일을
+    PDF 에 넣을 수 있다. 글자 그대로만 들어가야 한다."""
+    from PIL import Image
+
+    secret = tmp_path / "secret.png"
+    Image.new("RGB", (40, 40), "red").save(secret)
+    evil = f'<img src="{secret.as_posix()}" width="40" height="40"/><font color="red">x</font> &amp;'
+    rep = {
+        "format": report.FORMAT, "generated_at": "2026-10-12T00:00:00+00:00", "generated_by": evil, "draft": True,
+        "notice": report.NOTICE,
+        "case": {"id": "c" * 36, "url": evil, "source": evil, "received_at": "2026-10-12T00:00:00+00:00",
+                 "received_by": evil},
+        "investigation": {"started_at": None, "finished_at": None, "duration_seconds": None, "status": "COMPLETED",
+                          "status_ko": evil, "finish_reason": None, "finish_reason_ko": evil, "final_url": evil,
+                          "path": [evil], "browser": evil,
+                          "steps": [{"step": 0, "url": evil, "title": evil, "action": "click", "element_text": evil,
+                                     "outcome": None, "result_url": evil, "screenshot": None}],
+                          "steps_total": 1, "forbidden_elements": 0, "blocked_navigations": [],
+                          "blocked_navigations_total": 0, "unreachable": None},
+        "assessment": {"ai": {"threat": "phishing", "threat_ko": evil, "probability": 0.9, "hold": False,
+                              "override": evil, "provider": "x", "model": "x"},
+                       "error": False, "escalation": evil,
+                       "safebrowsing": {"status": "match", "status_ko": evil, "matches": [{"url": evil, "type": evil}]}},
+        "related": {"found": 1, "investigated": [{"sub": 1, "url": evil, "final_url": evil, "threat": "scam",
+                                                  "threat_ko": evil, "probability": 0.5, "hold": False,
+                                                  "reputation_match": False, "reputation_unchecked": True,
+                                                  "status": "COMPLETED", "error": False}]},
+        "verdict": {"rev": 1, "decision": "hold", "decision_ko": evil, "threat": None, "threat_ko": None,
+                    "note": evil + "<b> 닫히지 않은 태그", "reviewer": evil, "at": "2026-10-12T00:00:00+00:00"},
+        "key_screens": [],
+        "integrity": {"verified": True, "records": 1, "errors": 0, "head_seq": 0, "head_hash": evil, "key_id": evil,
+                      "method": evil},
+    }
+    pdf = report.render_pdf(rep, tmp_path)
+    assert pdf.startswith(b"%PDF") and _images(pdf) == 0
+
+
+def test_report_uses_verified_snapshot(client, case_id, monkeypatch):
+    """Codex F1: 검증한 체인과 보고서를 만든 체인이 같아야 한다. 에이전트가 증거 볼륨에 쓸 수 있으므로,
+    API 가 읽는 순간에만 바뀐 체인을 두었다가 검증 직전에 되돌려도 '검증 통과 + 바뀐 의견'이 나오면 안 된다."""
+    from safetrace.api import main
+    from safetrace.config import get_settings
+
+    chain = get_settings().evidence_dir / case_id / "chain.jsonl"
+    original = chain.read_text(encoding="utf-8")
+    lines = []
+    for line in original.splitlines():
+        rec = json.loads(line)
+        if rec["kind"] == "threat" and "sub" not in rec["data"]:
+            rec["data"]["threat"] = "benign"
+        lines.append(json.dumps(rec, ensure_ascii=False))
+    tampered = "\n".join(lines) + "\n"
+    real = main.verify_case
+
+    def swap_back(*a, **k):  # 검증하는 순간에는 원래 체인
+        chain.write_text(original, encoding="utf-8")
+        return real(*a, **k)
+
+    monkeypatch.setattr(main, "verify_case", swap_back)
+    try:
+        chain.write_text(tampered, encoding="utf-8")
+        rep = client.get(f"/api/cases/{case_id}/report.json", headers=h(INVESTIGATOR)).json()
+        assert not (rep["assessment"]["ai"]["threat"] == "benign" and rep["integrity"]["verified"])
+        chain.write_text(tampered, encoding="utf-8")
+        z = zipfile.ZipFile(io.BytesIO(client.get(f"/api/cases/{case_id}/package.zip", headers=h(INVESTIGATOR)).content))
+        pkg = json.loads(z.read("package.json"))
+        assert not (pkg["assessment"]["threat"]["threat"] == "benign" and pkg["integrity"]["verified"])
+    finally:
+        chain.write_text(original, encoding="utf-8")
+
+
+def test_zip_signature_covers_report(client, case_id):
+    """Codex F2: ZIP 의 보고서를 바꾸고 SHA256SUMS 를 다시 계산해도 서명 검증에서 드러나야 한다."""
+    from safetrace.api.main import _signer
+
+    data = client.get(f"/api/cases/{case_id}/package.zip", headers=h(INVESTIGATOR)).content
+    assert package.verify_zip(data, _signer())
+
+    src = zipfile.ZipFile(io.BytesIO(data))
+    for target in ("report.json", "report.pdf", "SHA256SUMS"):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as out:
+            items = {n: src.read(n) for n in src.namelist()}
+            if target == "report.json":
+                items[target] = items[target].replace(b'"draft": true', b'"draft": false').replace(b"phishing", b"benign")
+            elif target == "report.pdf":
+                items[target] = items[target] + b"%tampered"
+            else:
+                items[target] = items[target].replace(b"report.pdf", b"report.PDF")
+            if target != "SHA256SUMS":
+                items["SHA256SUMS"] = "".join(
+                    f"{hashlib.sha256(items[n]).hexdigest()}  {n}\n" for n in items if n != "SHA256SUMS").encode()
+            for n, b in items.items():
+                out.writestr(n, b)
+        assert not package.verify_zip(buf.getvalue(), _signer()), target
+
+
+def test_malformed_signed_records_do_not_break_exports(tmp_path, client, case_id, monkeypatch):
+    """Codex F3: 서명은 자료형을 보장하지 않는다. 침해된 에이전트가 이상한 자료형을 서명받아 넣어도
+    보고서는 500 없이 만들어지거나, 적어도 원본 증거 ZIP 내보내기는 막히지 않아야 한다."""
+    from safetrace.evidence import EvidenceWriter, Signer, verify_case
+
+    signer = Signer(secrets.token_bytes(32), "k1")
+    cid = "dddddddd-0000-0000-0000-000000000000"
+    w = EvidenceWriter(tmp_path / "ev", cid, signer)
+    w.append("start", {"url": ["x"]})
+    w.append("observe", {"step": 0, "url": {"a": 1}, "title": ["t"], "candidates": "x", "forbidden": 3})
+    w.append("decision", {"step": 0, "choice": ["click_e1"], "probability": "high"})
+    w.append("action", {"step": 0, "action": {"x": 1}, "element": [1], "result_url": 5})
+    w.append("finish", {"reason": "agent_finished", "nav_chain": "abc", "final_url": ["u"]})
+    w.append("threat", {"threat": ["benign"], "probability": "1", "hold": "no", "override": {"x": 1}})
+    w.append("safebrowsing", {"status": ["match"], "matches": "abc"})
+    w.append("candidates", {"found": 3})
+    w.append("candidate_results", {"results": [1, "x", {"sub": [1], "threat": ["scam"]}]})
+    case = Case(id=cid, url="http://x/", source="test", status="COMPLETED", created_by="t", created_at=now())
+    res = verify_case(tmp_path / "ev", cid, signer, None)
+    assert res.ok
+    pkg = package.build(case, package.read_chain(tmp_path / "ev", cid), res, [], [], generated_by="t", key_id="k1")
+    assert pkg["assessment"]["threat"].get("threat") is None and any("threat.threat" in m for m in pkg["integrity"]["malformed"])
+    rep = report.build(pkg, package.read_chain(tmp_path / "ev", cid) + [{"seq": 99, "ts": 1, "kind": "x", "data": []}])
+    json.dumps(rep)
+    assert report.render_pdf(rep, tmp_path / "ev").startswith(b"%PDF")
+
+    # 그래도 보고서를 만들지 못하는 경우: 보고서 요청은 오류로 알리고 ZIP 은 보고서 없이 나간다
+    def boom(*a, **k):
+        raise TypeError("bad record")
+
+    monkeypatch.setattr(report, "build", boom)
+    assert client.get(f"/api/cases/{case_id}/report.json", headers=h(INVESTIGATOR)).status_code == 422
+    r = client.get(f"/api/cases/{case_id}/package.zip", headers=h(INVESTIGATOR))
+    assert r.status_code == 200
+    z = zipfile.ZipFile(io.BytesIO(r.content))
+    assert "report.json" not in z.namelist() and "package.json" in z.namelist()
+
+
+def test_zip_uses_verified_file_bytes(client, case_id, monkeypatch):
+    """Codex 2회차 F1: 검증 뒤(보고서 PDF 를 만드는 사이) 증거 파일을 바꿔도, 바뀐 파일이 '검증 통과'·서명된 ZIP 에
+    들어가면 안 된다. 받은 쪽 확인(verify_zip)도 체인의 파일 해시와 대조해 잡아야 한다."""
+    from safetrace.api import main
+    from safetrace.config import get_settings
+
+    pkg = client.get(f"/api/cases/{case_id}/package", headers=h(VIEWER)).json()
+    shot = pkg["exploration"]["steps"][0]["observe"]["screenshot"]
+    path = get_settings().evidence_dir / case_id / "files" / shot
+    original = path.read_bytes()
+    real = main._report_pdf
+
+    def swap_after_pdf(rep):
+        out = real(rep)
+        path.write_bytes(b"swapped after verification")
+        return out
+
+    monkeypatch.setattr(main, "_report_pdf", swap_after_pdf)
+    try:
+        data = client.get(f"/api/cases/{case_id}/package.zip", headers=h(INVESTIGATOR)).content
+    finally:
+        path.write_bytes(original)
+    z = zipfile.ZipFile(io.BytesIO(data))
+    got = json.loads(z.read("package.json"))
+    exported = f"files/{shot}" in z.namelist() and z.read(f"files/{shot}") != original
+    assert not (exported and got["integrity"]["verified"])
+    assert not exported  # 검증한 해시와 다른 파일은 담지 않는다
+
+    # 받은 쪽 확인: SHA256SUMS·서명이 맞아도 체인의 파일 해시와 다르면 실패
+    from safetrace.api.main import _signer
+    from safetrace.evidence import Signer
+
+    s2 = Signer(secrets.token_bytes(32), "k1")
+    pkg2 = {"generated_at": "t", "case": {"id": case_id}, "files": []}
+    chain = '{"seq":0,"files":{"a.png":"' + hashlib.sha256(b"right").hexdigest() + '"}}\n'
+    bad = package.export_zip(pkg2, get_settings().evidence_dir, case_id, s2, [("files/a.png", b"wrong")], chain_text=chain)
+    assert not package.verify_zip(bad, s2)
+    assert package.verify_zip(client.get(f"/api/cases/{case_id}/package.zip", headers=h(INVESTIGATOR)).content, _signer())
+
+
+def test_out_of_range_probability_keeps_zip_exportable(tmp_path, client, case_id, monkeypatch):
+    """Codex 2회차 F2: 확률이 범위 밖(거대한 수·음수)이면 버리고 malformed 에 적는다. PDF 를 그리다 실패해도 ZIP 은 나간다."""
+    from safetrace.evidence import EvidenceWriter, Signer, verify_case
+
+    signer = Signer(secrets.token_bytes(32), "k1")
+    cid = "eeeeeeee-0000-0000-0000-000000000000"
+    w = EvidenceWriter(tmp_path / "ev", cid, signer)
+    w.append("decision", {"step": 0, "choice": "finish", "probability": -3})
+    w.append("threat", {"threat": "phishing", "probability": 10**400, "hold": False})
+    case = Case(id=cid, url="http://x/", source="test", status="COMPLETED", created_by="t", created_at=now())
+    pkg = package.build(case, package.read_chain(tmp_path / "ev", cid), verify_case(tmp_path / "ev", cid, signer, None),
+                        [], [], generated_by="t", key_id="k1")
+    assert "probability" not in pkg["assessment"]["threat"]
+    assert {"seq 0: decision.probability", "seq 1: threat.probability"} <= set(pkg["integrity"]["malformed"])
+    assert report.render_pdf(report.build(pkg, package.read_chain(tmp_path / "ev", cid)), tmp_path).startswith(b"%PDF")
+    assert report._pct(10**400) == "-"
+
+    def boom(rep):
+        raise OverflowError("render")
+
+    monkeypatch.setattr(report, "render_pdf", boom)
+    assert client.get(f"/api/cases/{case_id}/report.pdf", headers=h(INVESTIGATOR)).status_code == 422
+    r = client.get(f"/api/cases/{case_id}/package.zip", headers=h(INVESTIGATOR))
+    assert r.status_code == 200 and "report.pdf" not in zipfile.ZipFile(io.BytesIO(r.content)).namelist()
+
+
 def test_tampered_evidence_is_reported_not_hidden(client, case_id):
     """증거가 바뀌면 패키지는 만들되 검증 실패를 그대로 적는다(이 시험은 증거를 망가뜨리므로 마지막에 둔다)."""
     from safetrace.config import get_settings
@@ -169,3 +413,9 @@ def test_tampered_evidence_is_reported_not_hidden(client, case_id):
     pkg = client.get(f"/api/cases/{case_id}/package", headers=h(VIEWER)).json()
     assert pkg["integrity"]["verified"] is False
     assert any("file_modified" in e for e in pkg["integrity"]["errors"])
+    # 보고서도 검증 실패를 적고, 해시가 맞지 않는 화면은 PDF 에 넣지 않는다
+    rep = client.get(f"/api/cases/{case_id}/report.json", headers=h(INVESTIGATOR)).json()
+    assert rep["integrity"]["verified"] is False and rep["integrity"]["errors"] >= 1
+    assert shot in [x["file"] for x in rep["key_screens"]]
+    pdf = client.get(f"/api/cases/{case_id}/report.pdf", headers=h(INVESTIGATOR)).content
+    assert _images(pdf) == len(rep["key_screens"]) - 1
