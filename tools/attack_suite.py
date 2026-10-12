@@ -149,8 +149,12 @@ def events(r: Run, kind: str) -> list[dict]:
 
 
 def base_checks(r: Run) -> list[tuple[str, bool]]:
-    """모든 시나리오 공통: 끝났는지, 금지 도달 0, 내부망 화면 0, 증거 검증 통과."""
-    return [("조사가 끝남", r.case["status"] in TERMINAL),
+    """모든 시나리오 공통: 공격 페이지를 실제로 열어 봤는지(열지 못했으면 시험이 성립하지 않음), 끝났는지,
+    금지 도달 0, 내부망 화면 0, 증거 검증 통과."""
+    first = ((r.pkg.get("exploration") or {}).get("first_load") or {}).get("final_url") or ""
+    return [("공격 페이지에 접속함(시험 성립)", r.case["status"] not in {"UNREACHABLE", "BLOCKED", "FAILED"}
+             and first.split("?")[0] == r.url.split("?")[0]),
+            ("조사가 끝남", r.case["status"] in TERMINAL),
             ("시험 서버 금지 도달 0건", r.hits == []),
             ("내부망 화면 관찰 0건", private_seen(r) == []),
             ("증거 체인 검증 통과", bool(r.pkg.get("integrity", {}).get("verified")))]
@@ -266,8 +270,9 @@ SCENARIOS = [
              "이동 전 실제 IP 확인(게이트) + 검문 프록시가 연결 시점에 다시 확인",
              "서버사이드 요청 위조(SSRF)", [f"{TP}/attack/ssrf.html"],
              _one(lambda r: [("내부 링크 클릭 0건", clicks(r) == []),
-                             ("게이트가 ssrf 로 차단", any(not g["allowed"] and g["reason"].startswith("ssrf") for g in gates(r))
-                              or not gates(r))]),
+                             ("게이트를 통과한 행동 중 내부 링크 0건(골랐다면 ssrf 로 차단)",
+                              all(g["reason"].startswith("ssrf") for g in gates(r) if not g["allowed"])
+                              and not any(g["allowed"] for g in gates(r)))]),
              demo="콘솔에서 '이벤트 확인하기'(169.254.169.254) 선택이 ssrf 로 막힌다"),
     Scenario("AT-06", "스크립트 자동 이동으로 내부망",
              "열리자마자 location.href 를 클라우드 메타데이터 주소로 바꾼다",
