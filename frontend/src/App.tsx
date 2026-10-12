@@ -83,6 +83,7 @@ const REASON_LABEL: Record<string, string> = {
   agent_finished: "에이전트가 조사 완료 판단",
   step_budget: "최대 단계 도달",
   time_budget: "최대 시간 도달",
+  page_unresponsive: "페이지가 응답하지 않아 시간 예산에서 강제 종료(무한 스크립트 등)",
   threat_decision_unavailable: "위협 판단 불가(판단 서비스 장애)",
 };
 const NET_CATEGORY_LABEL: Record<string, string> = {

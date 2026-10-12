@@ -47,6 +47,7 @@ REASON_KO = {
     "agent_finished": "에이전트가 조사 완료 판단",
     "step_budget": "최대 단계 도달",
     "time_budget": "최대 시간 도달",
+    "page_unresponsive": "페이지가 응답하지 않아 시간 예산에서 강제 종료",
     "threat_decision_unavailable": "위협 판단 불가(판단 서비스 장애)",
 }
 SB_KO = {"match": "위험 목록 일치", "no_match": "일치 없음", "error": "조회 실패", "disabled": "조회 안 함(키 없음)",

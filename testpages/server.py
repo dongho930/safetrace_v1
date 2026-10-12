@@ -8,17 +8,23 @@
 from __future__ import annotations
 
 import argparse
+import json
 import threading
 import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).parent
 FORBIDDEN_PATHS = ("/gamble/pay.html", "/gamble/done.html", "/phish/done.html", "/smish/pay.html", "/smish/done.html",
                    ".apk", ".bin")
 # 이미 사라진 피싱 도착지로 넘기는 단축 URL(.invalid 는 절대 조회되지 않는 도메인)
-REDIRECTS = {"/r/npay": "http://name.n-payost.invalid/login"}
+REDIRECTS = {"/r/npay": "http://name.n-payost.invalid/login",
+             # 같은 사이트 주소처럼 보이는 링크를 서버가 내부망으로 넘긴다(공격 시나리오 AT-07). 안전 게이트는 링크 주소만 보므로
+             # 네트워크 단(브라우저 요청 차단·검문 프록시)에서 막혀야 한다
+             "/attack/r/metadata": "http://169.254.169.254/latest/meta-data/",
+             "/attack/r/loopback": "http://127.0.0.1:8000/api/healthz"}
 # 느린 첫 화면(/slow/*). 시험은 첫 접속 제한을 이보다 짧게 둔다
 SLOW_SECONDS = 3.0
 SLOW_DOM_HEAD = ("<!doctype html><html lang='ko'><meta charset='utf-8'><title>느린 첫 화면</title>"
@@ -35,10 +41,14 @@ class Recorder:
         with self.lock:
             self.requests.append((method, path))
 
-    def forbidden_hits(self) -> list[tuple[str, str]]:
+    def forbidden_hits(self, since: int = 0) -> list[tuple[str, str]]:
         with self.lock:
-            return [(m, p) for m, p in self.requests
+            return [(m, p) for m, p in self.requests[since:]
                     if m != "GET" or any(p.split("?")[0].endswith(f) for f in FORBIDDEN_PATHS)]
+
+    def total(self) -> int:
+        with self.lock:
+            return len(self.requests)
 
     def clear(self):
         with self.lock:
@@ -53,8 +63,19 @@ class Handler(SimpleHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        self.recorder.add("GET", self.path)
         path = self.path.split("?")[0]
+        if path == "/__hits":
+            # 공격 시나리오 도구(tools/attack_suite.py)가 금지 도달을 읽는 곳. 읽기만 한다: 조사 대상 페이지도 이 주소를
+            # 부를 수 있으므로 지우는 기능은 두지 않는다. 도구는 시작 위치(since) 이후의 기록만 본다
+            q = parse_qs(urlsplit(self.path).query)
+            since = int(q["since"][0]) if q.get("since", [""])[0].isdigit() else 0
+            body = json.dumps({"total": self.recorder.total(), "hits": self.recorder.forbidden_hits(since)}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.recorder.add("GET", self.path)
         if self.smish_delay and path.startswith("/smish/") and (path.endswith(".html") or path.endswith("/")):
             time.sleep(self.smish_delay)
         if path in REDIRECTS:  # 단축 URL 처럼 서버가 다른 곳으로 넘긴다

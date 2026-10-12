@@ -93,6 +93,10 @@ _ALLOWED_METHODS = {"GET", "HEAD"}
 _SCROLL_TO_JS = "(y) => new Promise((r) => { window.scrollTo(0, y); requestAnimationFrame(() => requestAnimationFrame(r)); })"
 _OCR_SHOT_TIMEOUT_MS = 3000  # 이미지 버튼 한 개를 찍는 최대 시간
 _PW_DEFAULT_TIMEOUT_MS = 30000  # Playwright 기본 제한(이 모듈은 따로 바꾸지 않는다)
+# 시간 예산은 단계 사이에서 확인한다. 페이지 스크립트가 메인 스레드를 붙잡으면 evaluate 등이 돌아오지 않아 그 확인에
+# 닿지 못하므로, 탐색 전체에 예산 + 여유의 강제 기한을 둔다. 정리(녹화 중지·브라우저 닫기)에도 제한을 둔다
+_HARD_GRACE_S = 15.0
+_CLEANUP_TIMEOUT_S = 10.0
 
 
 def _is_main_frame(req) -> bool:
@@ -146,6 +150,15 @@ class _Observation:
     forbidden: list[str]
     evidence_seq: int
     state_key: str
+
+
+async def _bounded(aw, what: str):
+    """정리 작업이 응답 없는 페이지에 묶이지 않게 제한 시간을 둔다. 실패해도 조사 결과는 그대로 둔다."""
+    try:
+        return await asyncio.wait_for(aw, _CLEANUP_TIMEOUT_S)
+    except Exception as e:  # noqa: BLE001  정리 실패는 기록만
+        log.warning("%s failed: %s", what, type(e).__name__)
+        return None
 
 
 class AgentRun:
@@ -645,16 +658,21 @@ class AgentRun:
                     log.warning("recorder unavailable: %s", type(e).__name__)
                     self.rec = None
             try:
-                await self._main_loop(ctx, page)
+                await asyncio.wait_for(self._main_loop(ctx, page), max(self.budget.remaining(), 1.0) + _HARD_GRACE_S)
+            except TimeoutError:  # 페이지가 응답하지 않아 예산 확인에 닿지 못함(무한 스크립트 등): 강제로 끝내고 담당자 검토
+                log.warning("page unresponsive, hard deadline reached")
+                self._record("page_unresponsive", {"seconds": round(time.monotonic() - self.budget.started, 1),
+                                                   "limit": self.s.max_seconds + _HARD_GRACE_S})
+                self.result.status, self.result.finish_reason = "REVIEW_REQUIRED", "page_unresponsive"
             except Exception as e:  # 실패는 삼키지 않고 기록 후 보류 처리
                 log.exception("agent failed")
                 self._record("error", {"error": type(e).__name__})
                 self.result.status, self.result.finish_reason = "FAILED", f"error:{type(e).__name__}"
             finally:
                 if self.rec:
-                    rec_info = await self.rec.stop()
-                await ctx.close()
-                await browser.close()
+                    rec_info = await _bounded(self.rec.stop(), "recorder.stop")
+                await _bounded(ctx.close(), "context.close")
+                await _bounded(browser.close(), "browser.close")
         if self.rec:
             self._save_recording(self.ev.dir / f"{self._tag}recording.tmp.webm", rec_info)
         else:
