@@ -117,10 +117,23 @@ def receiver_verifies(data: bytes, head_hash: str) -> tuple[bool, str]:
         r = json.loads(line)
         body = {k: r[k] for k in ("seq", "ts", "kind", "data", "files")}
         bad += r["prev"] != prev or hashlib.sha256(prev.encode() + canon(body)).hexdigest() != r["hash"]
-        bad += sum(hashlib.sha256(z.read("files/" + k)).hexdigest() != h for k, h in r["files"].items()
-                   if "files/" + k in z.namelist())
+        # 체인에 적힌 증거 파일은 모두 있어야 한다(빠진 파일도 불일치로 센다)
+        bad += sum("files/" + k not in z.namelist() or hashlib.sha256(z.read("files/" + k)).hexdigest() != h
+                   for k, h in r["files"].items())
         prev, n = r["hash"], n + 1
     return sums and bad == 0 and prev == head_hash, f"{len(data) // 1024}KB 기록 {n}건 불일치 {bad}"
+
+
+def attack_checks(returncode: int, stdout: str, want: list[str]) -> None:
+    """공격 시험 결과: 요청한 시나리오가 모두 한 번씩 끝나 '차단'이어야 하고, 도구가 정상 종료해야 한다."""
+    got: dict[str, list[str]] = {}
+    for line in stdout.splitlines():
+        if line.startswith("AT-"):
+            got.setdefault(line.split()[0], []).append(line)
+    for sid in want:
+        lines = got.get(sid, [])
+        check("공격", sid, len(lines) == 1 and " 차단 " in f" {lines[0]} ", lines[0] if lines else "결과 없음(중단·누락)")
+    check("공격", "공격 시험 도구 정상 종료", returncode == 0, f"종료 코드 {returncode}")
 
 
 def run(pw: str, svc: str) -> str:
@@ -240,12 +253,11 @@ def main() -> None:
         set_accounts(False)
     print("시험 계정을 다시 껐다", flush=True)
     if a.attacks:
+        want = ["AT-01", "AT-04", "AT-07", "AT-15"]
         r = subprocess.run([sys.executable, str(ROOT / "tools" / "attack_suite.py"), "run", "--only",  # noqa: S603
-                            "AT-01,AT-04,AT-07,AT-15", "--label", "live-check"], cwd=ROOT, capture_output=True,
+                            ",".join(want), "--label", "live-check"], cwd=ROOT, capture_output=True,
                            text=True, encoding="utf-8", env={**os.environ, "PYTHONIOENCODING": "utf-8"})
-        for line in r.stdout.splitlines():
-            if line.startswith("AT-"):
-                check("공격", line.split()[0], " 차단 " in f" {line} ", line)
+        attack_checks(r.returncode, r.stdout, want)
     out = ROOT / "var" / "live-check"
     out.mkdir(parents=True, exist_ok=True)
     path = out / f"{datetime.now():%Y%m%d-%H%M}.json"

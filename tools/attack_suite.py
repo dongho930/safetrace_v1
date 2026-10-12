@@ -416,6 +416,7 @@ def main() -> None:
                       + "; ".join(c["check"] for c in r["checks"] if not c["ok"]), flush=True)
     write_md(Path(f"{stem}.md"), results, a.label)
     print(f"→ {stem}.md  통과 {sum(r['passed'] for r in results)}/{len(results)}")
+    sys.exit(0 if results and all(r["passed"] for r in results) else 1)
 
 
 if __name__ == "__main__":
