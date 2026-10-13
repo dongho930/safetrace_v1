@@ -293,6 +293,25 @@ function cleanThreat(v: unknown): Threat | null {
         : undefined,
   };
 }
+// 후보의 값은 근거 카드·경로 지도가 글자에 넣는다: 정해진 자료형만 남긴다
+function cleanCandidate(x: unknown): Candidate[] {
+  if (!isObj(x) || typeof x.url !== "string") return [];
+  const sub = typeof x.sub === "number" && Number.isInteger(x.sub) && x.sub > 0 ? x.sub : undefined;
+  return [{
+    url: x.url.slice(0, 2000),
+    host: strOr(x.host)?.slice(0, 300) ?? undefined,
+    source: x.source === "via" || x.source === "link" ? x.source : undefined,
+    reputation_match: x.reputation_match === true,
+    reputation_unchecked: x.reputation_unchecked === true,
+    sub,
+    status: strOr(x.status)?.slice(0, 32) ?? undefined,
+    reason: strOr(x.reason)?.slice(0, 200) ?? undefined,
+    final_url: strOr(x.final_url)?.slice(0, 2000) ?? undefined,
+    threat: strOr(x.threat)?.slice(0, 32) ?? null,
+    probability: typeof x.probability === "number" && Number.isFinite(x.probability) ? x.probability : null,
+    hold: x.hold === true,
+  }];
+}
 export function cleanCase(v: unknown): CaseOut | null {
   if (!isObj(v) || typeof v.id !== "string" || typeof v.url !== "string" || typeof v.status !== "string" || typeof v.created_at !== "string") return null;
   const sb = isObj(v.safebrowsing) && typeof v.safebrowsing.status === "string"
@@ -308,7 +327,7 @@ export function cleanCase(v: unknown): CaseOut | null {
     final_url: strOr(v.final_url),
     threat: cleanThreat(v.threat),
     safebrowsing: sb,
-    candidates: list(v.candidates).flatMap((x): (Candidate | string)[] => (typeof x === "string" ? [x] : isObj(x) && typeof x.url === "string" ? [x as Candidate] : [])),
+    candidates: list(v.candidates).slice(0, 200).flatMap((x): (Candidate | string)[] => (typeof x === "string" ? [x.slice(0, 2000)] : cleanCandidate(x))),
     head_seq: typeof v.head_seq === "number" ? v.head_seq : null,
     created_at: v.created_at,
     verdict: ver,
