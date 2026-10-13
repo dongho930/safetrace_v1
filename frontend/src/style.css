@@ -131,12 +131,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .folder-n { font-size: 12px; color: var(--muted); }
 .folder-note { margin-top: auto; padding: 12px 10px 0; border-top: 1px solid var(--line-soft); font-size: 12px; color: var(--muted); line-height: 1.7; }
 
-/* 목록 칸 */
-.caselist { flex: 0 0 340px; min-width: 0; min-height: 0; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+/* 목록 칸: 상세와 반씩 나눈다(1920 기준 860·860). 340 밑으로는 줄지 않는다 */
+.caselist { flex: 1 1 0; min-width: 340px; min-height: 0; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
 .caselist-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 14px 16px 10px; border-bottom: 1px solid var(--line-soft); }
 .caselist-head h2 { font-size: 15px; font-weight: 700; }
 .search { width: 130px; font-size: 12px; padding: 6px 10px; }
-.rows { list-style: none; margin: 0; padding: 0; flex: 1; min-height: 0; }
+.rows { list-style: none; margin: 0; padding: 0; flex: 1; min-height: 240px; }  /* 실시간 화면이 커도 목록 4줄은 남긴다 */
 .rows li { border-bottom: 1px solid var(--line-soft); }
 .row {
   width: 100%; text-align: left; background: var(--surface); border: 0; color: var(--ink); padding: 10px 16px;
@@ -154,7 +154,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .rows-empty { padding: 16px; color: var(--muted); font-size: 13px; }
 
 /* 사건 상세 */
-.detail { flex: 1 1 600px; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.detail { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .detail-body { padding: 16px 24px 16px; display: flex; flex-direction: column; gap: 14px; flex: 1 0 auto; }
 .statusline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; font-size: 13px; }
 .statusline .chip { font-size: 12px; }
@@ -190,7 +190,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .live-canvas { display: block; width: min(100%, 160cqh); height: auto; }
 .live-fps { margin-left: auto; color: var(--header-ink); }
 .more-hint { position: sticky; bottom: 0; height: 48px; margin-top: -48px; background: linear-gradient(to bottom, transparent, var(--screen-bg)); pointer-events: none; }
-.open-orig { position: absolute; right: 12px; bottom: 12px; opacity: 0.9; }
+.open-orig { position: absolute; right: 12px; bottom: 12px; z-index: 3; opacity: 0.9; }  /* 화면이 좁아 사진·표시와 겹쳐도 가려지지 않게 */
 .open-orig:hover { opacity: 1; }
 @media (prefers-reduced-motion: reduce) { .frame-img.enter { animation: none; } * { transition: none !important; } }
 
@@ -339,23 +339,23 @@ button.reason:hover { border-color: var(--line-strong); }
   .app { height: auto !important; overflow: visible; }
   .workspace { flex-direction: column; }
   .folders, .caselist { flex: none; border-right: 0; border-bottom: 1px solid var(--line); }
-  .caselist .rows { max-height: 420px; }
+  .caselist .rows { max-height: 420px; min-height: 0; }
   .detail { flex: none; }
   .user-new { grid-template-columns: 1fr; }
 }
 
-/* 실시간 화면(목록 칸 맨 위) */
-.monitor { flex: none; margin: 14px 14px 12px; border: 1px solid var(--line); border-radius: var(--r-panel); overflow: hidden; background: var(--surface); box-shadow: var(--e3); }
-.monitor-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; font-size: 12px; background: var(--surface-2); border-bottom: 1px solid var(--line-soft); }
+/* 실시간 화면(목록 칸 맨 위): 녹화와 같은 16:10. 창 높이가 모자라면 목록 대신 화면 높이가 줄어든다(영상은 비율 유지) */
+.monitor { flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; margin: 14px 14px 12px; border: 1px solid var(--line); border-radius: var(--r-panel); overflow: hidden; background: var(--surface); box-shadow: var(--e3); }
+.monitor-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 10px; font-size: 12px; background: var(--surface-2); border-bottom: 1px solid var(--line-soft); }
 .monitor-live { display: inline-flex; align-items: center; gap: 5px; font-weight: 700; color: var(--threat); }
 .monitor-live .dot { color: var(--live); }
 .monitor-title { font-size: 12px; font-weight: 700; }
 .monitor-host { flex: 1; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.monitor-screen { position: relative; height: 200px; flex: none; background: var(--screen-bg); box-shadow: var(--inset-screen); }
+.monitor-screen { position: relative; flex: 0 1 auto; aspect-ratio: 16 / 10; min-height: 180px; background: var(--screen-bg); box-shadow: var(--inset-screen); }
 .monitor-empty { display: grid; place-items: center; color: var(--header-muted); font-size: 13px; }
 .monitor-meta { position: absolute; right: 8px; bottom: 6px; z-index: 2; font-size: 11px; color: var(--header-muted); }
 .monitor .open-orig { display: none; }
-.monitor-foot { display: flex; gap: 6px; align-items: baseline; padding: 8px 10px; font-size: 12px; min-height: 34px; }
+.monitor-foot { flex: none; display: flex; gap: 6px; align-items: baseline; padding: 8px 10px; font-size: 12px; min-height: 34px; }
 .monitor-jev { color: var(--primary); font-weight: 700; flex: none; }
 .monitor-act { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .monitor-prob { font-weight: 600; }
