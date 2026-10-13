@@ -172,10 +172,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .progress span.on { background: var(--primary); }
 .progress span.now { background: var(--primary); box-shadow: 0 0 0 2px var(--primary-tint); }
 .stage { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; min-height: 0; background: var(--sunken); box-shadow: var(--inset-floor); }
-.stage-tabs { display: flex; gap: 6px; }
 .screen { flex: 1; min-height: 0; border-radius: var(--r-panel); overflow: hidden; display: flex; flex-direction: column; background: var(--screen-bg); box-shadow: var(--inset-screen); }
 .screen-bar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; font-size: 11px; color: var(--header-muted); background: #141A26; }
 .screen-bar .rec { color: var(--live); display: inline-flex; align-items: center; gap: 6px; font-weight: 700; }
+/* 조사 중 상세: 관찰 화면 제목 · 안내 · 환경(좁으면 안내부터 줄인다) */
+.obs-title { flex: none; color: var(--header-ink); font-weight: 700; }
+.obs-note { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.obs-env { flex: none; white-space: nowrap; }
 /* 조사 화면: 폭에 맞추되 창 한 화면(1280×800 = 1.6:1)이 칸 높이에 들어가게, 더 긴 페이지 전체 캡처는 세로 스크롤 */
 .screen-body { flex: 1; min-height: 120px; position: relative; display: grid; place-items: center; background: var(--screen-bg); container-type: size; color: var(--header-muted); }
 .screen-body video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
@@ -188,7 +191,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .live-wrap { position: absolute; inset: 0; display: grid; place-items: start center; }
 .live-wrap.hidden { visibility: hidden; }
 .live-canvas { display: block; width: min(100%, 160cqh); height: auto; }
-.live-fps { margin-left: auto; color: var(--header-ink); }
 .more-hint { position: sticky; bottom: 0; height: 48px; margin-top: -48px; background: linear-gradient(to bottom, transparent, var(--screen-bg)); pointer-events: none; }
 .open-orig { position: absolute; right: 12px; bottom: 12px; opacity: 0.9; }
 .open-orig:hover { opacity: 1; }

@@ -676,8 +676,8 @@ function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) 
         <span className="monitor-host" title={c.url}>
           {clip(hostPath(c.url), 40)}
         </span>
-        <button type="button" className="btn btn-ghost btn-sm" aria-label="실시간 화면 크게 보기" onClick={() => onOpen(c.id)}>
-          크게 보기
+        <button type="button" className="btn btn-ghost btn-sm" aria-label="조사 중인 사건 상세 보기" onClick={() => onOpen(c.id)}>
+          상세 보기
         </button>
       </div>
       <div className="monitor-screen screen-body">
@@ -949,17 +949,21 @@ function Investigation({
   const steps = events.filter((e) => e.kind === "observe").length;
   // 통계·광고 전송 차단(페이지 이동이 아닌 blocked_request): 체인에는 남기되 위협 증거 수로 읽히지 않게 따로 센다
   const blockedSends = events.filter((e) => e.kind === "blocked_request" && !e.data.navigation).length;
-  // 실시간 화면에는 관찰·마지막 화면(페이지 전체)만 보여 준다. 클릭 직전·직후 화면은 행동 기록에 남아 있다
-  const lastShot = [...events].reverse().find((e) => (e.kind === "observe" || e.kind === "finish") && e.files.some((f) => f.endsWith(".png")));
-  const shot = lastShot?.files.find((f) => f.endsWith(".png"));
-  const recording = events.find((e) => e.kind === "recording")?.files[0];
+  // 움직이는 화면은 목록 칸의 실시간 화면이 보여 준다. 여기서는 가장 최근 관찰 화면(페이지 전체)에 Jev 가 본 것을 겹친다:
+  // 금지 요소(빨간 점선) → Jev 가 고른 버튼(파랑) → 안전 게이트가 막은 클릭(빨간 실선). 선택·게이트 기록이 오면 바로 덧그린다
+  const obs = [...events].reverse().find((e) => e.kind === "observe" && e.files.some((f) => f.endsWith(".png")));
+  const shot = obs?.files.find((f) => f.endsWith(".png"));
+  const overlay = obs ? buildOverlay(events, obs.seq) : null;
+  const nForbidden = overlay?.marks.filter((m) => m.kind === "forbidden").length ?? 0;
+  const act = overlay?.marks.find((m) => m.kind !== "forbidden");
+  const dec = obs ? events.find((e) => e.kind === "decision" && e.data.observe_seq === obs.seq) : undefined;
+  const choice = dec ? text(dec.data.choice) : "";
+  // 표시할 상자가 없는 선택(스크롤·팝업 닫기·뒤로, 상자를 못 잰 클릭)은 글자로만
+  const decText = !dec ? "Jev 가 고르는 중…" : `Jev 선택 · ${choice.startsWith("click_") ? "버튼 클릭(화면 위치 없음)" : (ACTION_LABEL[choice] ?? choice)}`;
+  const [marksOn, setMarksOn] = useState(true);
   const browser = events.find((e) => e.kind === "browser")?.data as { version?: string } | undefined;
   const lastUrl = [...events].reverse().find((e) => e.kind === "observe")?.data.url as string | undefined;
-  const [view, setView] = useState<"shot" | "video">("shot");
-  // 조사 중에는 라이브 영상(최대 30fps)을 먼저 시도하고, 끝나거나 안 되면 증거 스크린샷으로
-  const [liveState, setLiveState] = useState<"trying" | "off">("trying");
-  const [liveFps, setLiveFps] = useState(0);
-  const showLive = running && liveState === "trying";
+  const sub = obs && typeof obs.data.sub === "number" ? obs.data.sub : 0; // 연관 후보 하위 조사 번호
   const total = Math.max(MAX_STEPS, steps);
 
   return (
@@ -989,38 +993,31 @@ function Investigation({
       </div>
 
       <div className="stage">
-        {recording && !running && (
-          <div className="stage-tabs" role="group" aria-label="화면 전환">
-            <button type="button" className="chip chip-filter" aria-pressed={view === "shot"} onClick={() => setView("shot")}>
-              마지막 화면
-            </button>
-            <button type="button" className="chip chip-filter" aria-pressed={view === "video"} onClick={() => setView("video")}>
-              조사 녹화
-            </button>
-          </div>
-        )}
         <div className="screen">
           <div className="screen-bar">
-            {running && (
-              <span className="rec">
-                <span className="dot" />
-                REC
-              </span>
-            )}
-            {showLive && liveFps > 0 && <span className="live-fps">LIVE · {liveFps}fps</span>}
-            <span>격리 브라우저{browser?.version ? ` · Chromium ${browser.version.split(".")[0]}` : ""} · 검문 프록시 경유</span>
+            <span className="obs-title">
+              관찰 화면{sub ? ` · 연관 후보 ${sub}` : ""}
+              {obs && typeof obs.data.step === "number" ? ` · ${obs.data.step}단계` : ""}
+            </span>
+            <span className="obs-note">Jev 가 본 화면 · 움직이는 화면은 왼쪽 실시간 화면</span>
+            <span className="obs-env">격리 브라우저{browser?.version ? ` · Chromium ${browser.version.split(".")[0]}` : ""} · 검문 프록시 경유</span>
           </div>
           <div className="screen-body">
-            {showLive ? (
-              <LiveVideo caseId={id} onFps={setLiveFps} onEnd={() => setLiveState("off")} fallback={shot ? <LiveScreen caseId={id} name={shot} /> : null} />
-            ) : view === "video" && recording ? (
-              <Recording caseId={id} name={recording} />
-            ) : shot ? (
-              <LiveScreen caseId={id} name={shot} />
+            {shot ? (
+              <LiveScreen caseId={id} name={shot} overlay={marksOn ? overlay : null} />
             ) : (
-              <span className="muted small">{running ? "첫 화면을 기다리는 중…" : "화면 기록 없음"}</span>
+              <span className="muted small">첫 관찰을 기다리는 중…</span>
             )}
           </div>
+        </div>
+        <div className="mark-legend" aria-live="polite">
+          {nForbidden > 0 && <span className="lg lg-forbidden">금지 요소 {nForbidden}</span>}
+          {act ? <span className={`lg lg-${act.kind}`}>{act.label}</span> : shot && <span className="muted">{decText}</span>}
+          {overlay && (
+            <button type="button" className="btn btn-ghost btn-sm" aria-pressed={marksOn} onClick={() => setMarksOn(!marksOn)}>
+              {marksOn ? "화면 표시 끄기" : "화면 표시 켜기"}
+            </button>
+          )}
         </div>
       </div>
 
@@ -1917,6 +1914,10 @@ function LiveScreen({ caseId, name, strict = false, overlay = null }: { caseId: 
   const curRef = useRef<Frame | null>(null);
   const prevRef = useRef<Frame | null>(null);
   const box = useRef<HTMLDivElement>(null);
+  const frame = useRef<HTMLDivElement>(null);
+  // 표시는 지금 떠 있는 사진이 요청한 그 파일일 때만(새 화면을 받는 동안 이전 사진 위에 새 상자를 그리지 않게)
+  const marks = overlay && cur && cur.name === name && sameRatio(overlay, cur) ? overlay : null;
+  const focus = marks?.marks.find((m) => m.kind !== "forbidden");
 
   const measure = useCallback(() => {
     const el = box.current;
@@ -1952,6 +1953,20 @@ function LiveScreen({ caseId, name, strict = false, overlay = null }: { caseId: 
       alive = false;
     };
   }, [caseId, name]);
+
+  // 고른 버튼(또는 막은 클릭)이 보이는 범위 밖이면 그 위치로 스크롤한다(긴 페이지 아래쪽의 버튼).
+  // 화면이나 상자 위치가 바뀔 때만 움직인다(담당자가 직접 스크롤한 것을 되돌리지 않게)
+  useEffect(() => {
+    const el = box.current;
+    const fr = frame.current;
+    if (!el || !fr || !focus || !marks) return;
+    const k = fr.clientWidth / marks.w;
+    const top = focus.y * k;
+    const bottom = (focus.y + focus.h) * k;
+    if (top < el.scrollTop || bottom > el.scrollTop + el.clientHeight) {
+      el.scrollTo({ top: Math.max(0, top - el.clientHeight / 3), behavior: "smooth" });
+    }
+  }, [cur?.name, focus?.x, focus?.y, focus?.h]);
 
   // 교차 페이드가 끝나면 이전 화면을 치운다
   useEffect(() => {
@@ -1993,10 +2008,10 @@ function LiveScreen({ caseId, name, strict = false, overlay = null }: { caseId: 
     <>
       <div ref={box} className="screen-scroll" tabIndex={0} aria-label="조사 화면 (길면 세로 스크롤)" onScroll={measure}>
         {/* 이전 화면은 불투명하게 아래에 두고 새 화면만 위에서 나타나게 한다(둘 다 반투명해지면 어두운 바탕이 비쳐 깜빡임) */}
-        <div className="frame">
+        <div ref={frame} className="frame">
           {prev && <img key={prev.url} className="frame-img under" src={prev.url} alt="" aria-hidden="true" />}
           <img key={cur.url} className="frame-img enter" src={cur.url} alt={`증거 화면 ${cur.name}`} onLoad={measure} />
-          {overlay && sameRatio(overlay, cur) && <Marks o={overlay} />}
+          {marks && <Marks o={marks} />}
         </div>
         {!atEnd && <div className="more-hint" aria-hidden="true" />}
       </div>
