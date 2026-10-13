@@ -281,7 +281,16 @@ export default function App() {
             refresh();
           }}
         />
-        <CaseList title={current.label} cases={shown} selected={selected} error={error} query={query} onQuery={setQuery} onSelect={setSelected} />
+        <CaseList
+          title={current.label}
+          cases={shown}
+          selected={selected}
+          error={error}
+          query={query}
+          onQuery={setQuery}
+          onSelect={setSelected}
+          monitor={<LiveMonitor cases={cases} onOpen={setSelected} onEnded={refresh} />}
+        />
         <section className="detail scroll" aria-label="사건 상세">
           {selected ? (
             <Workspace
@@ -574,6 +583,7 @@ function CaseList({
   query,
   onQuery,
   onSelect,
+  monitor,
 }: {
   title: string;
   cases: CaseOut[];
@@ -582,9 +592,11 @@ function CaseList({
   query: string;
   onQuery: (q: string) => void;
   onSelect: (id: string) => void;
+  monitor: React.ReactNode;
 }) {
   return (
     <section className="caselist" aria-label="사건 목록">
+      {monitor}
       <div className="caselist-head">
         <h2>{title}</h2>
         <span className="muted small">{cases.length}건</span>
@@ -618,6 +630,120 @@ function CaseList({
       </ul>
     </section>
   );
+}
+
+// ── 실시간 화면(목록 칸 맨 위, 항상 표시): 에이전트는 한 번에 한 건을 조사한다 ─────────────
+function LiveMonitor({ cases, onOpen, onEnded }: { cases: CaseOut[]; onOpen: (id: string) => void; onEnded: () => void }) {
+  const running = cases.find((c) => c.status === "RUNNING");
+  // 목록은 최신순이므로 가장 오래된 대기 사건(다음 차례)은 뒤에서 찾는다
+  const queued = running ? undefined : [...cases].reverse().find((c) => c.status === "QUEUED");
+  return (
+    <section className="monitor" aria-label="실시간 조사 화면">
+      {running ? (
+        <MonitorCase key={running.id} c={running} onOpen={onOpen} onEnded={onEnded} />
+      ) : (
+        <>
+          <div className="monitor-head">
+            <h2 className="monitor-title">{queued ? "대기 중" : "실시간 화면"}</h2>
+            {queued && <span className="monitor-host">{clip(hostPath(queued.url), 40)}</span>}
+            {queued && (
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => onOpen(queued.id)}>
+                열기
+              </button>
+            )}
+          </div>
+          <div className="monitor-screen monitor-empty">{queued ? "곧 조사를 시작합니다" : "지금 조사 중인 사건이 없습니다"}</div>
+        </>
+      )}
+    </section>
+  );
+}
+
+// 실행 중인 사건 하나: 자기 /events 를 따로 구독한다(사건이 바뀌면 key 로 다시 만들어 이전 연결을 끊는다)
+function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) => void; onEnded: () => void }) {
+  const [events, setEvents] = useState<EvidenceEvent[]>([]);
+  const [ended, setEnded] = useState(false);
+  const [fps, setFps] = useState(0);
+  const [videoOff, setVideoOff] = useState(false);
+  const endedRef = useRef(onEnded);
+  endedRef.current = onEnded;
+
+  useEffect(() => {
+    const ac = new AbortController();
+    streamEvents(
+      c.id,
+      (e: AgentEvent) => {
+        if (e.type === "evidence") setEvents((prev) => (prev.some((p) => p.seq === e.seq) ? prev : [...prev, e]));
+        if (e.type === "status" && TERMINAL.has(e.status)) {
+          setEnded(true);
+          endedRef.current(); // 목록을 바로 다시 받아 다음 사건으로 넘어간다
+        }
+      },
+      ac.signal,
+    ).catch(() => undefined);
+    return () => ac.abort();
+  }, [c.id]);
+
+  const sorted = useMemo(() => [...events].sort((a, b) => a.seq - b.seq), [events]);
+  const main = sorted.filter((e) => typeof e.data.sub !== "number");
+  const steps = main.filter((e) => e.kind === "observe").length;
+  const shot = [...sorted].reverse().find((e) => (e.kind === "observe" || e.kind === "finish") && e.files.some((f) => f.endsWith(".png")))?.files.find((f) => f.endsWith(".png"));
+  const act = lastAction(sorted);
+  const still = shot ? <LiveScreen caseId={c.id} name={shot} /> : <span className="small">첫 화면을 기다리는 중…</span>;
+  return (
+    <>
+      <div className="monitor-head">
+        <span className="monitor-live">
+          <span className="dot" />
+          LIVE
+        </span>
+        <h2 className="monitor-title">{ended ? "조사 끝남" : "지금 조사 중"}</h2>
+        <span className="monitor-host" title={c.url}>
+          {clip(hostPath(c.url), 40)}
+        </span>
+        <button type="button" className="btn btn-ghost btn-sm" aria-label="실시간 화면 크게 보기" onClick={() => onOpen(c.id)}>
+          크게 보기
+        </button>
+      </div>
+      <div className="monitor-screen screen-body">
+        {!ended && !videoOff ? <LiveVideo caseId={c.id} onFps={setFps} onEnd={() => setVideoOff(true)} fallback={still} /> : still}
+        <span className="monitor-meta">
+          {fps > 0 && !videoOff ? `${fps}fps · ` : ""}
+          {String(steps).padStart(2, "0")}/{Math.max(MAX_STEPS, steps)}
+        </span>
+      </div>
+      <div className="monitor-foot">
+        {act ? (
+          <>
+            <span className="monitor-jev">Jev 선택</span>
+            <span className="monitor-act">
+              {act.what}
+              {act.running ? " → 실행 중" : ""}
+            </span>
+            <span className="monitor-prob">{pct(act.prob)}</span>
+          </>
+        ) : (
+          <span className="muted">첫 관찰을 기다리는 중</span>
+        )}
+      </div>
+    </>
+  );
+}
+
+// 마지막 Jev 선택(주 조사·하위 조사 모두): 후보 글자는 바로 앞 관찰에서 찾는다(행동 기록과 같은 방식)
+function lastAction(events: EvidenceEvent[]): { what: string; prob: number; running: boolean } | null {
+  let candidates = new Map<string, string>();
+  let out: { what: string; prob: number; running: boolean } | null = null;
+  for (const e of events) {
+    const d = e.data as Record<string, unknown>;
+    if (e.kind === "observe") candidates = new Map(((d.candidates as { id: string; text: string }[]) ?? []).map((x) => [x.id, x.text]));
+    else if (e.kind === "decision") {
+      const choice = String(d.choice);
+      const eid = choice.startsWith("click_") ? choice.slice(6) : "";
+      out = { what: eid ? `“${clip(candidates.get(eid) ?? eid, 40)}” 클릭` : (ACTION_LABEL[choice] ?? choice), prob: Number(d.probability), running: true };
+    } else if (out && (e.kind === "action" || (e.kind === "gate" && !d.allowed) || e.kind === "action_error")) out.running = false;
+  }
+  return out;
 }
 
 function StatusChip({ c }: { c: CaseOut }) {
