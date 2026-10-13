@@ -260,7 +260,7 @@ button.reason:hover { border-color: var(--line-strong); }
 .thumb-title { font-weight: 700; font-size: 13px; }
 .thumb-sub { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rec-box { position: relative; height: 300px; border-radius: var(--r-panel); background: var(--screen-bg); box-shadow: var(--inset-screen); display: grid; place-items: center; color: var(--header-muted); overflow: hidden; }
-.rec-box video { width: 100%; height: 100%; object-fit: contain; display: block; }
+.rec-box video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }  /* 칸(grid)의 행 높이가 영상 크기를 따라가 넘치던 것(잘려서 확대돼 보이고 재생 막대가 가려짐)을 칸에 고정 */
 .progress-panel .log { border-top: 0; max-height: 520px; overflow-y: auto; }
 
 /* 경로 지도 */
