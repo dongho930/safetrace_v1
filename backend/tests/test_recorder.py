@@ -118,3 +118,15 @@ def test_cancelled_stop_still_reaps_ffmpeg(tmp_path):
 
     code, writer_done = asyncio.run(go())
     assert code is not None and writer_done
+
+
+def test_pause_nests():
+    """페이지 전체 캡처 준비(펼치기) 안에서 캡처가 다시 멈추고 풀어도, 바깥 resume 전까지는 멈춘 채다."""
+    rec = ScreencastRecorder("ffmpeg", None)
+    rec.pause()
+    rec.pause()
+    rec.resume()
+    assert rec._pauses == 1
+    rec.resume()
+    rec.resume()  # 짝이 맞지 않는 resume 은 음수로 내려가지 않는다
+    assert rec._pauses == 0

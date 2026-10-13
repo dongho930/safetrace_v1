@@ -107,7 +107,7 @@ class ScreencastRecorder:
         self._cdp: CDPSession | None = None
         self._page: Page | None = None
         self._last: bytes | None = None
-        self._paused = False
+        self._pauses = 0  # 멈춤 요청 수(겹쳐 불러도 마지막 resume 에서만 다시 받는다)
         self._ticker: asyncio.Task | None = None
         self._writer: asyncio.Task | None = None
         self._q: asyncio.Queue[bytes | None] = asyncio.Queue()
@@ -190,7 +190,7 @@ class ScreencastRecorder:
             pass
 
     def _on_frame(self, cdp: CDPSession, ev: dict):
-        if cdp is not self._cdp or self._paused:
+        if cdp is not self._cdp or self._pauses:
             return  # 옮기기 전 창의 늦은 프레임, 또는 페이지 전체 캡처 중(창 크기가 잠시 바뀜)
         self.frames_received += 1
         self._last = base64.b64decode(ev["data"])
@@ -224,10 +224,10 @@ class ScreencastRecorder:
             log.warning("recorder switch failed: %s", type(e).__name__)
 
     def pause(self):
-        self._paused = True
+        self._pauses += 1
 
     def resume(self):
-        self._paused = False
+        self._pauses = max(0, self._pauses - 1)
 
     async def _tick(self):
         """화면이 멈춰 있을 때만 마지막 프레임을 1초 간격으로 다시 넣고, 라이브 시청자에게도 마지막 화면을 보낸다."""
