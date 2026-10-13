@@ -185,7 +185,7 @@ def test_audit_log(client, store):
     login(client, name)
     with store.session() as s:
         rows = list(s.scalars(select(AuditLog).where(AuditLog.actor == name).order_by(AuditLog.id)))
-    assert [(r.action, r.detail) for r in rows] == [("auth.login_failed", "bad_password"), ("auth.login", "")]
+    assert [(r.action, r.detail) for r in rows] == [("auth.login_failed", "bad_password ip=testclient"), ("auth.login", "")]
     assert all(PW not in (r.detail or "") for r in rows)
 
 

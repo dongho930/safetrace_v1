@@ -8,9 +8,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import re
+import socket
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -21,7 +23,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Web
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from .. import accounts, package, report, verdicts
@@ -36,6 +38,7 @@ from ..live import LocalLive
 from ..masking import mask_secrets
 from ..netguard import BlockedURL, parse_url
 from ..preview import preview_image
+from ..ratelimit import FailureLimiter
 from ..signer.client import ChainAdmin, SignerError
 from ..store import TERMINAL, AuditLog, Case, Store, Verdict
 
@@ -368,13 +371,57 @@ def _safe_name(username: str) -> str:
     return username if accounts.USERNAME.match(username) else "-"
 
 
+login_limiter = FailureLimiter(settings.login_ip_max_failed, settings.login_ip_window_s)
+
+
+_proxy_ips: tuple[float, frozenset[str]] = (0.0, frozenset())
+_PROXY_REFRESH_S = 5.0
+
+
+def _trusted_proxy_ips(refresh: bool = False) -> frozenset[str]:
+    """settings.trusted_proxies(예: Compose 의 web)의 현재 주소. 컨테이너를 다시 띄우면 주소가 바뀌므로 모르는 주소가 오면
+    5초에 한 번까지 다시 찾는다."""
+    global _proxy_ips
+    t, ips = _proxy_ips
+    if (refresh or not ips) and time.monotonic() - t >= _PROXY_REFRESH_S:
+        found = set()
+        for name in settings.trusted_proxies:
+            try:
+                found |= {ai[4][0] for ai in socket.getaddrinfo(name, None)}
+            except OSError:
+                pass
+        _proxy_ips = (time.monotonic(), frozenset(found))
+    return _proxy_ips[1]
+
+
+def _client_ip(request: Request) -> str:
+    """로그인 제한에 쓰는 접속 주소. 믿는 프록시(web)에서 온 요청만 X-Forwarded-For 를 쓴다. nginx 는 이 머리글을 접속
+    주소($remote_addr) 하나로 덮어쓰므로 사용자가 보낸 값은 버려지고, 다른 컨테이너(예: 에이전트)가 직접 보낸 값은 믿지 않는다."""
+    peer = request.client.host if request.client else ""
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd and settings.trusted_proxies and (peer in _trusted_proxy_ips() or peer in _trusted_proxy_ips(refresh=True)):
+        try:
+            return str(ipaddress.ip_address(fwd.rsplit(",", 1)[-1].strip()))
+        except ValueError:
+            pass
+    return peer[:64] or "-"
+
+
 @app.post("/api/auth/login", response_model=LoginOut)
-def login(body: LoginIn):
+def login(body: LoginIn, request: Request):
+    ip = _client_ip(request)
+    wait, first = login_limiter.take(ip)
+    if wait:  # 비밀번호를 확인하지 않는다(Argon2id 계산도 시키지 않음). 계정이 있는지도 드러나지 않는다
+        if first:
+            store.audit("system", "auth.ip_limited", detail=f"ip={ip} failures={login_limiter.max_failures}")
+        raise HTTPException(429, "로그인 시도가 너무 많습니다. 잠시 뒤 다시 시도하세요",
+                            headers={"Retry-After": str(wait)})
     res = accounts.login(store, body.username, body.password)
     if res is None:
         store.audit(_safe_name(body.username), "auth.login_failed",
-                    detail=accounts.login_failure_reason(store, body.username))
+                    detail=f"{accounts.login_failure_reason(store, body.username)} ip={ip}")
         raise HTTPException(401, "아이디 또는 비밀번호가 올바르지 않습니다")
+    login_limiter.give_back(ip)
     token, u, expires = res
     store.audit(u.username, "auth.login")
     return LoginOut(token=token, expires_at=expires.isoformat(), user=Me(name=u.username, role=u.role, kind="user"))
@@ -443,6 +490,25 @@ def patch_user(username: str, body: UserPatch, p: Annotated[Principal, Depends(n
 
 
 # ── 사건 ─────────────────────────────────────────────
+_intake_lock = threading.Lock()  # API 는 프로세스 하나(Dockerfile CMD)
+PENDING = ("QUEUED", "RUNNING")
+
+
+def _check_intake_limits(s, p: Principal) -> None:
+    """끝나지 않은 사건이 한도를 넘으면 접수를 거절한다. 무한 스크립트처럼 워커를 오래 붙잡는 페이지를 한 주체가
+    대량으로 넣어 대기열을 막지 못하게 한다(끝난 사건은 세지 않으므로 처리되는 만큼 다시 넣을 수 있다)."""
+    pending = Case.status.in_(PENDING)  # 모르는 상태값(옛 기록 등)이 영영 한 칸을 차지하지 않게 명시한다
+    mine = s.scalar(select(func.count()).select_from(Case).where(pending, Case.created_by == p.name))
+    if mine >= settings.case_max_pending_per_principal:
+        store.audit(p.name, "case.rejected", detail=f"limit=principal pending={mine}")
+        raise HTTPException(429, "끝나지 않은 사건이 너무 많습니다. 조사가 끝난 뒤 다시 접수하세요",
+                            headers={"Retry-After": "60"})
+    total = s.scalar(select(func.count()).select_from(Case).where(pending))
+    if total >= settings.case_max_pending_total:
+        store.audit(p.name, "case.rejected", detail=f"limit=total pending={total}")
+        raise HTTPException(503, "대기열이 가득 찼습니다. 잠시 뒤 다시 접수하세요", headers={"Retry-After": "60"})
+
+
 @app.post("/api/cases", response_model=CaseOut, status_code=201)
 def create_case(body: CaseCreate, p: Annotated[Principal, Depends(need("investigator"))],
                 idempotency_key: Annotated[str | None, Header(max_length=64)] = None):
@@ -453,11 +519,12 @@ def create_case(body: CaseCreate, p: Annotated[Principal, Depends(need("investig
     key = None
     if idempotency_key:
         key = hashlib.sha256(f"{p.name}:{idempotency_key}".encode()).hexdigest()
-    with store.session() as s:
+    with _intake_lock, store.session() as s:  # 세기와 넣기 사이에 다른 접수가 끼어 한도를 넘지 않게
         if key:
             existing = s.scalar(select(Case).where(Case.idempotency_key == key))
             if existing:
                 return CaseOut.of(existing)
+        _check_intake_limits(s, p)
         c = Case(url=body.url.strip(), source=body.source, created_by=p.name, idempotency_key=key)
         s.add(c)
         try:
