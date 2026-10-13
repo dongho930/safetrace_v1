@@ -73,7 +73,9 @@ def is_auto_redirect_page(text: str) -> bool:
 
 
 _EID = re.compile(r"e\d{1,6}")  # 관찰이 요소에 붙이는 ID 형식
-_BOX_TIMEOUT_MS = 150  # 상자 하나를 찾는 최대 시간(있는 요소는 바로 찾는다. 사라졌으면 이만큼 기다리고 포기, 상자들은 동시에 잰다)
+# 상자 하나를 찾는 최대 시간(있는 요소는 바로 찾는다. 사라졌으면 이만큼 기다리고 포기, 상자들은 동시에 잰다).
+# 새 페이지의 첫 측정은 Playwright 가 스크립트를 주입해 2~3배 느리다(CPU 8배 감속 시 약 150ms). 150ms 일 때 CI 에서 상자가 통째로 빠졌다.
+_BOX_TIMEOUT_MS = 500
 
 
 async def measure_rects(page: Page, attr: str, ids: list[str]) -> tuple[dict | None, list[dict | None]]:

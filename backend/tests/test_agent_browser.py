@@ -772,7 +772,7 @@ def test_reputation_match_holds_benign(settings, testpages, monkeypatch):
 
 
 # ── 관찰 화면 위 상자 ─────────────────────────────────────
-_BOX_PAGE = """<!doctype html><html><body style="margin:0;height:2600px;background:#fff">
+_BOX_PAGE = """<!doctype html><html><style>button, input { color: transparent }</style><body style="margin:0;height:2600px;background:#fff">
 <div style="position:fixed;top:0;left:0;right:0;height:60px;background:#fff">
   <button id="fx" style="position:absolute;left:20px;top:10px;width:120px;height:40px;border:0;background:#00ff00">고정</button></div>
 <button id="b1" style="position:absolute;left:300px;top:400px;width:160px;height:50px;border:0;background:#ff0000">일반</button>
@@ -830,7 +830,8 @@ def test_boxes_match_full_page_capture(tmp_path, scroll, spoof):
     boxes = boxes_from(root, rects, png_size(shot), ["e0", "e1", "e2"], 1)
     assert boxes is not None and boxes["size"] == list(img.size)
     found = {**{k: boxes["cand"].get(f"e{i}") for i, k in enumerate(["fx", "b1", "pw"])}, "fb": boxes["forbidden"][0]}
-    # 리눅스(CI) Chromium 은 색을 조금 바꿔 찍는다(#00ff00 → (0,247,0)). 값이 같은지 대신 가장 가까운 색(배경 포함)이 그 요소인지 본다.
+    # 버튼 글자는 투명하게 둔다(CI 는 나눔 글꼴이라 상자 중심에 글자 가장자리가 걸려 (0,247,0)·(231,0,103) 이 찍혔다).
+    # 렌더링 차이에 덜 민감하게 정확한 값 대신 가장 가까운 색(배경 포함)이 그 요소인지 본다.
     palette = {**colors, "bg": (255, 255, 255)}
     for k, bx in found.items():
         assert bx is not None, k
