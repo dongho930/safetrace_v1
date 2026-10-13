@@ -211,12 +211,40 @@ export async function streamEvents(caseId: string, onEvent: (e: AgentEvent) => v
         .map((l) => l.slice(6))
         .join("\n");
       if (data) {
+        let ev: AgentEvent | null = null;
         try {
-          onEvent(JSON.parse(data) as AgentEvent);
+          ev = cleanEvent(JSON.parse(data));
         } catch {
           /* 형식 오류 이벤트는 무시 */
         }
+        if (ev) onEvent(ev);
       }
     }
   }
 }
+
+// 기록은 격리된 에이전트(믿지 않는 쪽)에서 온다. 화면이 기대하는 모양이 아니면 버린다(렌더링 중 예외로 콘솔이 멈추지 않게)
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+export function cleanEvent(raw: unknown): AgentEvent | null {
+  if (!isObj(raw)) return null;
+  if (raw.type === "evidence") {
+    const { seq, kind, data, files, hash } = raw;
+    if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 0 || typeof kind !== "string" || !isObj(data)) return null;
+    if (!Array.isArray(files) || !files.every((f) => typeof f === "string")) return null;
+    return { type: "evidence", seq, kind: kind.slice(0, 40), data, files, hash: typeof hash === "string" ? hash : "" };
+  }
+  if (raw.type === "status") {
+    if (typeof raw.status !== "string") return null;
+    return { type: "status", status: raw.status.slice(0, 24), reason: typeof raw.reason === "string" ? raw.reason : null };
+  }
+  if (raw.type === "step") {
+    if (typeof raw.step !== "number" || typeof raw.url !== "string") return null;
+    return { type: "step", step: raw.step, url: raw.url };
+  }
+  return null;
+}
+// 기록 안의 목록 값: 배열이 아니면 빈 목록, 항목은 원하는 모양만
+export const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
+export const strs = (v: unknown): string[] => list(v).filter((x): x is string => typeof x === "string");
+export const clickables = (v: unknown): { id: string; text: string }[] =>
+  list(v).flatMap((x) => (isObj(x) && typeof x.id === "string" ? [{ id: x.id, text: typeof x.text === "string" ? x.text : "" }] : []));

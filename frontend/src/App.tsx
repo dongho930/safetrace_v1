@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Component, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type AgentEvent,
   ApiError,
@@ -12,6 +12,7 @@ import {
   type UserOut,
   type Verdict,
   changePassword,
+  clickables,
   clearToken,
   createCase,
   createUser,
@@ -19,6 +20,7 @@ import {
   fileUrl,
   getCase,
   getToken,
+  list,
   listCases,
   listUsers,
   listVerdicts,
@@ -28,6 +30,7 @@ import {
   patchUser,
   saveVerdict,
   streamEvents,
+  strs,
   type Threat,
   verifyCase,
 } from "./api";
@@ -63,13 +66,14 @@ const THREAT_LABEL: Record<string, string> = {
 };
 // 코드 규칙이 모델 판단을 바꾼 이유
 function overrideLabel(o: Threat["override"]): string {
-  if (!o) return "";
+  if (!o || typeof o !== "object") return "";
   if (o.reason === "shortener_warning") return "단축 URL 서비스의 위험 경고 → 담당자 검토";
   if (o.reason === "brand_lookalike")
     return o.destination
       ? `열리지 않은 목적지가 브랜드 사칭 도메인(${o.brand ?? ""} · ${o.destination}) → 담당자 검토`
       : `브랜드 사칭 도메인(${o.brand ?? ""}), 화면 내용 없음 → 담당자 검토`;
-  return `공식 사행사업자 도메인${o.operators?.length ? ` · ${o.operators.join(", ")}` : ""}`;
+  const ops = strs(o.operators);
+  return `공식 사행사업자 도메인${ops.length ? ` · ${ops.join(", ")}` : ""}`;
 }
 const REASON_LABEL: Record<string, string> = {
   reputation_match: "Safe Browsing 위험 일치(AI 는 정상으로 봄)",
@@ -289,10 +293,15 @@ export default function App() {
           query={query}
           onQuery={setQuery}
           onSelect={setSelected}
-          monitor={<LiveMonitor cases={cases} onOpen={setSelected} onEnded={refresh} />}
+          monitor={
+            <Boundary what="실시간 화면">
+              <LiveMonitor cases={cases} onOpen={setSelected} onEnded={refresh} />
+            </Boundary>
+          }
         />
         <section className="detail scroll" aria-label="사건 상세">
           {selected ? (
+            <Boundary key={selected} what="사건 상세">
             <Workspace
               key={selected}
               id={selected}
@@ -302,6 +311,7 @@ export default function App() {
               onPrev={prevId ? () => setSelected(prevId) : null}
               onNext={nextId ? () => setSelected(nextId) : null}
             />
+            </Boundary>
           ) : (
             <EmptyWorkspace />
           )}
@@ -309,6 +319,22 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+// 오류 경계: 믿지 않는 기록 때문에 한 칸을 그리지 못해도 콘솔 전체가 멈추지 않게 그 칸만 대신 보여 준다
+class Boundary extends Component<{ what: string; children: React.ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <p className="err" role="alert" style={{ padding: 16 }}>
+        {this.props.what}을(를) 표시하지 못했습니다(기록 형식 오류). 다른 사건은 계속 볼 수 있습니다.
+      </p>
+    );
+  }
 }
 
 function Login({ fit, onLogin }: { fit: React.CSSProperties; onLogin: (u: Me) => void }) {
@@ -736,7 +762,7 @@ function lastAction(events: EvidenceEvent[]): { what: string; prob: number; runn
   let out: { what: string; prob: number; running: boolean } | null = null;
   for (const e of events) {
     const d = e.data as Record<string, unknown>;
-    if (e.kind === "observe") candidates = new Map(((d.candidates as { id: string; text: string }[]) ?? []).map((x) => [x.id, x.text]));
+    if (e.kind === "observe") candidates = new Map(clickables(d.candidates).map((x) => [x.id, x.text]));
     else if (e.kind === "decision") {
       const choice = String(d.choice);
       const eid = choice.startsWith("click_") ? choice.slice(6) : "";
@@ -1041,16 +1067,16 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
     if (e.kind === "start" && sub) {
       lines.push({ seq: e.seq, icon: "globe", tone: "orange", text: <>하위 조사 시작 · <span className="mono">{String(d.url)}</span></> });
     } else if (e.kind === "candidates") {
-      const found = (d.found as unknown[]) ?? [];
+      const found = list(d.found);
       lines.push({ seq: e.seq, icon: "stack", tone: found.length ? "orange" : "", text: <>연관 후보 {found.length}곳 · {d.followup ? `하위 조사 ${String(d.investigated)}곳` : "정상으로 판단해 기록만"}</> });
     } else if (e.kind === "observe") {
-      candidates = new Map(((d.candidates as { id: string; text: string }[]) ?? []).map((c) => [c.id, c.text]));
-      const nf = ((d.forbidden as string[]) ?? []).length;
+      candidates = new Map(clickables(d.candidates).map((c) => [c.id, c.text]));
+      const nf = list(d.forbidden).length;
       const skipped = Number(d.ocr_skipped ?? 0); // 시간이 없어 읽지 않은 이미지 버튼(선택지에서 뺌)
       lines.push({
         seq: e.seq, icon: "eye", tone: skipped ? "orange" : "",
-        text: <>관찰 · {String(d.title || d.url)}{skipped ? <span className="warn"> · 시간 부족으로 이미지 버튼 {skipped}개 읽지 않음</span> : null}</>,
-        end: nf ? <span className="bad">금지 {nf} 제외</span> : `후보 ${((d.candidates as unknown[]) ?? []).length}`,
+        text: <>관찰 · {String(d.title || d.url || "-")}{skipped ? <span className="warn"> · 시간 부족으로 이미지 버튼 {skipped}개 읽지 않음</span> : null}</>,
+        end: nf ? <span className="bad">금지 {nf} 제외</span> : `후보 ${list(d.candidates).length}`,
       });
     } else if (e.kind === "decision") {
       const choice = String(d.choice);
@@ -1069,7 +1095,7 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
     } else if (e.kind === "new_window") {
       lines.push({ seq: e.seq, icon: "window", tone: "", text: <>새 창 채택 · <span className="mono">{String(d.url)}</span></> });
     } else if (e.kind === "navigation") {
-      const redirects = (d.redirects as string[]) ?? [];
+      const redirects = strs(d.redirects);
       lines.push({ seq: e.seq, icon: "globe", tone: redirects.length ? "orange" : "", text: <>최초 접속 {String(d.status)}{redirects.length ? ` · 리다이렉트 ${redirects.length}회` : ""}</> });
     } else if (e.kind === "dialog") {
       lines.push({ seq: e.seq, icon: "x", tone: "", text: <>대화상자 자동 닫기 · {String(d.message)}</> });
@@ -1078,7 +1104,7 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
     } else if (e.kind === "escalation") {
       const why = d.reason === "unreachable_network_filtered"
         ? "회선의 도메인 차단 감지"
-        : `Safe Browsing ${((d.threat_types as string[]) ?? []).join(", ")}`;
+        : `Safe Browsing ${strs(d.threat_types).join(", ")}`;
       lines.push({ seq: e.seq, icon: "alert", tone: "orange", text: <span className="warn">담당자 검토로 전환 · {why}</span> });
     } else if (e.kind === "threat") {
       lines.push({ seq: e.seq, icon: "flag", tone: d.threat === "benign" ? "teal" : "orange", text: <>위협 판단 · {THREAT_LABEL[String(d.threat)] ?? String(d.threat)}{d.override ? ` (${overrideLabel(d.override as Threat["override"])})` : ""}</>, end: pct(Number(d.probability)) });
