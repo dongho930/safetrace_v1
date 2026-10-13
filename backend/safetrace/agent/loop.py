@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import io
 import logging
@@ -105,6 +106,53 @@ async def measure_rects(page: Page, attr: str, ids: list[str]) -> tuple[dict | N
     sels = [f'[{attr}="{i}"]' if _EID.fullmatch(i) else None for i in ids]
     root, *rects = await asyncio.gather(origin(), *(bb(x) for x in sels))
     return root, rects
+
+
+# 스크롤이 잠긴 문서(html 이 스크롤을 막고 body 가 스크롤): 페이지 전체 캡처가 첫 화면만 그리고 나머지를 배경색으로 채우는데,
+# 상자는 요소의 실제 배치(아래쪽)에 그려졌다(kc-telegram 등 중국 도박 복제 사이트). 캡처하는 동안만 잠금을 풀어 문서를
+# 내용 높이로 늘리고 끝나면 되돌린다. 페이지 JS 가 막거나 응답하지 않으면 펼치지 못할 뿐 지금과 같은 결과다.
+# 잠김 판정: 화면(viewport)이 스크롤하지 못하거나(html 의 overflow, html 이 visible 이면 body 값이 화면으로 넘어감)
+# 문서는 화면에 들어가는데 body 만 길 때. 문서 높이만 보면 body 여백 몇 px 때문에 스크롤하는 문서로 잘못 본다.
+_EXPAND_JS = """(mark) => {
+  const de = document.documentElement, b = document.body, vh = window.innerHeight;
+  if (!b || b.scrollHeight <= vh + 2) return null;
+  const ho = getComputedStyle(de).overflowY, vo = ho === 'visible' ? getComputedStyle(b).overflowY : ho;
+  if (!(vo === 'hidden' || vo === 'clip' || de.scrollHeight <= vh + 2)) return null;
+  const saved = [de.scrollTop, b.scrollTop];
+  const st = document.createElement('style');
+  st.setAttribute(mark, '');
+  st.textContent = 'html, body { height: auto !important; min-height: 0 !important; max-height: none !important; overflow: visible !important; }';
+  (document.head || de).appendChild(st);
+  return saved;
+}"""
+_RESTORE_JS = """([mark, saved]) => {
+  for (const s of document.querySelectorAll('style[' + mark + ']')) s.remove();
+  if (saved) { document.documentElement.scrollTop = saved[0]; if (document.body) document.body.scrollTop = saved[1]; }
+}"""
+_LAYOUT_TIMEOUT_S = 2.0
+
+
+@contextlib.asynccontextmanager
+async def full_layout(page: Page, mark: str):
+    """스크롤이 잠긴 문서를 캡처하는 동안만 펼친다. 펼쳤으면 True(관찰 기록에 capture: "expanded" 로 남긴다).
+    mark 는 넣은 style 을 찾아 지우는 속성 이름. 페이지가 돌려준 값은 믿지 않고 모양만 확인한다."""
+    timed_out = False
+    try:
+        saved = await asyncio.wait_for(page.evaluate(_EXPAND_JS, mark), _LAYOUT_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        saved, timed_out = None, True
+    except PWError:
+        saved = None
+    ok = isinstance(saved, list) and len(saved) == 2 and all(isinstance(v, (int, float)) for v in saved)
+    try:
+        yield ok
+    finally:
+        # 펼쳤거나, 시간 초과로 나중에 펼쳐졌을 수 있으면 넣은 style 을 지운다(잠기지 않은 보통 페이지는 왕복 없음)
+        if ok or timed_out:
+            try:
+                await asyncio.wait_for(page.evaluate(_RESTORE_JS, [mark, saved if ok else None]), _LAYOUT_TIMEOUT_S)
+            except (PWError, asyncio.TimeoutError):
+                pass
 
 
 _PNG_SIG = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])  # PNG 파일 서명
@@ -279,6 +327,18 @@ class AgentRun:
                    "files": list(rec["files"].keys()), "hash": rec["hash"]})
         return rec["seq"]
 
+    @contextlib.asynccontextmanager
+    async def _capture_layout(self, page: Page):
+        """페이지 전체 캡처 준비(full_layout). 펼친 모습이 녹화·실시간 화면에 찍히지 않게 그동안 녹화를 멈춘다."""
+        if self.rec:
+            self.rec.pause()
+        try:
+            async with full_layout(page, f"{self.attr}-cap") as expanded:
+                yield expanded
+        finally:
+            if self.rec:
+                self.rec.resume()
+
     async def _screenshot(self, page: Page, label: str, full: bool = False) -> str | None:
         """full=True 면 페이지 전체(세로 screenshot_max_height 까지), 아니면 보이는 창만."""
         self._shot += 1
@@ -287,11 +347,11 @@ class AgentRun:
             if full:
                 if self.rec:
                     self.rec.pause()  # 페이지 전체 캡처 중에는 창 크기가 잠시 바뀌어 녹화 프레임이 어긋난다
-                vw, h = await page.evaluate(
-                    "() => [window.innerWidth, Math.max(document.documentElement.scrollHeight,"
-                    " document.body ? document.body.scrollHeight : 0)]")
-                clip = {"x": 0, "y": 0, "width": int(vw), "height": max(1, min(int(h), self.s.screenshot_max_height))}
-                try:
+                try:  # 크기 조회(페이지가 망칠 수 있음)부터 감싸 멈춤이 남지 않게(남으면 녹화가 조사 끝까지 멈춘다)
+                    vw, h = await page.evaluate(
+                        "() => [window.innerWidth, Math.max(document.documentElement.scrollHeight,"
+                        " document.body ? document.body.scrollHeight : 0)]")
+                    clip = {"x": 0, "y": 0, "width": int(vw), "height": max(1, min(int(h), self.s.screenshot_max_height))}
                     png = await page.screenshot(timeout=15000, animations="disabled", full_page=True, clip=clip)
                 finally:
                     if self.rec:
@@ -457,10 +517,12 @@ class AgentRun:
         text = mask_pii(raw.get("text", ""))[:4000]
         state = PageState(step=step, url=page.url[:2048], title=mask_pii(raw.get("title", ""))[:200], text=text,
                           candidates=chosen, has_popup=bool(raw.get("popup")), history=self.history[-30:])
-        # 상자는 캡처 직전에 잰다(OCR 캡처가 스크롤을 되돌린 뒤), 크기는 실제 캡처 파일에서
+        # 상자는 캡처 직전에 잰다(OCR 캡처가 스크롤을 되돌린 뒤), 크기는 실제 캡처 파일에서.
+        # 스크롤이 잠긴 문서는 펼친 같은 상태에서 재고 찍는다(상자와 사진이 같은 배치)
         cand_ids, forb_ids = [c.id for c in chosen], forbidden_ids[:50]
-        root, rects = await measure_rects(page, self.attr, cand_ids + forb_ids)
-        shot = await self._screenshot(page, "observe", full=True)
+        async with self._capture_layout(page) as expanded:
+            root, rects = await measure_rects(page, self.attr, cand_ids + forb_ids)
+            shot = await self._screenshot(page, "observe", full=True)
         boxes = boxes_from(root, rects, png_size(self.ev.file_path(shot)), cand_ids, len(forb_ids)) if shot else None
         text_hash = hashlib.sha256(raw.get("text", "").encode()).hexdigest()
         seq = self._record("observe", {
@@ -469,6 +531,7 @@ class AgentRun:
             "forbidden": forbidden[:50], "has_popup": state.has_popup,
             "text_excerpt": text[:1500], "text_sha256": text_hash, "ocr_skipped": ocr_skipped,
             **({"boxes": boxes} if shot and boxes else {}),
+            **({"capture": "expanded"} if shot and expanded else {}),
         }, [shot] if shot else [])
         # 같은 화면 판정: URL·버튼 글자에 '남은 선택지'까지 넣는다. 효과 없던 행동이 빠져 선택지가 줄면 다른 상태로 보고
         # (줄어들기만 하므로 끝이 있다), 페이지를 오가는 진짜 반복은 그대로 잡는다.
@@ -995,11 +1058,13 @@ class AgentRun:
         if not final_url.startswith(("http://", "https://")) or final_url in self._egress_refused:
             final_url = self.result.nav_chain[-1] if self.result.nav_chain else self.start_url
         self.result.final_url = final_url[:2048]
-        final = await self._screenshot(page, "final", full=True)
+        async with self._capture_layout(page) as expanded:
+            final = await self._screenshot(page, "final", full=True)
         self._record("finish", {"reason": self.result.finish_reason, "final_url": self.result.final_url,
                                 "nav_chain": self.result.nav_chain[:50],
                                 "blocked_requests": self.result.blocked_requests,
-                                "blocked_destinations": self.result.blocked_destinations},
+                                "blocked_destinations": self.result.blocked_destinations,
+                                **({"capture": "expanded"} if final and expanded else {})},
                      [final] if final else [])
         self._collect_candidates()
 

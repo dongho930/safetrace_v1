@@ -118,3 +118,53 @@ def test_cancelled_stop_still_reaps_ffmpeg(tmp_path):
 
     code, writer_done = asyncio.run(go())
     assert code is not None and writer_done
+
+
+def test_pause_nests():
+    """페이지 전체 캡처 준비(펼치기) 안에서 캡처가 다시 멈추고 풀어도, 바깥 resume 전까지는 멈춘 채다."""
+    rec = ScreencastRecorder("ffmpeg", None)
+    rec.pause()
+    rec.pause()
+    rec.resume()
+    assert rec._pauses == 1
+    rec.resume()
+    rec.resume()  # 짝이 맞지 않는 resume 은 음수로 내려가지 않는다
+    assert rec._pauses == 0
+
+
+def test_capture_error_releases_pause(tmp_path):
+    """Codex F1: 페이지가 크기 조회를 망쳐 전체 캡처가 실패해도 녹화 멈춤이 남지 않는다
+    (남으면 녹화·실시간 화면이 조사 끝까지 멈춘다). 처음 한 번만 innerWidth 를 '이상한 값'으로 준다."""
+    from types import SimpleNamespace
+
+    from safetrace.agent.loop import AgentRun
+
+    run = AgentRun.__new__(AgentRun)
+    run.rec = ScreencastRecorder("ffmpeg", None)
+    run._shot, run._tag, run.attr = 0, "", "data-st-test"
+    run.s = SimpleNamespace(screenshot_max_height=6000)
+    run.ev = SimpleNamespace(file_path=lambda n: tmp_path / n)
+
+    class Page:
+        sizes = [["bad-width", 4200], [1280, 4200]]
+
+        async def evaluate(self, js, arg=None):
+            if "innerWidth" in js:
+                return self.sizes.pop(0)
+            return None  # 스크롤이 잠기지 않은 보통 페이지
+
+        async def screenshot(self, **kw):
+            return b"\x89PNG"
+
+    page = Page()
+
+    async def go():
+        got = []
+        for _ in range(2):
+            async with run._capture_layout(page):
+                got.append(await run._screenshot(page, "observe", full=True))
+        return got
+
+    first, second = asyncio.run(go())
+    assert first is None and second  # 첫 캡처는 실패, 두 번째는 정상
+    assert run.rec._pauses == 0

@@ -841,6 +841,125 @@ def test_boxes_match_full_page_capture(tmp_path, scroll, spoof):
         assert near == k, (k, px, bx, scroll, spoof)
 
 
+_LOCKED_PAGE = """<!doctype html><html><style>
+html { height: 100%; overflow: hidden } body { margin: 0; height: 100%; overflow-y: auto; background: #fff }
+button { position: absolute; width: 160px; height: 50px; border: 0; color: transparent }</style><body>
+<div style="height:4200px;position:relative">
+<button id="top" style="left:100px;top:300px;background:#ff0000">위</button>
+<button id="mid" style="left:400px;top:1800px;background:#00ff00">가운데</button>
+<button id="low" style="left:700px;top:3800px;background:#0000ff">아래</button></div></body></html>"""
+
+
+async def _capture(page, expand):
+    """에이전트의 관찰 캡처와 같은 순서: (펼친 뒤) 상자를 재고 페이지 전체를 찍는다."""
+    from safetrace.agent.loop import full_layout, measure_rects
+
+    for i, k in enumerate(["top", "mid", "low"]):
+        await page.eval_on_selector(f"#{k}", "(el, v) => el.setAttribute('data-t', v)", f"e{i}")
+
+    async def shoot():
+        root, rects = await measure_rects(page, "data-t", ["e0", "e1", "e2"])
+        vw, h = await page.evaluate("() => [window.innerWidth, Math.max(document.documentElement.scrollHeight,"
+                                    " document.body ? document.body.scrollHeight : 0)]")
+        png = await page.screenshot(full_page=True, animations="disabled", clip={"x": 0, "y": 0, "width": vw, "height": h})
+        return root, rects, png
+
+    if not expand:
+        return False, *await shoot()
+    async with full_layout(page, "data-cap") as expanded:
+        return expanded, *await shoot()
+
+
+@pytest.mark.parametrize("scrolled", [0, 1500])
+def test_scroll_locked_page_is_expanded_for_capture(tmp_path, scrolled):
+    """html 이 스크롤을 막고 body 가 스크롤하는 페이지: 펼치지 않으면 첫 화면 아래가 빈 채로 찍히고 상자만 그 빈 곳에 놓인다
+    (kc-telegram). 펼쳐 찍으면 아래쪽 요소도 사진의 그 자리에 있고, 끝나면 페이지가 원래 스타일·스크롤로 돌아온다."""
+    import asyncio
+
+    from PIL import Image
+    from playwright.async_api import async_playwright
+
+    from safetrace.agent.loop import boxes_from, png_size
+
+    colors = {"top": (255, 0, 0), "mid": (0, 255, 0), "low": (0, 0, 255), "bg": (255, 255, 255)}
+
+    def centers(root, rects, png, name):
+        shot = tmp_path / name
+        shot.write_bytes(png)
+        img = Image.open(shot).convert("RGB")
+        boxes = boxes_from(root, rects, png_size(shot), ["e0", "e1", "e2"], 0)
+        out = {}
+        for i, k in enumerate(["top", "mid", "low"]):
+            bx = boxes["cand"].get(f"e{i}") if boxes else None
+            if bx:
+                px = img.getpixel((bx[0] + bx[2] // 2, bx[1] + bx[3] // 2))
+                out[k] = min(colors, key=lambda c: sum((a - b) ** 2 for a, b in zip(px, colors[c])))
+        return img.size, out
+
+    async def go():
+        async with async_playwright() as p:
+            b = await p.chromium.launch()
+            page = await b.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content(_LOCKED_PAGE)
+            await page.evaluate(f"document.body.scrollTop = {scrolled}")
+            before = await _capture(page, expand=False)
+            after = await _capture(page, expand=True)
+            state = await page.evaluate("() => [getComputedStyle(document.documentElement).overflowY,"
+                                        " document.body.scrollTop, document.querySelectorAll('style[data-cap]').length]")
+            await b.close()
+            return before, after, state
+
+    before, (expanded, *after), state = asyncio.run(go())
+    size0, seen0 = centers(*before[1:], "before.png")
+    size1, seen1 = centers(*after, "after.png")
+    # 펼치기 전: 사진 높이는 body 높이만큼이지만 첫 화면 아래는 비어 있다(아래쪽 상자가 빈 곳을 가리킴)
+    assert size0[1] >= 4200 and seen0.get("low") == "bg", (size0, seen0)
+    # 펼친 뒤: 모든 상자가 그 요소의 색을 가리킨다
+    assert expanded is True
+    assert size1[1] >= 4200 and seen1 == {"top": "top", "mid": "mid", "low": "low"}, (size1, seen1)
+    # 되돌림: 잠금·스크롤 위치가 그대로이고 넣은 style 이 남지 않는다
+    assert state == ["hidden", scrolled, 0], state
+
+
+def test_agent_capture_expands_scroll_locked_page(settings, testpages):
+    """에이전트 관찰: 스크롤이 잠긴 페이지는 펼쳐 찍고 기록에 capture: expanded 를 남긴다. 아래쪽 버튼 상자 자리에 실제 버튼이 찍힌다."""
+    from PIL import Image
+
+    settings.max_steps = 1
+    cid, _, chain, _ = run(f"{BASE}/benign/locked.html", settings, testpages)
+    obs = next(r for r in chain if r["kind"] == "observe")
+    assert obs["data"].get("capture") == "expanded", obs["data"].keys()
+    boxes = obs["data"]["boxes"]
+    low = next(c["id"] for c in obs["data"]["candidates"] if "행사 신청" in c["text"])
+    x, y, w, h = boxes["cand"][low]
+    assert y > 2000, boxes["cand"][low]  # 첫 화면(800) 아래
+    img = Image.open(settings.evidence_dir / cid / "files" / next(iter(obs["files"]))).convert("RGB")
+    assert img.size[1] > 2000
+    r, g, b = img.getpixel((x + w // 2, y + h // 2))
+    assert b > 150 and r < 120, (r, g, b)  # 파란 버튼(#1a56db), 펼치지 않으면 흰 바탕
+
+
+def test_normal_page_is_not_expanded():
+    """보통 페이지(문서가 스크롤)는 펼치지 않고 스타일을 넣지 않는다."""
+    import asyncio
+
+    from playwright.async_api import async_playwright
+
+    from safetrace.agent.loop import full_layout
+
+    async def go():
+        async with async_playwright() as p:
+            b = await p.chromium.launch()
+            page = await b.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content('<body style="margin:0"><div style="height:3000px">긴 페이지</div></body>')
+            async with full_layout(page, "data-cap") as expanded:
+                inside = await page.evaluate("() => document.querySelectorAll('style[data-cap]').length")
+            await b.close()
+            return expanded, inside
+
+    assert asyncio.run(go()) == (False, 0)
+
+
 def test_boxes_skip_duplicated_marker(tmp_path):
     """페이지가 표시 속성을 다른 요소에도 붙이면(어느 요소인지 모름) 그 상자는 그리지 않는다."""
     import asyncio

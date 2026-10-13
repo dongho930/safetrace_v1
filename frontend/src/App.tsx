@@ -999,7 +999,9 @@ function Investigation({
               관찰 화면{sub ? ` · 연관 후보 ${sub}` : ""}
               {obs && typeof obs.data.step === "number" ? ` · ${obs.data.step + 1}단계` : ""}{/* 기록은 0부터, 머리 줄 진행 표시처럼 1부터 */}
             </span>
-            <span className="obs-note">Jev 가 본 화면 · 움직이는 화면은 왼쪽 실시간 화면</span>
+            <span className="obs-note">
+              Jev 가 본 화면 · 움직이는 화면은 왼쪽 실시간 화면{obs && text(obs.data.capture) === "expanded" ? ` · ${EXPANDED_NOTE}` : ""}
+            </span>
             <span className="obs-env">격리 브라우저{browser?.version ? ` · Chromium ${browser.version.split(".")[0]}` : ""} · 검문 프록시 경유</span>
           </div>
           <div className="screen-body">
@@ -1543,6 +1545,7 @@ function ScreensTab({
             </span>
           )}
           <span className="shot-note">{cur.note}</span>
+          {text(events.find((e) => e.seq === cur.seq)?.data.capture) === "expanded" && <span className="muted small">{EXPANDED_NOTE}</span>}
           {overlay && (
             <span className="mark-legend">
               {nForbidden > 0 && <span className="lg lg-forbidden">금지 요소 {nForbidden}</span>}
@@ -1883,6 +1886,9 @@ function LiveVideo({
     </>
   );
 }
+
+// 스크롤이 잠긴 페이지(html 이 막고 body 가 스크롤)는 에이전트가 캡처하는 동안만 펼쳐 찍는다(기록 capture: "expanded")
+const EXPANDED_NOTE = "스크롤이 잠긴 페이지라 캡처하는 동안 펼쳐서 찍음";
 
 // 화면 위 표시: 기록의 상자 좌표(캡처 픽셀)를 이미지와 같은 크기의 SVG 로 겹친다. 미리보기는 비율을 지키며 줄이므로
 // 비율이 같을 때만 그린다(다르면 좌표가 이 이미지의 것이 아니다). 글자는 SVG title(React 텍스트)로만.
