@@ -1400,7 +1400,7 @@ function Summary({ c, running, reasons, picked, onPick }: { c: CaseOut | null; r
     </section>
   );
 }
-const CIRCLED = ["①", "②", "③", "④"];
+const CIRCLED = [..."①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"];
 
 // ── 조사 경과 탭: 근거 화면(기본) · 경로 지도 · 조사 녹화 · 행동 기록 ─────────────
 type TabId = "screens" | "path" | "rec" | "log";
@@ -1616,7 +1616,8 @@ function PathTab({ c, events }: { c: CaseOut; events: EvidenceEvent[] }) {
     <div className="floor pathfloor">
       <div className="path">
         {m.nodes.map((n, i) => {
-          if (!n.fold) num += 1;
+          // 접힌 곳도 번호에 센다(접힌 뒤 번호가 실제 몇 번째 주소인지 맞게)
+          num += n.fold ?? 1;
           return (
             <div key={`${i}-${n.url}`} className="path-col-wrap">
               {i > 0 && (
