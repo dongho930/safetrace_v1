@@ -347,11 +347,11 @@ class AgentRun:
             if full:
                 if self.rec:
                     self.rec.pause()  # 페이지 전체 캡처 중에는 창 크기가 잠시 바뀌어 녹화 프레임이 어긋난다
-                vw, h = await page.evaluate(
-                    "() => [window.innerWidth, Math.max(document.documentElement.scrollHeight,"
-                    " document.body ? document.body.scrollHeight : 0)]")
-                clip = {"x": 0, "y": 0, "width": int(vw), "height": max(1, min(int(h), self.s.screenshot_max_height))}
-                try:
+                try:  # 크기 조회(페이지가 망칠 수 있음)부터 감싸 멈춤이 남지 않게(남으면 녹화가 조사 끝까지 멈춘다)
+                    vw, h = await page.evaluate(
+                        "() => [window.innerWidth, Math.max(document.documentElement.scrollHeight,"
+                        " document.body ? document.body.scrollHeight : 0)]")
+                    clip = {"x": 0, "y": 0, "width": int(vw), "height": max(1, min(int(h), self.s.screenshot_max_height))}
                     png = await page.screenshot(timeout=15000, animations="disabled", full_page=True, clip=clip)
                 finally:
                     if self.rec:
