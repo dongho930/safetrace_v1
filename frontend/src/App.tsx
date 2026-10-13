@@ -36,7 +36,7 @@ import {
   type Threat,
   verifyCase,
 } from "./api";
-import { buildPath, buildReasons, buildScreens, clip, hostOrFile, hostPath, type Reason, type Screen, type Tone } from "./evidence";
+import { buildOverlay, buildPath, buildReasons, buildScreens, clip, hostOrFile, hostPath, type Overlay, type Reason, type Screen, type Tone } from "./evidence";
 import { ACTION_LABEL, NET_CATEGORY_LABEL, overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
 
 // 조사 대상 페이지에서 온 문자열은 모두 React 기본 이스케이프로만 출력한다(raw HTML 금지).
@@ -1506,6 +1506,7 @@ function ScreensTab({
   onPick: (f: string) => void;
 }) {
   const opts = useRef<(HTMLButtonElement | null)[]>([]);
+  const [marksOn, setMarksOn] = useState(true);
   if (screens.length === 0) {
     const un = [...events].reverse().find((e) => e.kind === "unreachable");
     const why = un ? (NET_CATEGORY_LABEL[text(un.data.category)] ?? text(un.data.error)) : c?.finish_reason ? (REASON_LABEL[c.finish_reason] ?? c.finish_reason) : "";
@@ -1516,6 +1517,9 @@ function ScreensTab({
     );
   }
   const cur = screens.find((x) => x.file === pick) ?? screens[0];
+  const overlay = buildOverlay(events, cur.seq);
+  const nForbidden = overlay?.marks.filter((m) => m.kind === "forbidden").length ?? 0;
+  const act = overlay?.marks.find((m) => m.kind !== "forbidden");
   const onKey = (e: React.KeyboardEvent, i: number) => {
     const step = e.key === "ArrowDown" || e.key === "ArrowRight" ? 1 : e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : 0;
     if (!step) return;
@@ -1529,7 +1533,7 @@ function ScreensTab({
       <figure className="shot">
         <div className="shot-box screen-body">
           {/* 고른 화면마다 새로 받는다: 못 받으면 앞 화면을 남기지 않고 실패를 보인다(캡션과 화면이 어긋나지 않게) */}
-          <LiveScreen key={cur.file} caseId={id} name={cur.file} strict />
+          <LiveScreen key={cur.file} caseId={id} name={cur.file} strict overlay={marksOn ? overlay : null} />
         </div>
         <figcaption className="shot-cap">
           <b className={`tone-${cur.tone} tone-text`}>
@@ -1542,6 +1546,15 @@ function ScreensTab({
             </span>
           )}
           <span className="shot-note">{cur.note}</span>
+          {overlay && (
+            <span className="mark-legend">
+              {nForbidden > 0 && <span className="lg lg-forbidden">금지 요소 {nForbidden}</span>}
+              {act && <span className={`lg lg-${act.kind}`}>{act.label}</span>}
+              <button type="button" className="btn btn-ghost btn-sm" aria-pressed={marksOn} onClick={() => setMarksOn(!marksOn)}>
+                {marksOn ? "화면 표시 끄기" : "화면 표시 켜기"}
+              </button>
+            </span>
+          )}
         </figcaption>
       </figure>
       <div className="thumbs" role="listbox" aria-label="근거 화면 목록">
@@ -1874,11 +1887,29 @@ function LiveVideo({
   );
 }
 
+// 화면 위 표시: 기록의 상자 좌표(캡처 픽셀)를 이미지와 같은 크기의 SVG 로 겹친다. 미리보기는 비율을 지키며 줄이므로
+// 비율이 같을 때만 그린다(다르면 좌표가 이 이미지의 것이 아니다). 글자는 SVG title(React 텍스트)로만.
+const sameRatio = (o: Overlay, f: Frame) => f.w > 0 && f.h > 0 && Math.abs(f.w / f.h - o.w / o.h) <= (o.w / o.h) * 0.01;
+function Marks({ o }: { o: Overlay }) {
+  return (
+    <svg className="marks" viewBox={`0 0 ${o.w} ${o.h}`} preserveAspectRatio="none" aria-hidden="true">
+      {o.marks.map((m, i) => (
+        <g key={i}>
+          <rect className="mark-halo" x={m.x} y={m.y} width={m.w} height={m.h} vectorEffect="non-scaling-stroke" />
+          <rect className={`mark mark-${m.kind}`} x={m.x} y={m.y} width={m.w} height={m.h} vectorEffect="non-scaling-stroke">
+            <title>{m.label}</title>
+          </rect>
+        </g>
+      ))}
+    </svg>
+  );
+}
+
 // 실시간 화면: 새 화면을 다 받아 그릴 준비가 끝날 때까지 이전 화면을 그대로 두고(이중 버퍼) 교차 페이드로 바꾼다.
 // 표시 방식은 한 가지: 폭에 맞추되 창 한 화면(1280×800 비율)이 칸 높이에 들어가게, 더 길면 세로 스크롤.
-type Frame = { url: string; name: string };
+type Frame = { url: string; name: string; w: number; h: number };
 // strict: 증거 화면 보기용. 받거나 그리지 못하면 실패를 표시한다(실시간 화면은 이전 화면을 유지)
-function LiveScreen({ caseId, name, strict = false }: { caseId: string; name: string; strict?: boolean }) {
+function LiveScreen({ caseId, name, strict = false, overlay = null }: { caseId: string; name: string; strict?: boolean; overlay?: Overlay | null }) {
   const [cur, setCur] = useState<Frame | null>(null);
   const [failed, setFailed] = useState(false);
   const [prev, setPrev] = useState<Frame | null>(null);
@@ -1896,9 +1927,9 @@ function LiveScreen({ caseId, name, strict = false }: { caseId: string; name: st
     let alive = true;
     (async () => {
       let url = "";
+      const img = new Image();
       try {
         url = await fileUrl(caseId, name, true);
-        const img = new Image();
         img.src = url;
         await (strict ? img.decode() : img.decode().catch(() => undefined));
       } catch {
@@ -1912,7 +1943,7 @@ function LiveScreen({ caseId, name, strict = false }: { caseId: string; name: st
       }
       if (prevRef.current) URL.revokeObjectURL(prevRef.current.url);
       prevRef.current = curRef.current;
-      curRef.current = { url, name };
+      curRef.current = { url, name, w: img.naturalWidth, h: img.naturalHeight };
       setPrev(prevRef.current);
       setCur(curRef.current);
       box.current?.scrollTo({ top: 0, behavior: "smooth" });
@@ -1965,6 +1996,7 @@ function LiveScreen({ caseId, name, strict = false }: { caseId: string; name: st
         <div className="frame">
           {prev && <img key={prev.url} className="frame-img under" src={prev.url} alt="" aria-hidden="true" />}
           <img key={cur.url} className="frame-img enter" src={cur.url} alt={`증거 화면 ${cur.name}`} onLoad={measure} />
+          {overlay && sameRatio(overlay, cur) && <Marks o={overlay} />}
         </div>
         {!atEnd && <div className="more-hint" aria-hidden="true" />}
       </div>

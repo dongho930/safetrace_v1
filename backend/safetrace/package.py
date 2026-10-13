@@ -43,7 +43,7 @@ _SCHEMA: dict[str, dict[str, object]] = {
     "start": {"url": _STR},
     "browser": {"version": _STR},
     "navigation": {"final_url": _STR},
-    "observe": {"title": _STR, "candidates": [_DICT], "forbidden": [_STR], "has_popup": _BOOL,
+    "observe": {"title": _STR, "candidates": [_DICT], "forbidden": [_STR], "has_popup": _BOOL, "boxes": _DICT,
                 "text_excerpt": _STR, "text_sha256": _STR},
     "decision": {"choice": _STR, "probability": _PROB, "probabilities": _DICT, "provider": _STR, "model": _STR},
     "gate": {"action": _STR, "element": _STR, "allowed": _BOOL},

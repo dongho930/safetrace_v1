@@ -548,3 +548,33 @@ def test_meaningless_dead_destination_kept():
                         blocked_destinations=[BlockedDestination(host="ven.nibyol.fun", reason="ssrf:dns_failure")])
     d = Engine([p], 0.45, 0.6).decide_threat(req)
     assert d.threat == "unknown" and d.override is None
+
+
+def test_boxes_from_maps_viewport_rects_to_capture(tmp_path):
+    """창 기준 상자 + 스크롤(원점) → 캡처 픽셀. 캡처 범위로 자르고, 밖이거나 작으면 None. 크기는 실제 PNG 에서."""
+    import struct
+    import zlib
+
+    from safetrace.agent.loop import boxes_from, png_size
+
+    root = {"x": 0, "y": -900}  # 900 만큼 스크롤
+    rects = [{"x": 300, "y": -500, "width": 160, "height": 50},   # 문서 y=400
+             {"x": 1270, "y": 10, "width": 40, "height": 20},     # 오른쪽이 잘림
+             {"x": 10, "y": 1800, "width": 40, "height": 20},     # 캡처(높이 2600) 밖
+             None,
+             {"x": 10.4, "y": -899.6, "width": 1.0, "height": 30}]  # 너무 좁음
+    out = boxes_from(root, rects, (1280, 2600), ["e1", "e2", "e3"], 2)
+    assert out == {"size": [1280, 2600], "cand": {"e1": [300, 400, 160, 50], "e2": [1270, 910, 10, 20]}, "forbidden": [None, None]}
+    assert boxes_from(None, rects, (1280, 2600), ["e1", "e2", "e3"], 2) is None
+    assert boxes_from(root, rects, None, ["e1", "e2", "e3"], 2) is None
+    assert boxes_from(root, rects[:2], (1280, 2600), ["e1", "e2", "e3"], 2) is None
+    assert boxes_from(root, [None, None], (1280, 2600), ["e1"], 1) is None
+
+    def png(w, h):
+        ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+        return bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) + struct.pack(">I", 13) + b"IHDR" + ihdr + struct.pack(">I", zlib.crc32(b"IHDR" + ihdr))
+    (tmp_path / "a.png").write_bytes(png(1280, 2600))
+    (tmp_path / "b.png").write_bytes(b"not a png at all, 24 bytes+")
+    assert png_size(tmp_path / "a.png") == (1280, 2600)
+    assert png_size(tmp_path / "b.png") is None
+    assert png_size(tmp_path / "missing.png") is None

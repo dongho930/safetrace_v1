@@ -57,6 +57,13 @@ def test_gamble_reaches_hidden_deposit_screen(settings, testpages):
     texts = [c["text"] for c in deposit_obs["data"]["candidates"]]
     assert not any("결제" in t or "충전 신청" in t for t in texts)
     assert any(f.startswith("input") for f in deposit_obs["data"]["forbidden"])
+    # 화면 위 상자: 금지 요소와 같은 순서·개수, 입력 칸 상자가 있다. 고른 버튼은 선택지 상자에 있다
+    boxes = deposit_obs["data"]["boxes"]
+    assert len(boxes["forbidden"]) == len(deposit_obs["data"]["forbidden"])
+    assert any(b for f, b in zip(deposit_obs["data"]["forbidden"], boxes["forbidden"]) if f.startswith("input"))
+    for d in (r["data"] for r in chain if r["kind"] == "decision" and r["data"]["choice"].startswith("click_")):
+        obs = next(r for r in chain if r["seq"] == d["observe_seq"])
+        assert d["choice"].removeprefix("click_") in obs["data"]["boxes"]["cand"]
     assert_no_forbidden(chain, testpages)
     # 계좌번호 원문은 증거의 텍스트 발췌에도 마스킹
     assert "123-456-789012" not in json.dumps([r["data"] for r in chain], ensure_ascii=False)
@@ -762,3 +769,94 @@ def test_reputation_match_holds_benign(settings, testpages, monkeypatch):
     esc = next(r["data"] for r in chain if r["kind"] == "escalation")
     assert esc["threat_types"] == ["SOCIAL_ENGINEERING"]
     assert next(r["data"] for r in chain if r["kind"] == "candidates")["followup"] is True
+
+
+# ── 관찰 화면 위 상자 ─────────────────────────────────────
+_BOX_PAGE = """<!doctype html><html><style>button, input { color: transparent }</style><body style="margin:0;height:2600px;background:#fff">
+<div style="position:fixed;top:0;left:0;right:0;height:60px;background:#fff">
+  <button id="fx" style="position:absolute;left:20px;top:10px;width:120px;height:40px;border:0;background:#00ff00">고정</button></div>
+<button id="b1" style="position:absolute;left:300px;top:400px;width:160px;height:50px;border:0;background:#ff0000">일반</button>
+<input id="pw" type="password" style="position:absolute;left:100px;top:1500px;width:200px;height:40px;border:0;background:#0000ff">
+<div style="position:fixed;bottom:0;left:0;width:100%;height:50px;background:#fff">
+  <button id="fb" style="position:absolute;left:400px;top:5px;width:100px;height:40px;border:0;background:#ff00ff">아래</button></div>
+</body></html>"""
+
+
+_SPOOF = """
+const q = document.querySelector.bind(document);
+document.querySelector = (sel) => String(sel).startsWith('[data-t') ? { getBoundingClientRect: () => ({ left: 20, top: 20, width: 120, height: 40 }) } : q(sel);
+Element.prototype.getBoundingClientRect = () => ({ left: 20, top: 20, right: 140, bottom: 60, width: 120, height: 40, x: 20, y: 20 });
+Object.defineProperty(window, 'scrollY', { get: () => 0 });
+Object.defineProperty(window, 'innerWidth', { get: () => 99 });
+"""
+
+
+@pytest.mark.parametrize("scroll, spoof", [(0, False), (900, False), (1800, False), (900, True), (0, "root"), (900, "root")])
+def test_boxes_match_full_page_capture(tmp_path, scroll, spoof):
+    """상자 좌표가 관찰 화면(페이지 전체 캡처) 위 실제 위치와 맞는지: 상자 중심 픽셀이 그 요소의 색이어야 한다.
+    스크롤한 상태, 위·아래에 붙은 fixed 요소(fx·fb)도 맞아야 한다. spoof: 페이지가 querySelector·getBoundingClientRect·
+    scrollY·innerWidth 를 바꿔치기해도 상자는 실제 위치여야 한다(페이지 JS 로 재지 않으므로)."""
+    import asyncio
+
+    from PIL import Image
+    from playwright.async_api import async_playwright
+
+    from safetrace.agent.loop import boxes_from, measure_rects, png_size
+
+    colors = {"fx": (0, 255, 0), "b1": (255, 0, 0), "pw": (0, 0, 255), "fb": (255, 0, 255)}
+
+    async def go():
+        async with async_playwright() as p:
+            b = await p.chromium.launch()
+            page = await b.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content(_BOX_PAGE)
+            for i, k in enumerate(colors):
+                await page.eval_on_selector(f"#{k}", "(el, v) => el.setAttribute('data-t', v)", f"e{i}")
+            await page.evaluate(f"window.scrollTo(0, {scroll})")
+            if spoof == "root":  # 페이지가 html 자체를 옮겨도(여백·위치) 스크롤 위치로 오인하지 않아야 한다
+                await page.add_style_tag(content="html { position: relative; margin-left: 200px; top: 37px }")
+            elif spoof:
+                await page.evaluate(_SPOOF)
+            root, rects = await measure_rects(page, "data-t", ["e0", "e1", "e2", "e3"])
+            png = await page.screenshot(full_page=True, animations="disabled")
+            await b.close()
+            return root, rects, png
+
+    root, rects, png = asyncio.run(go())
+    shot = tmp_path / "s.png"
+    shot.write_bytes(png)
+    img = Image.open(shot).convert("RGB")
+    assert png_size(shot) == img.size
+    boxes = boxes_from(root, rects, png_size(shot), ["e0", "e1", "e2"], 1)
+    assert boxes is not None and boxes["size"] == list(img.size)
+    found = {**{k: boxes["cand"].get(f"e{i}") for i, k in enumerate(["fx", "b1", "pw"])}, "fb": boxes["forbidden"][0]}
+    # 버튼 글자는 투명하게 둔다(CI 는 나눔 글꼴이라 상자 중심에 글자 가장자리가 걸려 (0,247,0)·(231,0,103) 이 찍혔다).
+    # 렌더링 차이에 덜 민감하게 정확한 값 대신 가장 가까운 색(배경 포함)이 그 요소인지 본다.
+    palette = {**colors, "bg": (255, 255, 255)}
+    for k, bx in found.items():
+        assert bx is not None, k
+        x, y, w, hh = bx
+        px = img.getpixel((x + w // 2, y + hh // 2))
+        near = min(palette, key=lambda c: sum((a - b) ** 2 for a, b in zip(px, palette[c])))
+        assert near == k, (k, px, bx, scroll, spoof)
+
+
+def test_boxes_skip_duplicated_marker(tmp_path):
+    """페이지가 표시 속성을 다른 요소에도 붙이면(어느 요소인지 모름) 그 상자는 그리지 않는다."""
+    import asyncio
+
+    from playwright.async_api import async_playwright
+
+    from safetrace.agent.loop import measure_rects
+
+    async def go():
+        async with async_playwright() as p:
+            b = await p.chromium.launch()
+            page = await b.new_page()
+            await page.set_content('<button data-t="e0">a</button><button data-t="e0">b</button><button data-t="e1">c</button>')
+            r = await measure_rects(page, "data-t", ["e0", "e1", "x]"])
+            await b.close()
+            return r
+
+    root, rects = asyncio.run(go())
+    assert root is not None and rects[0] is None and rects[1] is not None and rects[2] is None

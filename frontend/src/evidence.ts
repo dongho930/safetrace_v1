@@ -131,7 +131,7 @@ export function buildReasons(events: EvidenceEvent[], c: CaseOut): Reason[] {
 }
 
 // ── 근거 화면(최대 4장): 카드 순서 → 첫 화면 → 마지막 화면 ─────────────
-export type Screen = { n: number; title: string; note: string; ev: string; url: string; file: string; tone: Tone; reason: string | null };
+export type Screen = { n: number; title: string; note: string; ev: string; seq: number | null; url: string; file: string; tone: Tone; reason: string | null };
 
 export function buildScreens(reasons: Reason[], events: EvidenceEvent[]): Screen[] {
   const bySeq = new Map(events.map((e) => [e.seq, e]));
@@ -139,7 +139,7 @@ export function buildScreens(reasons: Reason[], events: EvidenceEvent[]): Screen
   const add = (file: string | null, seq: number | null, title: string, note: string, tone: Tone, reason: string | null) => {
     if (!file || out.length >= 4 || out.some((s) => s.file === file)) return;
     const obs = seq != null ? bySeq.get(seq) : undefined;
-    out.push({ n: out.length + 1, title, note, ev: seq != null ? `EV-${seq}` : "-", url: str(obs?.data.url), file, tone, reason });
+    out.push({ n: out.length + 1, title, note, ev: seq != null ? `EV-${seq}` : "-", seq, url: str(obs?.data.url), file, tone, reason });
   };
   for (const r of reasons) add(r.shot, r.shotSeq, r.title, r.text, r.tone, r.key);
   const observes = events.filter((e) => e.kind === "observe" && !isSub(e) && png(e));
@@ -216,4 +216,58 @@ function fold(m: PathMap): PathMap {
     branches: [...m.branches.slice(0, keepHead), midBranches, ...m.branches.slice(-keepTail)],
     more: m.more,
   };
+}
+
+// ── 화면 위 표시: 관찰 기록의 boxes(에이전트가 캡처 직전에 잰 요소 상자, 서명 기록 안) ─────────────
+// 금지 요소(빨간 점선) · Jev 가 고른 버튼(파랑) · 안전 게이트가 막은 버튼(빨간 실선). 좌표는 캡처 이미지 픽셀.
+export type MarkKind = "forbidden" | "picked" | "blocked";
+export type Mark = { kind: MarkKind; x: number; y: number; w: number; h: number; label: string };
+export type Overlay = { w: number; h: number; marks: Mark[] };
+const MAX_MARKS = 60;
+const isInt = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v);
+// 기록 값(믿지 않음): 정수 4개이고 캡처 크기 안의 상자만
+function box(v: unknown, w: number, h: number): [number, number, number, number] | null {
+  if (!Array.isArray(v) || v.length !== 4 || !v.every(isInt)) return null;
+  const [x, y, bw, bh] = v as number[];
+  return x >= 0 && y >= 0 && bw > 0 && bh > 0 && x + bw <= w && y + bh <= h ? [x, y, bw, bh] : null;
+}
+
+export function buildOverlay(events: EvidenceEvent[], seq: number | null): Overlay | null {
+  if (seq == null) return null;
+  const obs = events.find((e) => e.seq === seq && e.kind === "observe");
+  const raw = obs?.data.boxes;
+  if (!obs || !raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const b = raw as Record<string, unknown>;
+  const size = b.size;
+  if (!Array.isArray(size) || size.length !== 2 || !size.every(isInt)) return null;
+  const [w, h] = size as number[];
+  if (w <= 0 || h <= 0 || w > 10000 || h > 20000) return null;
+  const marks: Mark[] = [];
+  // 금지 요소: forbidden 글자 목록과 같은 순서
+  const names = strs(obs.data.forbidden);
+  const fb = Array.isArray(b.forbidden) ? b.forbidden.slice(0, 50) : [];
+  fb.forEach((v, i) => {
+    const r = box(v, w, h);
+    // 이름 형식 reason:type:label — 근거 카드처럼 label 만(없으면 전체)
+    const name = names[i] ?? "";
+    const label = name.split(":").slice(2).join(":") || name;
+    if (r) marks.push({ kind: "forbidden", x: r[0], y: r[1], w: r[2], h: r[3], label: `금지 요소 · ${clip(label, 40)}` });
+  });
+  // 이 화면에서 Jev 가 고른 버튼과, 그 클릭을 안전 게이트가 막았는지
+  const cand = b.cand && typeof b.cand === "object" && !Array.isArray(b.cand) ? (b.cand as Record<string, unknown>) : {};
+  const dec = events.find((e) => e.kind === "decision" && e.data.observe_seq === seq);
+  const choice = dec ? str(dec.data.choice) : "";
+  if (dec && choice.startsWith("click_")) {
+    const id = choice.slice(6);
+    // 요소 ID 는 에이전트가 붙인 e숫자 형식만(상속 키·임의 키를 찾지 않게)
+    const r = /^e\d{1,6}$/.test(id) && Object.prototype.hasOwnProperty.call(cand, id) ? box(cand[id], w, h) : null;
+    if (r) {
+      // 요소 ID 는 관찰마다 다시 쓰이므로 같은 조사(sub)·같은 단계(step)의 게이트만 본다
+      const gate = events.find((e) => e.kind === "gate" && e.seq > dec.seq && e.data.sub === obs.data.sub && e.data.step === dec.data.step && str(e.data.element) === id);
+      const blocked = gate?.data.allowed === false;
+      const label = `${blocked ? "안전 게이트가 막은 클릭" : "Jev 가 고른 버튼"} · “${clip(candidateText(obs, id), 40)}”`;
+      marks.push({ kind: blocked ? "blocked" : "picked", x: r[0], y: r[1], w: r[2], h: r[3], label });
+    }
+  }
+  return marks.length ? { w, h, marks: marks.slice(0, MAX_MARKS) } : null;
 }

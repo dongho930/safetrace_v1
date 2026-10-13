@@ -72,6 +72,85 @@ def is_auto_redirect_page(text: str) -> bool:
     return bool(_AUTO_REDIRECT.search(text[:2000]))
 
 
+_EID = re.compile(r"e\d{1,6}")  # 관찰이 요소에 붙이는 ID 형식
+# 상자 하나를 찾는 최대 시간(있는 요소는 바로 찾는다. 사라졌으면 이만큼 기다리고 포기, 상자들은 동시에 잰다).
+# 새 페이지의 첫 측정은 Playwright 가 스크립트를 주입해 2~3배 느리다(CPU 8배 감속 시 약 150ms). 150ms 일 때 CI 에서 상자가 통째로 빠졌다.
+_BOX_TIMEOUT_MS = 500
+
+
+async def measure_rects(page: Page, attr: str, ids: list[str]) -> tuple[dict | None, list[dict | None]]:
+    """관찰 화면 위에 그릴 요소 상자를 잰다. 페이지 JS(바꿔치기할 수 있는 querySelector·getBoundingClientRect·scrollY)를
+    쓰지 않고 Playwright 의 bounding_box(분리된 실행 영역에서 찾고 브라우저 프로토콜로 잼)를 쓴다.
+    스크롤 위치도 페이지가 옮길 수 있는 html 상자 대신 브라우저 프로토콜(Page.getLayoutMetrics)에서 읽는다.
+    결과: (원점 {"x": -스크롤X, "y": -스크롤Y}, 요소마다 창 기준 상자). 표시 속성이 둘 이상에 붙어 있으면 None."""
+    async def bb(sel: str | None) -> dict | None:
+        if sel is None:
+            return None
+        try:
+            return await page.locator(sel).bounding_box(timeout=_BOX_TIMEOUT_MS)
+        except (PWError, PWTimeout):
+            return None
+
+    async def origin() -> dict | None:
+        try:
+            cdp = await page.context.new_cdp_session(page)
+            try:
+                v = (await cdp.send("Page.getLayoutMetrics"))["cssVisualViewport"]
+            finally:
+                await cdp.detach()
+            return {"x": -float(v["pageX"]), "y": -float(v["pageY"])}
+        except (PWError, PWTimeout, KeyError, TypeError, ValueError):
+            return None
+
+    sels = [f'[{attr}="{i}"]' if _EID.fullmatch(i) else None for i in ids]
+    root, *rects = await asyncio.gather(origin(), *(bb(x) for x in sels))
+    return root, rects
+
+
+_PNG_SIG = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])  # PNG 파일 서명
+
+
+def png_size(path: Path) -> tuple[int, int] | None:
+    """PNG 머리에서 (폭, 높이). 상자 좌표는 실제로 저장한 캡처 크기에 맞춘다."""
+    try:
+        with path.open("rb") as f:
+            head = f.read(24)
+    except OSError:
+        return None
+    if len(head) < 24 or head[:8] != _PNG_SIG or head[12:16] != b"IHDR":
+        return None
+    return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+
+
+def boxes_from(root: dict | None, rects: list[dict | None], size: tuple[int, int] | None,
+               cand_ids: list[str], n_forbidden: int) -> dict | None:
+    """창 기준 상자를 캡처 이미지 픽셀로: 창 좌표 + 스크롤(= 창 좌표 - 원점). Chromium 전체 캡처는
+    position: fixed 요소도 캡처 순간 자리에 찍으므로 같은 식이 맞는다(시험: test_boxes_match_full_page_capture).
+    캡처 범위로 자르고, 범위 밖·너무 작으면 None. 결과: {"size": [폭, 높이], "cand": {ID: [x,y,w,h]}, "forbidden": [...]}"""
+    if root is None or size is None or len(rects) != len(cand_ids) + n_forbidden:
+        return None
+    w, h = size
+
+    def one(r: dict | None) -> list[int] | None:
+        if r is None:
+            return None
+        x0, y0 = r["x"] - root["x"], r["y"] - root["y"]
+        x1, y1 = min(x0 + r["width"], w), min(y0 + r["height"], h)
+        x, y = max(0.0, x0), max(0.0, y0)
+        if x1 - x < 2 or y1 - y < 2:
+            return None
+        bx = [round(x), round(y), round(x1 - x), round(y1 - y)]
+        bx[2], bx[3] = min(bx[2], w - bx[0]), min(bx[3], h - bx[1])
+        return bx if bx[2] > 0 and bx[3] > 0 else None
+
+    out = [one(r) for r in rects]
+    cand = {i: b for i, b in zip(cand_ids, out[: len(cand_ids)]) if b}
+    forbidden = out[len(cand_ids):]
+    if not cand and not any(forbidden):
+        return None
+    return {"size": [w, h], "cand": cand, "forbidden": forbidden}
+
+
 def classify_goto_error(e: Exception) -> dict:
     """최초 접속 실패를 '사이트가 내려감'과 '우리를 막음'을 구분할 수 있는 분류로 바꾼다."""
     if isinstance(e, PWTimeout):
@@ -311,6 +390,7 @@ class AgentRun:
         infos: dict[str, ElementInfo] = {}
         cands: list[tuple[int, Candidate]] = []
         forbidden: list[str] = []
+        forbidden_ids: list[str] = []  # forbidden 과 같은 순서의 요소 ID(화면 위 상자용)
         ocr = get_ocr() if self.s.ocr_enabled else None
         # OCR 은 조사 마감과 관찰당 상한 중 이른 시각까지만 한다. 화면 안·큰 요소부터 읽어 중요한 버튼을 먼저 처리한다
         ocr_until = time.monotonic() + min(self.budget.remaining(), self.s.ocr_observe_max_seconds)
@@ -328,6 +408,7 @@ class AgentRun:
             if reason:
                 label = (item.get("name") or info.text)[:30]
                 forbidden.append(f"{reason}:{info.type or info.tag}:{mask_pii(label)}")
+                forbidden_ids.append(eid)
                 continue
             if not info.text and item.get("imgOnly") and ocr and ocr.available:
                 need.append((len(entries), eid, info))
@@ -355,11 +436,13 @@ class AgentRun:
                     reason = classify_forbidden(ElementInfo(**{**info.__dict__, "text": text}))
                     if reason:
                         forbidden.append(f"{reason}:ocr:{mask_pii(text[:30])}")
+                        forbidden_ids.append(eid)
                         continue
             if not text and item.get("imgOnly"):
                 # 글자를 읽을 수 없는 이미지 버튼(OCR 없음·인식 실패)은 무엇인지 모르므로 누르지 않는다.
                 # 이미지로 된 '결제' 버튼이 빈 이름으로 선택지에 오르는 것을 막는다.
                 forbidden.append(f"unreadable_image:{info.tag}")
+                forbidden_ids.append(eid)
                 continue
             host = urlsplit(info.href).hostname if info.href.startswith("http") else None
             if (page.url, mask_pii(text)[:40]) in self._dead_links or host in dead_hosts:
@@ -374,13 +457,18 @@ class AgentRun:
         text = mask_pii(raw.get("text", ""))[:4000]
         state = PageState(step=step, url=page.url[:2048], title=mask_pii(raw.get("title", ""))[:200], text=text,
                           candidates=chosen, has_popup=bool(raw.get("popup")), history=self.history[-30:])
+        # 상자는 캡처 직전에 잰다(OCR 캡처가 스크롤을 되돌린 뒤), 크기는 실제 캡처 파일에서
+        cand_ids, forb_ids = [c.id for c in chosen], forbidden_ids[:50]
+        root, rects = await measure_rects(page, self.attr, cand_ids + forb_ids)
         shot = await self._screenshot(page, "observe", full=True)
+        boxes = boxes_from(root, rects, png_size(self.ev.file_path(shot)), cand_ids, len(forb_ids)) if shot else None
         text_hash = hashlib.sha256(raw.get("text", "").encode()).hexdigest()
         seq = self._record("observe", {
             "step": step, "url": page.url[:2048], "title": state.title,
             "candidates": [c.model_dump() for c in chosen],
             "forbidden": forbidden[:50], "has_popup": state.has_popup,
             "text_excerpt": text[:1500], "text_sha256": text_hash, "ocr_skipped": ocr_skipped,
+            **({"boxes": boxes} if shot and boxes else {}),
         }, [shot] if shot else [])
         # 같은 화면 판정: URL·버튼 글자에 '남은 선택지'까지 넣는다. 효과 없던 행동이 빠져 선택지가 줄면 다른 상태로 보고
         # (줄어들기만 하므로 끝이 있다), 페이지를 오가는 진짜 반복은 그대로 잡는다.
