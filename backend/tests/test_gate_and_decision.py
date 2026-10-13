@@ -280,6 +280,20 @@ def test_live_click_survives_slow_viewer():
     assert pub2.got == []
 
 
+def test_forward_limit_drops_oversized_and_flood(monkeypatch):
+    """Codex 지적: 침해된 에이전트가 통로로 쏟아내도 API 는 너무 큰 메시지와 1초에 60개를 넘는 메시지를 넘기지 않는다."""
+    from safetrace import live
+
+    clock = [10.0]
+    monkeypatch.setattr(live.time, "monotonic", lambda: clock[0])
+    lim = live.ForwardLimit()
+    assert not lim.ok(b"x" * (live.MAX_MESSAGE_BYTES + 1))
+    passed = sum(lim.ok(b"frame") for _ in range(1000))
+    assert passed == live.MAX_MESSAGES_PER_S
+    clock[0] += 1.0  # 다음 1초에는 다시 넘긴다
+    assert lim.ok(b"frame")
+
+
 def test_local_live_keeps_click_and_end_for_slow_viewer():
     import asyncio
 

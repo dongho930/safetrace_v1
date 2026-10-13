@@ -486,6 +486,17 @@ def test_swap_after_observe_blocked(settings, testpages):
     assert_no_forbidden(chain, testpages)
 
 
+def test_swap_on_scroll_before_click_blocked(settings, testpages):
+    """Codex 지적: 누르려고 버튼을 창 안으로 스크롤하는 순간 페이지가 결제 버튼으로 바꿔도 누르지 않는다.
+    스크롤(클릭 표시 좌표 재기)은 게이트 검사 전에 하고, 검사는 스크롤 뒤의 요소를 본다."""
+    _, final, chain, _ = run(f"{BASE}/attack/swap-scroll.html", settings, testpages)
+    gates = [r["data"] for r in chain if r["kind"] == "gate"]
+    assert gates and not any(g["allowed"] for g in gates), gates
+    assert any(g["reason"] in {"element_changed", "forbidden:payment"} for g in gates), gates
+    assert not any("pay.html" in r["data"].get("result_url", "") for r in chain if r["kind"] == "action")
+    assert_no_forbidden(chain, testpages)
+
+
 def test_non_http_schemes_excluded(settings, testpages):
     _, final, chain, _ = run(f"{BASE}/attack/scheme.html", settings, testpages)
     obs = next(r for r in chain if r["kind"] == "observe")
@@ -817,6 +828,9 @@ def test_boxes_match_full_page_capture(tmp_path, scroll, spoof):
                 await page.add_style_tag(content="html { position: relative; margin-left: 200px; top: 37px }")
             elif spoof:
                 await page.evaluate(_SPOOF)
+            # 스크롤·스타일을 바꾼 직후 화면 한 장이 지나기 전에 찍으면 fixed 요소가 이전 자리에 그려질 때가 있었다(20회 중 4회,
+            # 기다리면 0회). 에이전트도 스크롤 뒤 화면을 기다린 다음 재고 찍는다
+            await page.evaluate("() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))")
             root, rects = await measure_rects(page, "data-t", ["e0", "e1", "e2", "e3"])
             png = await page.screenshot(full_page=True, animations="disabled")
             await b.close()

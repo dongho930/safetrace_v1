@@ -32,6 +32,29 @@ def is_control(item: bytes) -> bool:
     return item == END or item[:1] == b"{"
 
 
+# API 가 콘솔로 넘기는 상한(Codex 지적: 침해된 에이전트가 통로로 메시지를 쏟아내도 콘솔·연결이 버티게).
+# 정상 프레임은 1280×800 JPEG 수백 KB, LiveSink 가 초당 30장 이하로 보낸다(클릭 표시는 단계마다 1개)
+MAX_MESSAGE_BYTES = 2 * 1024 * 1024
+MAX_MESSAGES_PER_S = 60
+
+
+class ForwardLimit:
+    """연결 하나가 콘솔로 넘길 메시지를 고른다: 너무 크거나 1초에 MAX_MESSAGES_PER_S 를 넘으면 버린다."""
+
+    def __init__(self, per_s: int = MAX_MESSAGES_PER_S, max_bytes: int = MAX_MESSAGE_BYTES):
+        self.per_s, self.max_bytes = per_s, max_bytes
+        self._t, self._n = 0.0, 0
+
+    def ok(self, item: bytes) -> bool:
+        if len(item) > self.max_bytes:
+            return False
+        now = time.monotonic()
+        if now - self._t >= 1.0:
+            self._t, self._n = now, 0
+        self._n += 1
+        return self._n <= self.per_s
+
+
 class LivePublisher(Protocol):
     def watching(self, case_id: str) -> bool: ...
     def publish(self, case_id: str, jpeg: bytes) -> None: ...

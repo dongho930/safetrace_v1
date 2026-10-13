@@ -1858,6 +1858,10 @@ const LIVE_GAP_MS = 250;
 const LIVE_FADE_MS = 150;
 const LIVE_MAX_QUEUE = 8;
 const LIVE_MAX_LAG_MS = 450;
+// 받는 쪽 상한(Codex 지적: 침해된 에이전트가 통로로 메시지를 쏟아내도 콘솔이 디코딩을 끝없이 시작하지 않게).
+// 정상 프레임은 1280×800 JPEG 수백 KB, 초당 30장 이하
+const LIVE_MAX_BYTES = 2 * 1024 * 1024;
+const LIVE_MAX_DECODING = 2;
 
 function LiveVideo({
   caseId,
@@ -1896,6 +1900,29 @@ function LiveVideo({
     let iv = 33; // 이어서 올 때의 프레임 간격(ms, 이동 평균)
     let lastArrival = 0;
     let raf = 0;
+    let decoding = 0; // 디코드 중인 프레임 수(최대 LIVE_MAX_DECODING)
+    let waiting: { blob: Blob; at: number } | null = null; // 밀렸을 때 기다리는 가장 최근 프레임 하나
+    let reading = 0; // 읽는 중인 작은 메시지 수
+    const decode = (blob: Blob, at: number) => {
+      decoding += 1;
+      createImageBitmap(blob) // 메인 스레드 밖에서 디코드
+        .then((bmp) => {
+          if (!alive) return bmp.close();
+          let i = queue.length; // 디코드가 순서를 바꿔 끝내도 받은 순서대로
+          while (i > 0 && queue[i - 1].at > at) i--;
+          queue.splice(i, 0, { bmp, at });
+          while (queue.length > LIVE_MAX_QUEUE) queue.shift()!.bmp.close();
+        })
+        .catch(() => undefined) // 깨진 프레임은 건너뛴다
+        .finally(() => {
+          decoding -= 1;
+          if (waiting && alive) {
+            const w = waiting;
+            waiting = null;
+            decode(w.blob, w.at);
+          }
+        });
+    };
     const paint = (now: number) => {
       const c = canvas.current;
       const ctx = c?.getContext("2d");
@@ -1952,14 +1979,22 @@ function LiveVideo({
     }, 8000);
     ws.onopen = () => ws.send(JSON.stringify({ token: getToken() }));
     ws.onmessage = (e) => {
-      const blob = e.data as Blob;
+      const blob = e.data;
       const at = performance.now();
+      if (!(blob instanceof Blob) || blob.size > LIVE_MAX_BYTES) return;
       if (blob.size < 256) {
-        // JPEG 프레임이 아닌 작은 메시지: 클릭 표시 {"click":[...]}. 모양이 틀리면 버린다
-        void blob.text().then((t) => {
-          const p = liveClick(t);
-          if (p && alive && clicks.length < 20) clicks.push({ p, at });
-        }, () => undefined);
+        // JPEG 프레임이 아닌 작은 메시지: 클릭 표시 {"click":[...]}. 모양이 틀리면 버린다. 몰려오면 읽기 전에 버린다
+        if (reading >= 2 || clicks.length >= 20) return;
+        reading += 1;
+        void blob
+          .text()
+          .then((t) => {
+            const p = liveClick(t);
+            if (p && alive && clicks.length < 20) clicks.push({ p, at });
+          }, () => undefined)
+          .finally(() => {
+            reading -= 1;
+          });
         return;
       }
       count += 1;
@@ -1970,15 +2005,11 @@ function LiveVideo({
       const gap = at - lastArrival;
       if (lastArrival && gap <= LIVE_GAP_MS) iv = Math.min(120, Math.max(16, iv * 0.85 + gap * 0.15));
       lastArrival = at;
-      createImageBitmap(blob) // 메인 스레드 밖에서 디코드
-        .then((bmp) => {
-          if (!alive) return bmp.close();
-          let i = queue.length; // 디코드가 순서를 바꿔 끝내도 받은 순서대로
-          while (i > 0 && queue[i - 1].at > at) i--;
-          queue.splice(i, 0, { bmp, at });
-          while (queue.length > LIVE_MAX_QUEUE) queue.shift()!.bmp.close();
-        })
-        .catch(() => undefined); // 깨진 프레임은 건너뛴다
+      if (decoding >= LIVE_MAX_DECODING) {
+        waiting = { blob, at }; // 밀리면 디코드하기 전에 버리고 가장 최근 것 하나만 기다린다
+        return;
+      }
+      decode(blob, at);
     };
     ws.onclose = () => {
       if (alive) cb.current.onEnd();

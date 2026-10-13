@@ -130,6 +130,7 @@ _RESTORE_JS = """([mark, saved]) => {
   if (saved) { document.documentElement.scrollTop = saved[0]; if (document.body) document.body.scrollTop = saved[1]; }
 }"""
 _LAYOUT_TIMEOUT_S = 2.0
+_TWO_FRAMES_JS = "() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))"
 
 
 @contextlib.asynccontextmanager
@@ -144,6 +145,11 @@ async def full_layout(page: Page, mark: str):
     except PWError:
         saved = None
     ok = isinstance(saved, list) and len(saved) == 2 and all(isinstance(v, (int, float)) for v in saved)
+    if ok:  # 펼친 배치가 화면에 한 번 그려진 뒤 재고 찍는다(바로 찍으면 fixed 요소가 이전 자리에 그려질 때가 있다)
+        try:
+            await asyncio.wait_for(page.evaluate(_TWO_FRAMES_JS), 1.0)
+        except (PWError, asyncio.TimeoutError):
+            pass
     try:
         yield ok
     finally:
@@ -713,13 +719,21 @@ class AgentRun:
     async def _click_point(self, page: Page, eid: str) -> list[int] | None:
         """누를 요소를 창 안으로 옮기고(Playwright 클릭도 누르기 전에 하는 일) 창 기준 상자 [x, y, 폭, 높이]를 잰다.
         콘솔이 실시간 화면·녹화 재생 위에 클릭 표시를 그리는 데 쓴다(녹화 파일은 그대로). 상자는 페이지 JS 가 아니라
-        브라우저 프로토콜로 잰다(measure_rects 와 같음). 못 재거나 창 밖이면 None — 클릭은 그대로 한다."""
+        브라우저 프로토콜로 잰다(measure_rects 와 같음). 못 재거나 창 밖이면 None — 클릭은 그대로 한다.
+        게이트 검사 전에 부른다. 스크롤 뒤 화면 두 장을 기다려 페이지의 스크롤 처리(바꿔치기 포함)가 검사 전에 끝나게 한다."""
         vp = page.viewport_size
         if not _EID.fullmatch(eid) or not vp:
             return None
         loc = page.locator(f"[{self.attr}='{eid}']").first
         try:
             await loc.scroll_into_view_if_needed(timeout=2000)
+        except (PWError, PWTimeout):
+            return None
+        try:  # 스크롤 이벤트는 다음 화면에 전달된다: 그 처리가 끝난 뒤 재고 검사한다(응답하지 않는 페이지는 1초까지만)
+            await asyncio.wait_for(page.evaluate(_TWO_FRAMES_JS), 1.0)
+        except (PWError, asyncio.TimeoutError):
+            pass
+        try:
             bb = await loc.bounding_box(timeout=_BOX_TIMEOUT_MS)
         except (PWError, PWTimeout):
             return None
@@ -1022,9 +1036,12 @@ class AgentRun:
             offered = set(obs.infos)
             outcome = ""
             if decision.action == ActionKind.CLICK:
+                # 클릭 표시 좌표는 게이트 검사 전에 잰다: 누르려고 창 안으로 옮기는 스크롤에 페이지가 반응해 요소를 바꿔도
+                # (결제 버튼으로 바꿔치기) 검사가 스크롤 뒤의 요소를 본다(Codex 지적: 검사 뒤에 스크롤하면 바뀐 요소를 눌렀다)
+                point = await self._click_point(page, decision.element_id or "")
                 cur = await self._read_element(page, decision.element_id or "")
                 gate = self.gate.check_click(offered, decision.element_id, obs.infos.get(decision.element_id or ""), cur)
-                point = await self._click_point(page, decision.element_id or "") if gate.allowed else None
+                point = point if gate.allowed else None
                 if point and self.live:
                     self.live.click(point)  # 콘솔 실시간 화면의 클릭 표시(영상과 같은 통로라 누르기 직전 화면에 맞춰 보인다)
                 self._record("gate", {"step": step, "action": "click", "element": decision.element_id,
