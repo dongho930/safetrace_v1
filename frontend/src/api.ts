@@ -145,8 +145,12 @@ export const createUser = (username: string, password: string, role: Role) =>
 export const patchUser = (username: string, patch: Partial<{ role: Role; active: boolean; password: string; unlock: boolean }>) =>
   req<UserOut>(`/api/users/${encodeURIComponent(username)}`, { method: "PATCH", body: JSON.stringify(patch) });
 
-export const listCases = () => req<CaseOut[]>("/api/cases?limit=50");
-export const getCase = (id: string) => req<CaseOut>(`/api/cases/${encodeURIComponent(id)}`);
+export const listCases = async () => (await req<unknown[]>("/api/cases?limit=50")).flatMap((x) => cleanCase(x) ?? []);
+export const getCase = async (id: string) => {
+  const c = cleanCase(await req<unknown>(`/api/cases/${encodeURIComponent(id)}`));
+  if (!c) throw new ApiError(500, "사건 형식 오류");
+  return c;
+};
 export const createCase = (url: string, source: string) =>
   req<CaseOut>("/api/cases", {
     method: "POST",
@@ -210,13 +214,103 @@ export async function streamEvents(caseId: string, onEvent: (e: AgentEvent) => v
         .filter((l) => l.startsWith("data: "))
         .map((l) => l.slice(6))
         .join("\n");
-      if (data) {
+      if (data && data.length <= MAX_EVENT_CHARS) {
+        let ev: AgentEvent | null = null;
         try {
-          onEvent(JSON.parse(data) as AgentEvent);
+          ev = cleanEvent(JSON.parse(data));
         } catch {
           /* 형식 오류 이벤트는 무시 */
         }
+        if (ev) onEvent(ev);
       }
     }
   }
+}
+
+// 이벤트 하나의 최대 크기(글자). 정상 기록은 수 KB 이고, 더 크면 화면에 쓰지 않고 버린다(콘솔 메모리 보호)
+export const MAX_EVENT_CHARS = 256 * 1024;
+
+// 기록은 격리된 에이전트(믿지 않는 쪽)에서 온다. 화면이 기대하는 모양이 아니면 버린다(렌더링 중 예외로 콘솔이 멈추지 않게)
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+export function cleanEvent(raw: unknown): AgentEvent | null {
+  if (!isObj(raw)) return null;
+  if (raw.type === "evidence") {
+    const { seq, kind, data, files, hash } = raw;
+    if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 0 || typeof kind !== "string" || !isObj(data)) return null;
+    if (!Array.isArray(files) || !files.every((f) => typeof f === "string")) return null;
+    return { type: "evidence", seq, kind: kind.slice(0, 40), data, files, hash: typeof hash === "string" ? hash : "" };
+  }
+  if (raw.type === "status") {
+    if (typeof raw.status !== "string") return null;
+    return { type: "status", status: raw.status.slice(0, 24), reason: typeof raw.reason === "string" ? raw.reason : null };
+  }
+  if (raw.type === "step") {
+    if (typeof raw.step !== "number" || typeof raw.url !== "string") return null;
+    return { type: "step", step: raw.step, url: raw.url };
+  }
+  return null;
+}
+// 기록 안의 목록 값: 배열이 아니면 빈 목록, 항목은 원하는 모양만
+export const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
+export const strs = (v: unknown): string[] => list(v).slice(0, 200).filter((x): x is string => typeof x === "string").map((x) => x.slice(0, 2000));
+export const clickables = (v: unknown): { id: string; text: string }[] =>
+  list(v)
+    .slice(0, 200)
+    .flatMap((x) => (isObj(x) && typeof x.id === "string" ? [{ id: x.id.slice(0, 40), text: typeof x.text === "string" ? x.text.slice(0, 200) : "" }] : []));
+// 기록의 값을 화면 글자·숫자로: 글자·숫자·참거짓만 받는다(객체를 String() 하면 조작된 toString 으로 예외가 날 수 있다)
+export const text = (v: unknown, n = 2000): string =>
+  typeof v === "string" ? v.slice(0, n) : typeof v === "number" || typeof v === "boolean" ? String(v) : "";
+export const num = (v: unknown): number => (typeof v === "number" ? v : NaN);
+// 고정 문구 표: 자체 키만 찾는다(toString·constructor 같은 상속 키로 함수가 나오지 않게)
+export const dict = <T,>(o: Record<string, T>): Record<string, T> => Object.assign(Object.create(null) as Record<string, T>, o);
+
+// 사건의 위협 판단·후보는 워커가 보낸 값을 API 가 저장한 것이다. 화면이 쓰는 모양으로만 받는다(목록 한 줄 때문에 콘솔 전체가 멈추지 않게)
+const strOr = (v: unknown, d: string | null = null) => (typeof v === "string" ? v : d);
+const numOr = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+function cleanThreat(v: unknown): Threat | null {
+  if (!isObj(v) || typeof v.threat !== "string") return null;
+  const probs: Record<string, number> = {};
+  if (isObj(v.probabilities)) for (const [k, p] of Object.entries(v.probabilities).slice(0, 20)) if (typeof p === "number" && Number.isFinite(p)) probs[k] = p;
+  const o = v.override;
+  const original = isObj(o) && isObj(o.original) ? o.original : null;
+  return {
+    threat: v.threat.slice(0, 32),
+    probability: numOr(v.probability),
+    probabilities: probs,
+    hold: v.hold === true,
+    provider: strOr(v.provider, "") as string,
+    model: strOr(v.model, "") as string,
+    evidence_seqs: list(v.evidence_seqs).filter((x): x is number => typeof x === "number").slice(0, 50),
+    override:
+      isObj(o) && typeof o.reason === "string"
+        ? {
+            reason: o.reason,
+            operators: strs(o.operators),
+            brand: strOr(o.brand) ?? undefined,
+            destination: strOr(o.destination) ?? undefined,
+            original: { threat: strOr(original?.threat, "") as string, probability: numOr(original?.probability), provider: strOr(original?.provider, "") as string },
+          }
+        : undefined,
+  };
+}
+export function cleanCase(v: unknown): CaseOut | null {
+  if (!isObj(v) || typeof v.id !== "string" || typeof v.url !== "string" || typeof v.status !== "string" || typeof v.created_at !== "string") return null;
+  const sb = isObj(v.safebrowsing) && typeof v.safebrowsing.status === "string"
+    ? { status: v.safebrowsing.status, matches: list(v.safebrowsing.matches).flatMap((m) => (isObj(m) ? [{ url: strOr(m.url, "") as string, threat_type: strOr(m.threat_type, "") as string }] : [])) }
+    : null;
+  const ver = isObj(v.verdict) && typeof v.verdict.rev === "number" && typeof v.verdict.decision === "string" ? (v.verdict as unknown as Verdict) : null;
+  return {
+    id: v.id,
+    url: v.url,
+    source: strOr(v.source, "") as string,
+    status: v.status,
+    finish_reason: strOr(v.finish_reason),
+    final_url: strOr(v.final_url),
+    threat: cleanThreat(v.threat),
+    safebrowsing: sb,
+    candidates: list(v.candidates).flatMap((x): (Candidate | string)[] => (typeof x === "string" ? [x] : isObj(x) && typeof x.url === "string" ? [x as Candidate] : [])),
+    head_seq: typeof v.head_seq === "number" ? v.head_seq : null,
+    created_at: v.created_at,
+    verdict: ver,
+  };
 }
