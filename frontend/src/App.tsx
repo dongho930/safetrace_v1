@@ -36,7 +36,10 @@ import {
   type Threat,
   verifyCase,
 } from "./api";
-import { buildOverlay, buildPath, buildReasons, buildScreens, clip, hostOrFile, hostPath, type Overlay, type Reason, type Screen, type Tone } from "./evidence";
+import {
+  buildOverlay, buildPath, buildReasons, buildScreens, clip, hostOrFile, hostPath, liveClick, recordingClicks, SCREEN_H, SCREEN_W,
+  type ClickPoint, type Overlay, type Reason, type RecClick, type Screen, type Tone,
+} from "./evidence";
 import { ACTION_LABEL, NET_CATEGORY_LABEL, overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
 
 // 조사 대상 페이지에서 온 문자열은 모두 React 기본 이스케이프로만 출력한다(raw HTML 금지).
@@ -664,6 +667,9 @@ function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) 
   }, [c.id]);
 
   const { steps, shot, act } = view;
+  // 클릭 표시: 영상과 같은 통로로 와서 같은 재생 버퍼를 거친다(누르기 직전 화면에 맞춰 보인다). n 이 바뀔 때 물결
+  const [click, setClick] = useState<{ p: ClickPoint; n: number } | null>(null);
+  const onClick = useCallback((p: ClickPoint) => setClick((c) => ({ p, n: (c?.n ?? 0) + 1 })), []);
   const still = shot ? <LiveScreen caseId={c.id} name={shot} /> : <span className="small">첫 화면을 기다리는 중…</span>;
   return (
     <>
@@ -681,7 +687,8 @@ function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) 
         </button>
       </div>
       <div className="monitor-screen screen-body">
-        {!ended && !videoOff ? <LiveVideo caseId={c.id} onFps={setFps} onEnd={() => setVideoOff(true)} fallback={still} /> : still}
+        {!ended && !videoOff ? <LiveVideo caseId={c.id} onFps={setFps} onEnd={() => setVideoOff(true)} onClick={onClick} fallback={still} /> : still}
+        {click && !ended && !videoOff && <ClickMark p={click.p} hitKey={click.n} align="top" />}
         <span className="monitor-meta">
           {fps > 0 && !videoOff ? `${fps}fps · ` : ""}
           {String(steps).padStart(2, "0")}/{Math.max(MAX_STEPS, steps)}
@@ -1424,7 +1431,9 @@ function CaseTabs({
   pick: string | null;
   onPick: (f: string) => void;
 }) {
-  const recording = events.find((e) => e.kind === "recording")?.files[0];
+  const recEvent = events.find((e) => e.kind === "recording");
+  const recording = recEvent?.files[0];
+  const recClicks = useMemo(() => recordingClicks(events, recEvent), [events, recEvent]);
   const tabs: [TabId, string][] = [
     ["screens", `근거 화면 ${screens.length}`],
     ["path", "경로 지도"],
@@ -1476,7 +1485,7 @@ function CaseTabs({
         {tab === "path" && c && <PathTab c={c} events={events} />}
         {tab === "rec" && (
           <div className="floor">
-            <div className="rec-box">{recording ? <Recording caseId={id} name={recording} /> : <span className="small">녹화 없음</span>}</div>
+            <div className="rec-box">{recording ? <Recording caseId={id} name={recording} clicks={recClicks} /> : <span className="small">녹화 없음</span>}</div>
           </div>
         )}
         {tab === "log" && (
@@ -1784,8 +1793,11 @@ function CaseFooterBar({
 
 // 증거 파일은 인증 헤더가 필요하므로 blob URL 로 보여 준다
 // 조사 녹화(영상)
-function Recording({ caseId, name }: { caseId: string; name: string }) {
+// 조사 녹화 재생. clicks: 영상 시간으로 바꾼 클릭(커서는 누르기 0.6초 전에 그 버튼으로 미끄러져 가고, 누르는 순간 물결)
+function Recording({ caseId, name, clicks = [] }: { caseId: string; name: string; clicks?: RecClick[] }) {
   const [src, setSrc] = useState("");
+  const [t, setT] = useState(0);
+  const video = useRef<HTMLVideoElement>(null);
   useEffect(() => {
     let alive = true;
     let u = "";
@@ -1801,26 +1813,69 @@ function Recording({ caseId, name }: { caseId: string; name: string }) {
       if (u) URL.revokeObjectURL(u);
     };
   }, [caseId, name]);
-  return src ? <video src={src} controls /> : <span className="muted small">불러오는 중…</span>;
+  // 재생 중에는 화면 주기마다 재생 위치를 읽어 커서를 영상과 맞춘다(timeupdate 는 초당 4번뿐)
+  useEffect(() => {
+    const v = video.current;
+    if (!v || clicks.length === 0) return;
+    let raf = 0;
+    const tick = () => {
+      setT(v.currentTime);
+      if (!v.paused && !v.ended) raf = requestAnimationFrame(tick);
+    };
+    const start = () => {
+      cancelAnimationFrame(raf);
+      tick();
+    };
+    v.addEventListener("play", start);
+    v.addEventListener("seeked", start);
+    v.addEventListener("timeupdate", start);
+    return () => {
+      cancelAnimationFrame(raf);
+      v.removeEventListener("play", start);
+      v.removeEventListener("seeked", start);
+      v.removeEventListener("timeupdate", start);
+    };
+  }, [src, clicks]);
+  if (!src) return <span className="muted small">불러오는 중…</span>;
+  // 커서 위치: 0.6초 안에 누를 클릭(없으면 마지막으로 누른 곳). 물결은 누른 뒤 0.7초 동안
+  let cur = -1;
+  for (let i = 0; i < clicks.length; i++) if (t >= clicks[i].t - 0.6) cur = i;
+  const c = cur >= 0 ? clicks[cur] : null;
+  return (
+    <>
+      <video ref={video} src={src} controls />
+      {c && <ClickMark p={c} hitKey={t >= c.t && t <= c.t + 0.7 ? cur : null} align="middle" />}
+    </>
+  );
 }
 
 // 라이브 영상: 에이전트 화면 전송 프레임을 WebSocket 으로 받아 canvas 에 그린다(보기용, 증거 아님).
 // 디코드가 밀리면 최신 프레임만 그린다. 첫 프레임이 오기 전·연결이 안 될 때는 fallback(단계별 화면)을 보여 준다.
+// 실시간 화면 재생: 받은 즉시 그리지 않고 LIVE_DELAY_MS 만큼 모았다가 받은 간격의 평균으로 고르게 그린다(떨림 줄이기).
+// LIVE_GAP_MS 넘게 멈췄다가 오는 프레임(페이지 이동·관찰 중 멈춤 뒤)은 LIVE_FADE_MS 동안 겹쳐 바꾼다. 밀리면 오래된 프레임을 버린다.
+const LIVE_DELAY_MS = 150;
+const LIVE_GAP_MS = 250;
+const LIVE_FADE_MS = 150;
+const LIVE_MAX_QUEUE = 8;
+const LIVE_MAX_LAG_MS = 450;
+
 function LiveVideo({
   caseId,
   onFps,
   onEnd,
+  onClick,
   fallback,
 }: {
   caseId: string;
   onFps: (fps: number) => void;
   onEnd: () => void;
+  onClick?: (p: ClickPoint) => void;
   fallback: React.ReactNode;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const [hasFrame, setHasFrame] = useState(false);
-  const cb = useRef({ onFps, onEnd });
-  cb.current = { onFps, onEnd };
+  const cb = useRef({ onFps, onEnd, onClick });
+  cb.current = { onFps, onEnd, onClick };
 
   useEffect(() => {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -1829,25 +1884,65 @@ function LiveVideo({
     let alive = true;
     let got = false;
     let count = 0;
-    let drawing = false;
-    let pending: Blob | null = null;
-    const draw = async (b: Blob) => {
-      drawing = true;
-      try {
-        const bmp = await createImageBitmap(b); // 메인 스레드 밖에서 디코드
-        const c = canvas.current;
-        if (c && alive) c.getContext("2d")?.drawImage(bmp, 0, 0, c.width, c.height);
-        bmp.close();
-      } catch {
-        /* 깨진 프레임은 건너뛴다 */
+    const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    // 받은 프레임(디코드 끝남)을 받은 시각과 함께 쌓아 두고, 화면 주기마다 꺼내 그린다
+    const queue: { bmp: ImageBitmap; at: number }[] = [];
+    const clicks: { p: ClickPoint; at: number }[] = []; // 클릭 표시: 프레임과 같은 지연으로 내보낸다
+    let shown: ImageBitmap | null = null; // 지금 그린 프레임
+    let shownAt = 0; // 그 프레임을 받은 시각
+    let lastPresent = 0;
+    let fadeFrom: ImageBitmap | null = null; // 겹쳐 바꾸는 중인 이전 프레임
+    let fadeStart = 0;
+    let iv = 33; // 이어서 올 때의 프레임 간격(ms, 이동 평균)
+    let lastArrival = 0;
+    let raf = 0;
+    const paint = (now: number) => {
+      const c = canvas.current;
+      const ctx = c?.getContext("2d");
+      if (!c || !ctx || !shown) return;
+      if (fadeFrom) {
+        const k = (now - fadeStart) / LIVE_FADE_MS;
+        if (k < 1) {
+          ctx.globalAlpha = 1;
+          ctx.drawImage(fadeFrom, 0, 0, c.width, c.height);
+          ctx.globalAlpha = Math.max(0, k);
+          ctx.drawImage(shown, 0, 0, c.width, c.height);
+          ctx.globalAlpha = 1;
+          return;
+        }
+        fadeFrom.close();
+        fadeFrom = null;
       }
-      drawing = false;
-      if (pending && alive) {
-        const next = pending;
-        pending = null;
-        void draw(next);
-      }
+      ctx.drawImage(shown, 0, 0, c.width, c.height);
     };
+    const present = (f: { bmp: ImageBitmap; at: number }, now: number) => {
+      const old = shown;
+      // 잠시 멈췄다가(페이지 이동·관찰 중) 바뀌는 프레임은 짧게 겹쳐 바꾼다. 이어서 오는 프레임은 바로
+      if (old && f.at - shownAt > LIVE_GAP_MS && !reduce) {
+        if (fadeFrom) fadeFrom.close();
+        fadeFrom = old;
+        fadeStart = now;
+      } else if (old && old !== fadeFrom) {
+        old.close();
+      }
+      shown = f.bmp;
+      shownAt = f.at;
+      lastPresent = now;
+      paint(now);
+    };
+    const loop = (now: number) => {
+      // 너무 밀렸으면(받은 지 오래된 프레임) 최근 것만 남긴다
+      while (queue.length > 1 && now - queue[0].at > LIVE_DELAY_MS + LIVE_MAX_LAG_MS) queue.shift()!.bmp.close();
+      while (clicks.length && now >= clicks[0].at + LIVE_DELAY_MS) cb.current.onClick?.(clicks.shift()!.p);
+      // 받은 뒤 LIVE_DELAY_MS 가 지났고, 앞 프레임에서 평균 간격만큼 지났을 때(쌓이면 조금 빨리) 다음 프레임
+      if (queue.length && now >= Math.max(queue[0].at + LIVE_DELAY_MS, lastPresent + iv * (queue.length > 3 ? 0.7 : 1))) {
+        present(queue.shift()!, now);
+      } else if (fadeFrom) {
+        paint(now);
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
     const tick = setInterval(() => {
       cb.current.onFps(count);
       count = 0;
@@ -1857,23 +1952,47 @@ function LiveVideo({
     }, 8000);
     ws.onopen = () => ws.send(JSON.stringify({ token: getToken() }));
     ws.onmessage = (e) => {
+      const blob = e.data as Blob;
+      const at = performance.now();
+      if (blob.size < 256) {
+        // JPEG 프레임이 아닌 작은 메시지: 클릭 표시 {"click":[...]}. 모양이 틀리면 버린다
+        void blob.text().then((t) => {
+          const p = liveClick(t);
+          if (p && alive && clicks.length < 20) clicks.push({ p, at });
+        }, () => undefined);
+        return;
+      }
       count += 1;
       if (!got) {
         got = true;
         setHasFrame(true);
       }
-      if (drawing) pending = e.data as Blob;
-      else void draw(e.data as Blob);
+      const gap = at - lastArrival;
+      if (lastArrival && gap <= LIVE_GAP_MS) iv = Math.min(120, Math.max(16, iv * 0.85 + gap * 0.15));
+      lastArrival = at;
+      createImageBitmap(blob) // 메인 스레드 밖에서 디코드
+        .then((bmp) => {
+          if (!alive) return bmp.close();
+          let i = queue.length; // 디코드가 순서를 바꿔 끝내도 받은 순서대로
+          while (i > 0 && queue[i - 1].at > at) i--;
+          queue.splice(i, 0, { bmp, at });
+          while (queue.length > LIVE_MAX_QUEUE) queue.shift()!.bmp.close();
+        })
+        .catch(() => undefined); // 깨진 프레임은 건너뛴다
     };
     ws.onclose = () => {
       if (alive) cb.current.onEnd();
     };
     return () => {
       alive = false;
+      cancelAnimationFrame(raf);
       clearInterval(tick);
       clearTimeout(noFrame);
       cb.current.onFps(0);
       ws.close();
+      for (const f of queue) f.bmp.close();
+      shown?.close();
+      if (fadeFrom && fadeFrom !== shown) fadeFrom.close();
     };
   }, [caseId]);
 
@@ -1884,6 +2003,26 @@ function LiveVideo({
         <canvas ref={canvas} width={1280} height={800} className="live-canvas" aria-label="조사 중인 격리 브라우저 실시간 화면" />
       </div>
     </>
+  );
+}
+
+// 클릭 표시: 화면(1280×800) 좌표의 버튼 위에 커서와 클릭 물결. 화면 크기에 맞춰 줄어드는 영상·캔버스와 같은 비율로 겹친다
+// (align: 실시간 캔버스는 위쪽 맞춤, 녹화 영상은 가운데 맞춤). 커서는 앞 클릭 자리에서 미끄러져 오고, hitKey 가 바뀔 때 물결이 다시 퍼진다.
+function ClickMark({ p, hitKey, align }: { p: ClickPoint; hitKey: number | null; align: "top" | "middle" }) {
+  const cx = p.x + p.w / 2;
+  const cy = p.y + p.h / 2;
+  return (
+    <svg className="click-layer" viewBox={`0 0 ${SCREEN_W} ${SCREEN_H}`} preserveAspectRatio={align === "top" ? "xMidYMin meet" : "xMidYMid meet"} aria-hidden="true">
+      <g className="click-cursor" style={{ transform: `translate(${cx}px, ${cy}px)` }}>
+        {hitKey !== null && (
+          <g key={hitKey} className="click-hit">
+            <rect className="click-target" x={-p.w / 2 - 4} y={-p.h / 2 - 4} width={p.w + 8} height={p.h + 8} rx="6" />
+            <circle className="click-ripple" r="30" />
+          </g>
+        )}
+        <path className="click-arrow" d="M0 0 L0 30 L8 22 L14 35 L20 32 L14 20 L25 20 Z" />
+      </g>
+    </svg>
   );
 }
 

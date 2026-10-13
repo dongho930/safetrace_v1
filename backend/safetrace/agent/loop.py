@@ -540,6 +540,17 @@ class AgentRun:
         return _Observation(state, infos, forbidden, seq, key)
 
     async def _capture_many(self, page: Page, need: list[tuple[int, str, ElementInfo]], until: float) -> list:
+        """이미지 버튼들을 캡처한다(_capture_many_unpaused). 버튼을 찾아 위아래로 스크롤했다가 되돌리는 장면이
+        녹화·실시간 화면에 찍히지 않게 그동안 녹화를 멈춘다(멈춘 동안은 마지막 화면이 이어진다)."""
+        if not need or not self.rec:
+            return await self._capture_many_unpaused(page, need, until)
+        self.rec.pause()
+        try:
+            return await self._capture_many_unpaused(page, need, until)
+        finally:
+            self.rec.resume()
+
+    async def _capture_many_unpaused(self, page: Page, need: list[tuple[int, str, ElementInfo]], until: float) -> list:
         """이미지 버튼들을 캡처한다. 결과: PNG | None(보이지 않음) | "skip"(시간이 없어 찍지 않음).
 
         요소별 캡처는 요소마다 스크롤·안정 대기를 해 장당 약 0.7초가 걸린다. 여기서는 창 높이 단위로만
@@ -698,6 +709,27 @@ class AgentRun:
             await page.wait_for_load_state("networkidle", timeout=3000)
         except (PWError, PWTimeout):
             pass
+
+    async def _click_point(self, page: Page, eid: str) -> list[int] | None:
+        """누를 요소를 창 안으로 옮기고(Playwright 클릭도 누르기 전에 하는 일) 창 기준 상자 [x, y, 폭, 높이]를 잰다.
+        콘솔이 실시간 화면·녹화 재생 위에 클릭 표시를 그리는 데 쓴다(녹화 파일은 그대로). 상자는 페이지 JS 가 아니라
+        브라우저 프로토콜로 잰다(measure_rects 와 같음). 못 재거나 창 밖이면 None — 클릭은 그대로 한다."""
+        vp = page.viewport_size
+        if not _EID.fullmatch(eid) or not vp:
+            return None
+        loc = page.locator(f"[{self.attr}='{eid}']").first
+        try:
+            await loc.scroll_into_view_if_needed(timeout=2000)
+            bb = await loc.bounding_box(timeout=_BOX_TIMEOUT_MS)
+        except (PWError, PWTimeout):
+            return None
+        if not bb:
+            return None
+        x0, y0 = max(0.0, bb["x"]), max(0.0, bb["y"])
+        x1, y1 = min(float(vp["width"]), bb["x"] + bb["width"]), min(float(vp["height"]), bb["y"] + bb["height"])
+        if x1 - x0 < 1 or y1 - y0 < 1:
+            return None
+        return [round(x0), round(y0), max(1, round(x1 - x0)), max(1, round(y1 - y0))]
 
     async def _click(self, ctx: BrowserContext, page: Page, eid: str) -> tuple[Page, str]:
         """클릭하고 (현재 페이지, 결과)를 돌려준다. 결과: ok | failed | no_effect"""
@@ -992,8 +1024,13 @@ class AgentRun:
             if decision.action == ActionKind.CLICK:
                 cur = await self._read_element(page, decision.element_id or "")
                 gate = self.gate.check_click(offered, decision.element_id, obs.infos.get(decision.element_id or ""), cur)
+                point = await self._click_point(page, decision.element_id or "") if gate.allowed else None
+                if point and self.live:
+                    self.live.click(point)  # 콘솔 실시간 화면의 클릭 표시(영상과 같은 통로라 누르기 직전 화면에 맞춰 보인다)
                 self._record("gate", {"step": step, "action": "click", "element": decision.element_id,
-                                      "allowed": gate.allowed, "reason": gate.reason})
+                                      "allowed": gate.allowed, "reason": gate.reason,
+                                      # 누르기 직전 창 기준 상자와 시각(녹화 t0 와 같은 시계, epoch 초): 콘솔 클릭 표시용
+                                      **({"point": point, "at": round(time.time(), 3)} if point else {})})
                 if not gate.allowed:
                     if gate.reason.startswith("ssrf:") and cur is not None:
                         self._note_blocked_destination(cur.href, gate.reason)  # 링크 목적지를 열 수 없어 누르지 않음

@@ -239,6 +239,62 @@ def test_live_sink_keeps_30fps_with_jittery_frames(monkeypatch):
     sink.close()
 
 
+def test_live_click_survives_slow_viewer():
+    """클릭 표시는 밀려도 버리지 않고(프레임만 버림) 받은 순서대로 보낸다. 시청자가 없으면 보내지 않는다."""
+    import threading
+
+    from safetrace import live
+
+    gate = threading.Event()
+
+    class Pub:
+        def __init__(self):
+            self.got, self.watch = [], True
+
+        def watching(self, case_id):
+            return self.watch
+
+        def publish(self, case_id, item):
+            gate.wait(2)  # 느린 시청자: 첫 발행이 풀릴 때까지 밀린다
+            self.got.append(item)
+
+        def end(self, case_id):
+            pass
+
+    pub = Pub()
+    sink = live.LiveSink(pub, "c")
+    for i in range(5):
+        sink._offer(b"\xff" + bytes([i]))
+        if i == 1:
+            sink.click([10, 20, 30, 40])
+    gate.set()
+    sink.close()
+    assert b'{"click":[10,20,30,40]}' in pub.got
+    frames = [x for x in pub.got if x[:1] == b"\xff"]
+    assert frames[-1] == b"\xff\x04" and len(frames) <= 3, pub.got  # 처음 1장(밀린 동안) + 최신 2장
+    pub2 = Pub()
+    pub2.watch = False
+    s2 = live.LiveSink(pub2, "c")
+    s2.click([1, 2, 3, 4])
+    s2.close()
+    assert pub2.got == []
+
+
+def test_local_live_keeps_click_and_end_for_slow_viewer():
+    import asyncio
+
+    from safetrace import live
+
+    async def go():
+        q = asyncio.Queue()
+        for item in (b"\xff1", b'{"click":[1,2,3,4]}', b"\xff2", b"\xff3", b"\xff4", live.END):
+            live._put_latest(q, item)
+        return [q.get_nowait() for _ in range(q.qsize())]
+
+    got = asyncio.run(go())
+    assert got == [b'{"click":[1,2,3,4]}', b"\xff3", b"\xff4", live.END], got
+
+
 # ── 정부 허가 사행사업자 공식 도메인 ───────────────────────
 def _gambling_jev():
     return JevProvider("jev_typesafe", "https://x", "k", "m", 5,

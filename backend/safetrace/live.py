@@ -10,7 +10,8 @@
 from __future__ import annotations
 
 import asyncio
-import queue
+import collections
+import json
 import threading
 import time
 from collections.abc import AsyncIterator
@@ -23,6 +24,12 @@ WATCH_TTL_S = 6
 
 
 END = b""  # 조사가 끝났다는 신호(빈 메시지)
+# 클릭 표시(콘솔이 실시간 화면 위에 커서를 그린다): {"click":[x,y,폭,높이]} JSON. 영상과 같은 통로로 보내 같은 재생 버퍼를 탄다.
+# JPEG 는 0xFF 로 시작하므로 첫 바이트 "{" 로 구분한다. 밀려도 버리지 않는다(프레임만 버린다).
+
+
+def is_control(item: bytes) -> bool:
+    return item == END or item[:1] == b"{"
 
 
 class LivePublisher(Protocol):
@@ -52,7 +59,7 @@ class LocalLive:
 
     @asynccontextmanager
     async def subscribe(self, case_id: str) -> AsyncIterator[asyncio.Queue]:
-        q: asyncio.Queue = asyncio.Queue(maxsize=2)
+        q: asyncio.Queue = asyncio.Queue()  # 크기는 _put_latest 가 맞춘다(프레임 최대 2장)
         entry = (asyncio.get_running_loop(), q)
         with self._lock:
             self._subs.setdefault(case_id, set()).add(entry)
@@ -64,9 +71,17 @@ class LocalLive:
 
 
 def _put_latest(q: asyncio.Queue, item: bytes):
-    """느린 시청자는 밀린 프레임을 버리고 최신 프레임만 받는다(끝 신호는 버리지 않는다)."""
-    while q.full():
-        q.get_nowait()
+    """느린 시청자는 밀린 프레임을 버리고 최신 프레임만 받는다(끝 신호·클릭 표시는 버리지 않는다)."""
+    if not is_control(item):
+        items = []
+        while not q.empty():
+            items.append(q.get_nowait())
+        drop = sum(1 for x in items if not is_control(x)) - 1  # 새 프레임과 함께 최대 2장
+        for x in items:
+            if drop > 0 and not is_control(x):
+                drop -= 1
+                continue
+            q.put_nowait(x)
     q.put_nowait(item)
 
 
@@ -103,7 +118,7 @@ class RedisLivePublisher:
 
 class LiveSink:
     """녹화기의 화면 전송 프레임을 받아, 시청 중일 때만 최대 max_fps 로 발행한다.
-    발행은 별도 스레드에서 한다(에이전트의 이벤트 루프를 막지 않음). 밀리면 오래된 프레임을 버린다."""
+    발행은 별도 스레드에서 한다(에이전트의 이벤트 루프를 막지 않음). 밀리면 오래된 프레임을 버린다(클릭 표시는 버리지 않는다)."""
 
     def __init__(self, publisher: LivePublisher, case_id: str, max_fps: int = 30):
         self.pub, self.case_id = publisher, case_id
@@ -112,7 +127,8 @@ class LiveSink:
         self._next_slot = 0.0  # 다음 발행 가능 시각(간격이 조금 흔들려도 평균 max_fps 를 지키게)
         self._last_frame: bytes | None = None
         self._was_watching = False
-        self._q: queue.Queue[bytes | None] = queue.Queue(maxsize=2)
+        self._cv = threading.Condition()
+        self._items: collections.deque[bytes | None] = collections.deque()  # 보낼 것(프레임은 최대 2장, None 은 끝)
         self._t = threading.Thread(target=self._run, name="live-publish", daemon=True)
         self._t.start()
         self.sent = 0
@@ -140,30 +156,35 @@ class LiveSink:
                 self._offer(self._last_frame)
 
     def _offer(self, jpeg: bytes):
-        try:
-            self._q.put_nowait(jpeg)
-        except queue.Full:
-            try:
-                self._q.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self._q.put_nowait(jpeg)
-            except queue.Full:
-                pass
+        with self._cv:
+            frames = [i for i, x in enumerate(self._items) if x is not None and not is_control(x)]
+            if len(frames) >= 2:
+                del self._items[frames[0]]  # 밀리면 가장 오래된 프레임을 버린다
+            self._items.append(jpeg)
+            self._cv.notify()
+
+    def click(self, point: list[int]):
+        """에이전트가 누르기 직전의 버튼 상자. 시청 중일 때만, 프레임 속도 제한 없이 보낸다."""
+        if not self.pub.watching(self.case_id):
+            return
+        with self._cv:
+            self._items.append(json.dumps({"click": point}, separators=(",", ":")).encode())
+            self._cv.notify()
 
     def _run(self):
         while True:
-            item = self._q.get()
+            with self._cv:
+                while not self._items:
+                    self._cv.wait()
+                item = self._items.popleft()
             if item is None:
                 return
             self.pub.publish(self.case_id, item)
             self.sent += 1
 
     def close(self):
-        try:
-            self._q.put(None, timeout=1)
-        except queue.Full:
-            pass
+        with self._cv:
+            self._items.append(None)
+            self._cv.notify()
         self._t.join(timeout=2)
         self.pub.end(self.case_id)  # 시청 중인 콘솔에 끝을 알려 연결을 닫게 한다

@@ -300,4 +300,6 @@ class ScreencastRecorder:
                 "fps_mode": "vfr", "duration_s": round(self._last_ms / 1000, 3),
                 "frames": self.frames_written, "screencast_frames": self.frames_received,
                 "cdp_timestamps": self.cdp_timestamps, "heartbeat_frames": self.heartbeat_frames,
-                "heartbeat_s": HEARTBEAT_S, "source": "cdp-screencast", "jpeg_quality": self.quality}
+                "heartbeat_s": HEARTBEAT_S, "source": "cdp-screencast", "jpeg_quality": self.quality,
+                # 영상 0초의 캡처 시각(epoch 초). 콘솔이 기록 시각을 영상 시간으로 바꿔 클릭 표시를 겹친다
+                **({"t0": round(self._t0, 3)} if self._t0 is not None else {})}

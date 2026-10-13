@@ -88,6 +88,7 @@ def test_video_follows_given_capture_times(tmp_path):
     info = asyncio.run(go())
     assert info and info["fps_mode"] == "vfr"
     assert info["frames"] == 5 and info["duration_s"] == 4.0
+    assert info["t0"] == 1_800_000_000.0  # 영상 0초의 캡처 시각(콘솔이 기록 시각을 영상 시간으로 바꿀 때 쓴다)
     duration, times = probe(out)
     assert len(times) == 5  # 복제 없이 넣은 프레임 수 그대로
     assert times == pytest.approx([0.0, 0.5, 3.0, 3.001, 4.0], abs=0.002)
@@ -168,3 +169,25 @@ def test_capture_error_releases_pause(tmp_path):
     first, second = asyncio.run(go())
     assert first is None and second  # 첫 캡처는 실패, 두 번째는 정상
     assert run.rec._pauses == 0
+
+
+def test_ocr_capture_pauses_recording():
+    """이미지 버튼을 찾아 위아래로 스크롤하는 동안 녹화를 멈추고, 오류가 나도 풀린다."""
+    from safetrace.agent.loop import AgentRun
+
+    run = AgentRun.__new__(AgentRun)
+    run.rec = ScreencastRecorder("ffmpeg", None)
+    seen = []
+
+    async def inner(page, need, until):
+        seen.append(run.rec._pauses)
+        if len(seen) == 2:
+            raise RuntimeError("boom")
+        return ["png"] * len(need)
+
+    run._capture_many_unpaused = inner
+    need = [(0, "e0", None)]
+    assert asyncio.run(run._capture_many(None, need, 0)) == ["png"]
+    with pytest.raises(RuntimeError):
+        asyncio.run(run._capture_many(None, need, 0))
+    assert seen == [1, 1] and run.rec._pauses == 0

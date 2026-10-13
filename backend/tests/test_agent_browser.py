@@ -939,6 +939,44 @@ def test_agent_capture_expands_scroll_locked_page(settings, testpages):
     assert b > 150 and r < 120, (r, g, b)  # 파란 버튼(#1a56db), 펼치지 않으면 흰 바탕
 
 
+@pytest.mark.parametrize("locked", [False, True])
+def test_click_point_is_where_the_button_is(locked):
+    """클릭 표시 좌표: 창 아래쪽(y=2000) 버튼을 창 안으로 옮긴 뒤 잰 창 기준 상자 중심이 그 버튼 색이다.
+    스크롤이 잠긴 페이지(body 가 스크롤)도 같다. 표시 속성 형식이 아니면 재지 않는다."""
+    import asyncio
+    import io
+
+    from PIL import Image
+    from playwright.async_api import async_playwright
+
+    from safetrace.agent.loop import AgentRun
+
+    style = "html{height:100%;overflow:hidden}body{height:100%;overflow-y:auto}" if locked else ""
+    html = (f"<style>body{{margin:0}}{style}</style><div style='height:2600px;position:relative'>"
+            "<button data-t='e7' style='position:absolute;left:500px;top:2000px;width:160px;height:50px;border:0;"
+            "background:#00c000;color:transparent'>신청</button></div>")
+    run = AgentRun.__new__(AgentRun)
+    run.attr = "data-t"
+
+    async def go():
+        async with async_playwright() as p:
+            b = await p.chromium.launch()
+            page = await b.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content(html)
+            pt = await run._click_point(page, "e7")
+            bad = await run._click_point(page, "e7']")
+            png = await page.screenshot()
+            await b.close()
+            return pt, bad, png
+
+    pt, bad, png = asyncio.run(go())
+    assert bad is None and pt is not None
+    x, y, w, h = pt
+    assert 0 <= y and y + h <= 800 and (w, h) == (160, 50), pt
+    r, g, bl = Image.open(io.BytesIO(png)).convert("RGB").getpixel((x + w // 2, y + h // 2))
+    assert g > 150 and r < 80 and bl < 80, (r, g, bl)
+
+
 def test_normal_page_is_not_expanded():
     """보통 페이지(문서가 스크롤)는 펼치지 않고 스타일을 넣지 않는다."""
     import asyncio

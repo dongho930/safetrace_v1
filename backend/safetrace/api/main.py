@@ -626,7 +626,8 @@ def case_file(case_id: str, name: str, p: Annotated[Principal, Depends(need("vie
 @app.websocket("/api/cases/{case_id}/live")
 async def case_live(ws: WebSocket, case_id: str):
     """실시간 화면(보기용, 증거 아님). 브라우저 WebSocket 은 인증 헤더를 못 붙이고 주소의 토큰은 접속 기록에 남으므로,
-    연결 뒤 첫 메시지 {"token": ...} 로 인증한다. 이후 서버는 JPEG 프레임(바이너리)만 보낸다."""
+    연결 뒤 첫 메시지 {"token": ...} 로 인증한다. 이후 서버는 JPEG 프레임과 클릭 표시({"click": [x, y, 폭, 높이]} JSON)를
+    바이너리로 그대로 보낸다(에이전트가 보낸 값이라 콘솔이 다시 검사한다)."""
     await ws.accept()
     try:
         msg = await asyncio.wait_for(ws.receive_json(), 5)
