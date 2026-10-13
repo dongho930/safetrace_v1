@@ -913,7 +913,7 @@ const Workspace = memo(function Workspace({
           <Investigation c={c} events={sorted} status={st} running={running} id={id} />
         ) : (
           <section className="panel progress-panel" aria-label="조사 경과">
-            <CaseTabs id={id} c={c} events={sorted} screens={screens} tab={tab} onTab={setTab} pick={pick} onPick={setPick} verified={verify?.ok === true} />
+            <CaseTabs id={id} c={c} events={sorted} screens={screens} tab={tab} onTab={setTab} pick={pick} onPick={setPick} />
             <CaseFooterBar c={c} id={id} running={running} canExport={canExport} verify={verify} onVerify={setVerify} />
           </section>
         )}
@@ -1415,7 +1415,6 @@ function CaseTabs({
   onTab,
   pick,
   onPick,
-  verified,
 }: {
   id: string;
   c: CaseOut | null;
@@ -1425,7 +1424,6 @@ function CaseTabs({
   onTab: (t: TabId) => void;
   pick: string | null;
   onPick: (f: string) => void;
-  verified: boolean;
 }) {
   const recording = events.find((e) => e.kind === "recording")?.files[0];
   const tabs: [TabId, string][] = [
@@ -1473,10 +1471,9 @@ function CaseTabs({
             <span>┅ 기록만</span>
           </span>
         )}
-        {tab === "screens" && screens.length > 0 && <span className="legend">모두 서명된 원본 화면</span>}
       </div>
       <div className="tab-panel" role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
-        {tab === "screens" && <ScreensTab id={id} c={c} events={events} screens={screens} pick={pick} onPick={onPick} verified={verified} />}
+        {tab === "screens" && <ScreensTab id={id} c={c} events={events} screens={screens} pick={pick} onPick={onPick} />}
         {tab === "path" && c && <PathTab c={c} events={events} />}
         {tab === "rec" && (
           <div className="floor">
@@ -1500,7 +1497,6 @@ function ScreensTab({
   screens,
   pick,
   onPick,
-  verified,
 }: {
   id: string;
   c: CaseOut | null;
@@ -1508,7 +1504,6 @@ function ScreensTab({
   screens: Screen[];
   pick: string | null;
   onPick: (f: string) => void;
-  verified: boolean;
 }) {
   const opts = useRef<(HTMLButtonElement | null)[]>([]);
   if (screens.length === 0) {
@@ -1533,7 +1528,8 @@ function ScreensTab({
     <div className="floor screens">
       <figure className="shot">
         <div className="shot-box screen-body">
-          <LiveScreen caseId={id} name={cur.file} />
+          {/* 고른 화면마다 새로 받는다: 못 받으면 앞 화면을 남기지 않고 실패를 보인다(캡션과 화면이 어긋나지 않게) */}
+          <LiveScreen key={cur.file} caseId={id} name={cur.file} strict />
         </div>
         <figcaption className="shot-cap">
           <b className={`tone-${cur.tone} tone-text`}>
@@ -1545,7 +1541,6 @@ function ScreensTab({
               {clip(hostPath(cur.url), 40)}
             </span>
           )}
-          {verified && <span className="ok">✓ 서명 확인</span>}
           <span className="shot-note">{cur.note}</span>
         </figcaption>
       </figure>
@@ -1881,8 +1876,10 @@ function LiveVideo({
 // 실시간 화면: 새 화면을 다 받아 그릴 준비가 끝날 때까지 이전 화면을 그대로 두고(이중 버퍼) 교차 페이드로 바꾼다.
 // 표시 방식은 한 가지: 폭에 맞추되 창 한 화면(1280×800 비율)이 칸 높이에 들어가게, 더 길면 세로 스크롤.
 type Frame = { url: string; name: string };
-function LiveScreen({ caseId, name }: { caseId: string; name: string }) {
+// strict: 증거 화면 보기용. 받거나 그리지 못하면 실패를 표시한다(실시간 화면은 이전 화면을 유지)
+function LiveScreen({ caseId, name, strict = false }: { caseId: string; name: string; strict?: boolean }) {
   const [cur, setCur] = useState<Frame | null>(null);
+  const [failed, setFailed] = useState(false);
   const [prev, setPrev] = useState<Frame | null>(null);
   const [atEnd, setAtEnd] = useState(true);
   const curRef = useRef<Frame | null>(null);
@@ -1902,9 +1899,11 @@ function LiveScreen({ caseId, name }: { caseId: string; name: string }) {
         url = await fileUrl(caseId, name, true);
         const img = new Image();
         img.src = url;
-        await img.decode().catch(() => undefined);
+        await (strict ? img.decode() : img.decode().catch(() => undefined));
       } catch {
-        return; // 못 받으면 이전 화면 유지
+        if (url) URL.revokeObjectURL(url);
+        if (strict && alive) setFailed(true);
+        return; // 실시간 화면은 못 받으면 이전 화면 유지
       }
       if (!alive) {
         URL.revokeObjectURL(url);
@@ -1956,6 +1955,7 @@ function LiveScreen({ caseId, name }: { caseId: string; name: string }) {
     }
   };
 
+  if (failed) return <span className="err small" role="alert">이 화면 파일을 불러오지 못했습니다</span>;
   if (!cur) return <span className="muted small">화면을 불러오는 중…</span>;
   return (
     <>
