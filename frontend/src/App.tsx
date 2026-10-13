@@ -2,7 +2,6 @@ import { Component, memo, useCallback, useEffect, useMemo, useRef, useState } fr
 import {
   type AgentEvent,
   ApiError,
-  type Candidate,
   type CaseOut,
   type Decision,
   type EvidenceEvent,
@@ -37,6 +36,8 @@ import {
   type Threat,
   verifyCase,
 } from "./api";
+import { buildPath, buildReasons, buildScreens, clip, hostOrFile, hostPath, type Reason, type Screen, type Tone } from "./evidence";
+import { ACTION_LABEL, NET_CATEGORY_LABEL, overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
 
 // 조사 대상 페이지에서 온 문자열은 모두 React 기본 이스케이프로만 출력한다(raw HTML 금지).
 
@@ -58,55 +59,6 @@ const STATUS_GLYPH: Record<string, string> = dict({
   FAILED: "×",
   UNREACHABLE: "×",
   BLOCKED: "×",
-});
-const THREAT_LABEL: Record<string, string> = dict({
-  phishing: "피싱",
-  scam: "사기",
-  illegal_gambling: "불법 도박",
-  malware: "악성 앱",
-  benign: "정상",
-  unknown: "판단 불가",
-});
-// 코드 규칙이 모델 판단을 바꾼 이유
-function overrideLabel(o: Threat["override"]): string {
-  // 행동 기록의 threat 기록(믿지 않는 값)에서도 부르므로 글자로만 읽는다
-  if (!o || typeof o !== "object") return "";
-  const brand = text(o.brand);
-  const dest = text(o.destination);
-  if (o.reason === "shortener_warning") return "단축 URL 서비스의 위험 경고 → 담당자 검토";
-  if (o.reason === "brand_lookalike")
-    return dest
-      ? `열리지 않은 목적지가 브랜드 사칭 도메인(${brand} · ${dest}) → 담당자 검토`
-      : `브랜드 사칭 도메인(${brand}), 화면 내용 없음 → 담당자 검토`;
-  const ops = strs(o.operators);
-  return `공식 사행사업자 도메인${ops.length ? ` · ${ops.join(", ")}` : ""}`;
-}
-const REASON_LABEL: Record<string, string> = dict({
-  reputation_match: "Safe Browsing 위험 일치(AI 는 정상으로 봄)",
-  candidate_reputation_match: "연관 후보가 Safe Browsing 위험 일치(AI 는 정상으로 봄)",
-  unreachable_reputation_match: "접속 불가 · Safe Browsing 위험 일치",
-  unreachable_network_filtered: "접속 불가 · 회선이 도메인 이름을 보고 차단(이미 차단 목록에 오른 사이트)",
-  goto_failed: "최초 접속 실패",
-  low_confidence_action: "다음 행동 확신 부족으로 탐색 종료",
-  loop_detected: "같은 화면 반복으로 탐색 종료",
-  dead_end: "더 갈 수 없는 화면(오류·차단)에서 탐색 종료",
-  agent_finished: "에이전트가 조사 완료 판단",
-  step_budget: "최대 단계 도달",
-  time_budget: "최대 시간 도달",
-  page_unresponsive: "페이지가 응답하지 않아 시간 예산에서 강제 종료(무한 스크립트 등)",
-  threat_decision_unavailable: "위협 판단 불가(판단 서비스 장애)",
-});
-const NET_CATEGORY_LABEL: Record<string, string> = dict({
-  dns_failure: "도메인 없음(DNS)",
-  connection_refused: "연결 거부",
-  connection_dropped: "응답 없이 연결 끊김",
-  timeout: "시간 초과",
-  egress_refused: "검문 프록시 거부 또는 상대 연결 실패",
-  egress_unavailable: "검문 프록시 연결 실패",
-  blocked_by_policy: "정책 차단",
-  network_unreachable: "네트워크 도달 불가",
-  tls_error: "인증서·TLS 오류",
-  other: "기타",
 });
 // 검토가 남은 사건: 검토 필요 상태이고 담당자가 아직 확정(위협·정상)하지 않음(보류는 남는다)
 const needsReview = (c: CaseOut) => c.status === "REVIEW_REQUIRED" && (!c.verdict || c.verdict.decision === "hold");
@@ -178,15 +130,6 @@ const FOLDERS: { id: FolderId; label: string; color: string; test: (c: CaseOut) 
 ];
 // 담당자가 확인할 사건(검토 필요, 위협 의심인데 판정 전)은 목록에 파란 점
 const unread = (c: CaseOut) => needsReview(c) || (c.status === "COMPLETED" && isSuspect(c) && !c.verdict);
-const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
-function hostPath(u: string) {
-  try {
-    const x = new URL(u);
-    return x.host + (x.pathname === "/" ? "" : x.pathname);
-  } catch {
-    return u;
-  }
-}
 
 // ── 앱 ─────────────────────────────────────────────
 export default function App() {
@@ -914,9 +857,30 @@ const Workspace = memo(function Workspace({
   }, [id]);
 
   const sorted = useMemo(() => [...events].sort((a, b) => a.seq - b.seq), [events]);
-  const st = status || c?.status || "";
-  const running = st === "RUNNING" || st === "QUEUED" || (!st && live);
+  // 끝난 사건은 사건 자체의 상태를 쓴다(SSE 는 지난 '조사 중' 상태부터 다시 보내 준다)
+  const st = c && TERMINAL.has(c.status) ? c.status : c ? status || c.status : "";
+  // 상태를 아직 모르면(사건·기록을 받는 중) 조사 중으로 치지 않는다: 끝난 사건을 열 때 실시간 연결을 열었다 닫지 않게
+  const running = st === "RUNNING" || st === "QUEUED";
   const steps = sorted.filter((e) => e.kind === "observe" && typeof e.data.sub !== "number").length;
+  const reasons = useMemo(() => (c && !running ? buildReasons(sorted, c) : []), [sorted, c, running]);
+  const screens = useMemo(() => buildScreens(reasons, sorted), [reasons, sorted]);
+  const [tab, setTab] = useState<TabId>("screens");
+  const [pick, setPick] = useState<string | null>(null);
+  const [verify, setVerify] = useState<VerifyState>(null);
+  // 사건을 열면 근거 화면 탭, 첫 근거 카드의 화면. 화면 기록이 없는 사건(접속 불가 등)은 행동 기록 탭
+  const opened = useRef(false);
+  useEffect(() => {
+    // 기록을 다 받은 뒤(SSE 가 끝 상태를 보낸 뒤)에 정한다. 그 전에는 화면 목록이 비어 보일 수 있다
+    if (opened.current || !c || !TERMINAL.has(status)) return;
+    opened.current = true;
+    if (screens.length === 0) setTab("log");
+    else setPick(screens[0].file);
+  }, [status, c, screens]);
+  const openScreen = (r: Reason) => {
+    if (!r.shot) return;
+    setTab("screens");
+    setPick(r.shot);
+  };
   return (
     <>
       <div className="detail-body">
@@ -942,9 +906,17 @@ const Workspace = memo(function Workspace({
             기록이 {MAX_EVENTS}건을 넘어 그 뒤는 화면에 표시하지 않았습니다. 전체 기록은 검토 패키지로 확인하세요.
           </p>
         )}
-        <Opinion c={c} running={running} />
-        <Investigation c={c} events={sorted} status={st} running={running} id={id} />
-        <Evidence c={c} id={id} running={running} canExport={canExport} />
+        <Summary c={c} running={running} reasons={reasons} picked={tab === "screens" ? pick : null} onPick={openScreen} />
+        {!st ? (
+          <p className="muted">{live ? "사건을 불러오는 중…" : "사건을 불러오지 못했습니다"}</p>
+        ) : running ? (
+          <Investigation c={c} events={sorted} status={st} running={running} id={id} />
+        ) : (
+          <section className="panel progress-panel" aria-label="조사 경과">
+            <CaseTabs id={id} c={c} events={sorted} screens={screens} tab={tab} onTab={setTab} pick={pick} onPick={setPick} verified={verify?.ok === true} />
+            <CaseFooterBar c={c} id={id} running={running} canExport={canExport} verify={verify} onVerify={setVerify} />
+          </section>
+        )}
       </div>
       <VerdictBar
         c={c}
@@ -1178,7 +1150,6 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
     </>
   );
 }
-const ACTION_LABEL: Record<string, string> = dict({ scroll: "스크롤", back: "뒤로 가기", close_popup: "팝업 닫기", finish: "조사 끝내기" });
 
 const DECISION_LABEL: Record<Decision, string> = { threat: "위협 확정", benign: "정상", hold: "보류" };
 const THREAT_TYPES = ["phishing", "scam", "illegal_gambling", "malware"];
@@ -1354,83 +1325,374 @@ function VerdictBar({
   );
 }
 
-function Opinion({ c, running }: { c: CaseOut | null; running: boolean }) {
+// ── AI 요약 + 근거 카드(고정 문구 + 기록 값) ───────────────────────
+function summaryLine(c: CaseOut | null, running: boolean): { tone: Tone; head: React.ReactNode; prob: number | null } {
   const t = c?.threat;
-  if (!t) {
-    return (
-      <section className="panel card opinion-card" aria-label="AI 의견">
-        <div className="card-head">
-          <h2 className="lbl">AI 의견</h2>
-          <span className="faint small">기술적 의심 유형 · 법적 판단 아님</span>
-        </div>
-        <p className="muted small" style={{ margin: 0 }}>
-          {running ? "조사가 끝나면 위협 판단이 표시됩니다." : "위협 판단 없음 (페이지를 열지 못했거나 판단 불가)"}
-        </p>
-      </section>
-    );
+  if (running || !c) return { tone: "idle", head: "조사 중 · 조사가 끝나면 판단이 표시됩니다", prob: null };
+  if (!t || t.threat === "unknown") {
+    const why = c.finish_reason ? (REASON_LABEL[c.finish_reason] ?? c.finish_reason) : (STATUS_LABEL[c.status] ?? c.status);
+    return { tone: "idle", head: `판단할 수 없습니다 · ${why}`, prob: null };
   }
-  const risky = !["benign", "unknown"].includes(t.threat);
-  const tone = t.threat === "benign" ? "safe" : !risky ? "idle" : t.hold ? "review" : "threat";
-  const color = `var(--${tone})`;
-  const probs = Object.entries(t.probabilities).sort((a, b) => b[1] - a[1]).filter(([, v]) => v >= 0.01).slice(0, 4);
-  const R = 36;
-  const C = 2 * Math.PI * R;
+  // 정상 단정 문구는 쓰지 않는다. 확신이 부족한 정상은 담당자 검토로 보인다
+  if (t.threat === "benign")
+    return t.hold
+      ? { tone: "review", head: "위험 근거를 찾지 못했습니다 · 확신이 부족해 담당자 검토가 필요합니다", prob: t.probability }
+      : { tone: "safe", head: "위험 근거를 찾지 못했습니다", prob: t.probability };
+  const name = THREAT_LABEL[t.threat] ?? t.threat;
+  if (t.hold) return { tone: "review", head: <><span className="tone-text">{name}</span> 의심 · 확신이 부족해 담당자 검토가 필요합니다</>, prob: t.probability };
+  return { tone: "threat", head: <>이 사이트는 <span className="tone-text">{name}</span>일 가능성이 높습니다</>, prob: t.probability };
+}
+
+function Summary({ c, running, reasons, picked, onPick }: { c: CaseOut | null; running: boolean; reasons: Reason[]; picked: string | null; onPick: (r: Reason) => void }) {
+  const line = summaryLine(c, running);
+  const t = c?.threat;
+  const next = t
+    ? Object.entries(t.probabilities).sort((a, b) => b[1] - a[1]).filter(([k, v]) => k !== t.threat && v >= 0.01).slice(0, 2)
+    : [];
   return (
-    <section className={`panel card opinion-card tone-${tone}`} aria-label="AI 의견">
-      <div className="card-head">
-        <h2 className="lbl">AI 의견</h2>
-        <span className="faint small">기술적 의심 유형 · 법적 판단 아님</span>
+    <section className={`panel summary tone-${line.tone}`} aria-label="AI 요약">
+      <div className="summary-head">
+        <h1 className="summary-title">{line.head}</h1>
+        {line.prob != null && <span className="summary-prob tone-text">{pct(line.prob)}</span>}
+        <div className="spacer" />
+        {c && (
+          <span className="muted small" title={c.url}>
+            {clip(hostPath(c.url), 60)}
+          </span>
+        )}
       </div>
-      <div className="opinion">
-        <svg width="80" height="80" viewBox="0 0 88 88" role="img" aria-label={`${THREAT_LABEL[t.threat] ?? t.threat} 확률 ${pct(t.probability)}`} style={{ color }}>
-          <circle cx="44" cy="44" r={R} fill="none" style={{ stroke: "var(--idle-tint)" }} strokeWidth="7" />
-          <circle className="ring-fill" cx="44" cy="44" r={R} fill="none" stroke="currentColor" strokeWidth="7" strokeLinecap="round" strokeDasharray={`${C * t.probability} ${C}`} transform="rotate(-90 44 44)" />
-          <text className="ring-text" x="44" y="50" textAnchor="middle" fill="currentColor">
-            {pct(t.probability)}
-          </text>
-        </svg>
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <span className="opinion-name" style={{ color }}>
-            {THREAT_LABEL[t.threat] ?? t.threat}
-            {risky ? " 의심" : ""}
-          </span>
-          <span className="muted small">
-            {t.override ? overrideLabel(t.override) : t.hold ? "확신 부족 → 담당자 검토" : "판단 확신 기준 충족"}
-          </span>
-          {t.override && (
-            <span className="faint small">
-              모델 원래 판단: {THREAT_LABEL[t.override.original.threat] ?? t.override.original.threat} {pct(t.override.original.probability)}
-            </span>
-          )}
-          <span className="mono faint small">
-            {t.model} · 근거 {t.evidence_seqs.slice(-4).map((s) => `EV-${s}`).join(" ")}
-          </span>
+      {t?.override && (
+        <span className="small summary-override">
+          {overrideLabel(t.override)} · 모델 원래 판단 {THREAT_LABEL[t.override.original.threat] ?? t.override.original.threat} {pct(t.override.original.probability)}
+        </span>
+      )}
+      {reasons.length > 0 && (
+        <div className="reasons">
+          {reasons.map((r, i) => {
+            const body = (
+              <>
+                <span className="reason-title tone-text">
+                  {CIRCLED[i]} {r.title}
+                </span>
+                <span className="reason-text">{r.text}</span>
+                <span className="reason-foot">
+                  <span>{r.ev}</span>
+                  {r.shot && <span>화면 보기 ›</span>}
+                </span>
+              </>
+            );
+            return r.shot ? (
+              <button key={r.key} type="button" className={`reason tone-${r.tone}`} aria-pressed={picked === r.shot} onClick={() => onPick(r)}>
+                {body}
+              </button>
+            ) : (
+              <div key={r.key} className={`reason tone-${r.tone}`}>
+                {body}
+              </div>
+            );
+          })}
         </div>
-      </div>
-      <div className="bars" style={{ color }}>
-        {probs.map(([k, v], i) => (
-          <div className="bar" key={k}>
-            <span style={{ color: "var(--ink)" }}>{THREAT_LABEL[k] ?? k}</span>
-            <span className="bar-track">
-              <span className={i === 0 ? "bar-fill top" : "bar-fill"} style={{ width: `${Math.round(v * 100)}%` }} />
-            </span>
-            <span className="bar-val" style={{ color: "var(--ink)" }}>
-              {pct(v)}
-            </span>
-          </div>
-        ))}
-      </div>
+      )}
+      <span className="summary-foot">
+        {next.length > 0 && `다음 후보 ${next.map(([k, v]) => `${THREAT_LABEL[k] ?? k} ${pct(v)}`).join(" · ")} · `}
+        {t ? `${t.model} · ` : ""}기술적 의심 유형이며 법적 판단이 아닙니다
+      </span>
     </section>
   );
 }
+const CIRCLED = ["①", "②", "③", "④"];
 
-function Evidence({ c, id, running, canExport }: { c: CaseOut | null; id: string; running: boolean; canExport: boolean }) {
-  const [verify, setVerify] = useState<{ ok: boolean; records: number; errors: string[] } | null>(null);
+// ── 조사 경과 탭: 근거 화면(기본) · 경로 지도 · 조사 녹화 · 행동 기록 ─────────────
+type TabId = "screens" | "path" | "rec" | "log";
+type VerifyState = { ok: boolean; records: number; errors: string[] } | null;
+
+function CaseTabs({
+  id,
+  c,
+  events,
+  screens,
+  tab,
+  onTab,
+  pick,
+  onPick,
+  verified,
+}: {
+  id: string;
+  c: CaseOut | null;
+  events: EvidenceEvent[];
+  screens: Screen[];
+  tab: TabId;
+  onTab: (t: TabId) => void;
+  pick: string | null;
+  onPick: (f: string) => void;
+  verified: boolean;
+}) {
+  const recording = events.find((e) => e.kind === "recording")?.files[0];
+  const tabs: [TabId, string][] = [
+    ["screens", `근거 화면 ${screens.length}`],
+    ["path", "경로 지도"],
+    ["rec", "조사 녹화"],
+    ["log", `행동 기록 ${events.length}`],
+  ];
+  const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const onKey = (e: React.KeyboardEvent, i: number) => {
+    const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+    if (!step) return;
+    e.preventDefault();
+    const j = (i + step + tabs.length) % tabs.length;
+    onTab(tabs[j][0]);
+    refs.current[j]?.focus();
+  };
+  return (
+    <>
+      <div className="tabs" role="tablist" aria-label="조사 경과 보기">
+        {tabs.map(([t, label], i) => (
+          <button
+            key={t}
+            ref={(el) => {
+              refs.current[i] = el;
+            }}
+            type="button"
+            role="tab"
+            id={`tab-${t}`}
+            aria-selected={tab === t}
+            aria-controls={`panel-${t}`}
+            tabIndex={tab === t ? 0 : -1}
+            className="tab"
+            onClick={() => onTab(t)}
+            onKeyDown={(e) => onKey(e, i)}
+          >
+            {label}
+          </button>
+        ))}
+        <div className="spacer" />
+        {tab === "path" && (
+          <span className="legend">
+            <span>━ 이동</span>
+            <span className="bad">┅ 차단</span>
+            <span>┅ 기록만</span>
+          </span>
+        )}
+        {tab === "screens" && screens.length > 0 && <span className="legend">모두 서명된 원본 화면</span>}
+      </div>
+      <div className="tab-panel" role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
+        {tab === "screens" && <ScreensTab id={id} c={c} events={events} screens={screens} pick={pick} onPick={onPick} verified={verified} />}
+        {tab === "path" && c && <PathTab c={c} events={events} />}
+        {tab === "rec" && (
+          <div className="floor">
+            <div className="rec-box">{recording ? <Recording caseId={id} name={recording} /> : <span className="small">녹화 없음</span>}</div>
+          </div>
+        )}
+        {tab === "log" && (
+          <div className="log">
+            <EventLog events={events} />
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+function ScreensTab({
+  id,
+  c,
+  events,
+  screens,
+  pick,
+  onPick,
+  verified,
+}: {
+  id: string;
+  c: CaseOut | null;
+  events: EvidenceEvent[];
+  screens: Screen[];
+  pick: string | null;
+  onPick: (f: string) => void;
+  verified: boolean;
+}) {
+  const opts = useRef<(HTMLButtonElement | null)[]>([]);
+  if (screens.length === 0) {
+    const un = [...events].reverse().find((e) => e.kind === "unreachable");
+    const why = un ? (NET_CATEGORY_LABEL[text(un.data.category)] ?? text(un.data.error)) : c?.finish_reason ? (REASON_LABEL[c.finish_reason] ?? c.finish_reason) : "";
+    return (
+      <div className="floor">
+        <p className="muted">화면 기록 없음{why ? ` · ${why}` : ""}</p>
+      </div>
+    );
+  }
+  const cur = screens.find((x) => x.file === pick) ?? screens[0];
+  const onKey = (e: React.KeyboardEvent, i: number) => {
+    const step = e.key === "ArrowDown" || e.key === "ArrowRight" ? 1 : e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : 0;
+    if (!step) return;
+    e.preventDefault();
+    const j = (i + step + screens.length) % screens.length;
+    onPick(screens[j].file);
+    opts.current[j]?.focus();
+  };
+  return (
+    <div className="floor screens">
+      <figure className="shot">
+        <div className="shot-box screen-body">
+          <LiveScreen caseId={id} name={cur.file} />
+        </div>
+        <figcaption className="shot-cap">
+          <b className={`tone-${cur.tone} tone-text`}>
+            {CIRCLED[cur.n - 1]} {cur.title}
+          </b>
+          <span className="muted">{cur.ev}</span>
+          {cur.url && (
+            <span className="muted" title={cur.url}>
+              {clip(hostPath(cur.url), 40)}
+            </span>
+          )}
+          {verified && <span className="ok">✓ 서명 확인</span>}
+          <span className="shot-note">{cur.note}</span>
+        </figcaption>
+      </figure>
+      <div className="thumbs" role="listbox" aria-label="근거 화면 목록">
+        {screens.map((x, i) => (
+          <button
+            key={x.file}
+            ref={(el) => {
+              opts.current[i] = el;
+            }}
+            type="button"
+            role="option"
+            aria-selected={x.file === cur.file}
+            tabIndex={x.file === cur.file ? 0 : -1}
+            className="thumb"
+            onClick={() => onPick(x.file)}
+            onKeyDown={(e) => onKey(e, i)}
+          >
+            <Thumb caseId={id} name={x.file} />
+            <span className="thumb-text">
+              <span className={`thumb-title tone-${x.tone} tone-text`}>
+                {CIRCLED[x.n - 1]} {x.title}
+              </span>
+              <span className="thumb-sub">
+                {x.ev} · {clip(hostOrFile(x.url), 30)}
+              </span>
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// 썸네일: 표시용으로 줄인 이미지(preview)를 필요할 때 받고, 사라지면 object URL 을 돌려준다
+function Thumb({ caseId, name }: { caseId: string; name: string }) {
+  const [src, setSrc] = useState("");
+  useEffect(() => {
+    let alive = true;
+    let u = "";
+    fileUrl(caseId, name, true)
+      .then((x) => {
+        u = x;
+        if (alive) setSrc(x);
+        else URL.revokeObjectURL(x);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+      if (u) URL.revokeObjectURL(u);
+    };
+  }, [caseId, name]);
+  return <span className="thumb-img">{src && <img src={src} alt="" />}</span>;
+}
+
+// ── 경로 지도: 그래프 라이브러리 없이 칸(열 = 본 줄 주소)과 아래 가지로 그린다 ─────────────
+function PathTab({ c, events }: { c: CaseOut; events: EvidenceEvent[] }) {
+  const m = useMemo(() => buildPath(c, events), [c, events]);
+  const th = c.threat;
+  const thTone: Tone = !th || th.threat === "unknown" ? "idle" : th.threat === "benign" ? "safe" : th.hold ? "review" : "threat";
+  if (m.nodes.length === 1 && m.branches[0].length === 0) {
+    return (
+      <div className="floor pathfloor">
+        <p className="muted small">거쳐 간 주소가 1곳뿐입니다</p>
+        <div className="path">
+          <PathNodeBox n={m.nodes[0]} i={0} tone={thTone} threat={th?.threat ?? null} prob={th?.probability ?? null} hold={!!th?.hold} />
+        </div>
+      </div>
+    );
+  }
+  let num = 0;
+  return (
+    <div className="floor pathfloor">
+      <div className="path">
+        {m.nodes.map((n, i) => {
+          if (!n.fold) num += 1;
+          return (
+            <div key={`${i}-${n.url}`} className="path-col-wrap">
+              {i > 0 && (
+                <svg className="path-arrow" viewBox="0 0 40 10" aria-hidden="true">
+                  <path d="M0 5 H34" />
+                  <path d="M33 1 L39 5 L33 9 Z" className="path-arrow-head" />
+                </svg>
+              )}
+              <div className="path-col">
+                {n.fold ? (
+                  <div className="path-node path-fold">… {n.fold}곳</div>
+                ) : (
+                  <PathNodeBox n={n} i={num - 1} tone={thTone} threat={n.last ? (th?.threat ?? null) : null} prob={n.last ? (th?.probability ?? null) : null} hold={!!th?.hold} />
+                )}
+                {m.branches[i].map((b, j) => (
+                  <div key={j} className="path-branch">
+                    <span className={`path-link ${b.dashed ? "dashed" : ""} tone-${b.tone}`} aria-hidden="true" />
+                    <div className={`path-node branch tone-${b.tone} ${b.dashed ? "dashed" : ""}`}>
+                      <span className="tone-text">{b.title}</span>
+                      <b>{b.sub}</b>
+                    </div>
+                  </div>
+                ))}
+                {n.last && m.more > 0 && <span className="muted small">+{m.more}개</span>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function PathNodeBox({ n, i, tone, threat, prob, hold }: { n: { url: string; label: string; newWindow: boolean; last: boolean }; i: number; tone: Tone; threat: string | null; prob: number | null; hold: boolean }) {
+  return (
+    <div className={`path-node ${n.last ? `last tone-${tone}` : ""}`} title={n.url}>
+      <span className="muted">
+        {CIRCLED[i] ?? `${i + 1}.`} {n.label}
+        {n.newWindow ? " · 새 창" : ""}
+      </span>
+      <b>{clip(hostPath(n.url), 24)}</b>
+      {n.last && threat && (
+        <span className="tone-text path-verdict">
+          {THREAT_LABEL[threat] ?? threat}
+          {hold ? "(보류)" : ""} {prob != null ? pct(prob) : ""}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ── 아래 줄(모든 탭 공통): Safe Browsing · 증거 무결성 검증 · 보고서·패키지 ─────────────
+function CaseFooterBar({
+  c,
+  id,
+  running,
+  canExport,
+  verify,
+  onVerify,
+}: {
+  c: CaseOut | null;
+  id: string;
+  running: boolean;
+  canExport: boolean;
+  verify: VerifyState;
+  onVerify: (v: VerifyState) => void;
+}) {
   const [busy, setBusy] = useState(false);
   const [pkgBusy, setPkgBusy] = useState("");
   const [pkgMsg, setPkgMsg] = useState("");
   const sb = c?.safebrowsing;
-  const cands: Candidate[] = (c?.candidates ?? []).map((x) => (typeof x === "string" ? { url: x, host: x } : x));
   const sbText =
     sb?.status === "match"
       ? sb.matches.map((m) => m.threat_type).join(", ")
@@ -1440,73 +1702,27 @@ function Evidence({ c, id, running, canExport }: { c: CaseOut | null; id: string
           ? "키 없음"
           : (sb?.status ?? "-");
   return (
-    <section className="panel card" aria-label="외부 평판과 증거">
-      <h2 className="lbl">외부 평판 · 증거</h2>
-      <div className="tiles">
-        <div className="sunken tile">
-          <span className="muted">Safe Browsing</span>
-          <span className={`mono ${sb?.status === "match" ? "bad" : ""}`}>{sbText}</span>
-        </div>
-        <div className="sunken tile">
-          <span className="muted">연관 후보</span>
-          <span className={`mono ${cands.length ? "warn" : ""}`}>
-            {cands.length ? `${cands.length}곳 · 하위 조사 ${cands.filter((x) => x.sub).length}곳` : "없음"}
-          </span>
-        </div>
-      </div>
-      {cands.length > 0 && (
-        <ul className="cand-list">
-          {cands.map((x) => (
-            <li key={x.url} className="sunken">
-              <span className="mono cand-host">{x.host ?? x.url}</span>
-              <span className="faint small">{x.source === "via" ? "경유" : x.source === "link" ? "링크" : ""}</span>
-              {x.reputation_match && <span className="bad small">평판 위험</span>}
-              {!x.reputation_match && x.reputation_unchecked && <span className="faint small">평판 미확인</span>}
-              <span className={`small ${x.threat && x.threat !== "benign" ? "warn" : "faint"}`}>
-                {x.sub
-                  ? x.threat
-                    ? `${THREAT_LABEL[x.threat] ?? x.threat}${x.hold ? "(보류)" : ""} ${x.probability != null ? pct(x.probability) : ""}`
-                    : (REASON_LABEL[x.reason ?? ""] ?? x.status ?? "")
-                  : "기록만"}
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
-      {sb?.status === "no_match" && <p className="faint small" style={{ margin: 0 }}>일치 없음은 정상이라는 뜻이 아닙니다.</p>}
-      <div className={`integrity ${verify ? (verify.ok ? "good" : "fail") : ""}`}>
-        <Icon name="lock" />
-        <span className="integrity-text">
-          {verify ? (
-            verify.ok ? (
-              <>
-                <span>해시 체인 · HMAC 서명 통과</span>
-                <span className="mono faint small">서명 기록 {verify.records}건</span>
-              </>
-            ) : (
-              <>
-                <span>검증 실패</span>
-                <span className="mono small">{verify.errors.slice(0, 3).join(", ")}</span>
-              </>
-            )
-          ) : (
-            <>
-              <span style={{ color: "var(--ink)" }}>증거 무결성</span>
-              <span className="faint small">{running ? "조사가 끝나면 검증할 수 있습니다" : "검증 전"}</span>
-            </>
-          )}
-        </span>
+    <div className="footbar">
+      <span>
+        Safe Browsing <b className={sb?.status === "match" ? "bad" : ""}>{sbText}</b>
+        {sb?.status === "no_match" && <span className="muted small"> (일치 없음은 정상이라는 뜻이 아닙니다)</span>}
+      </span>
+      <span className={`integrity-inline ${verify ? (verify.ok ? "ok" : "bad") : ""}`}>
+        {verify
+          ? verify.ok
+            ? `✓ 해시 체인 · HMAC 서명 통과 · 서명 기록 ${verify.records}건`
+            : `× 검증 실패 ${verify.errors.slice(0, 3).join(", ")}`
+          : "증거 무결성"}
         <button
           type="button"
-          className="btn btn-ghost"
-          style={{ padding: "7px 10px", fontSize: 12 }}
+          className="btn btn-ghost btn-sm"
           disabled={busy || running}
           onClick={async () => {
             setBusy(true);
             try {
-              setVerify(await verifyCase(id));
+              onVerify(await verifyCase(id));
             } catch (e) {
-              setVerify({ ok: false, records: 0, errors: [e instanceof Error ? e.message : "검증 실패"] });
+              onVerify({ ok: false, records: 0, errors: [e instanceof Error ? e.message : "검증 실패"] });
             } finally {
               setBusy(false);
             }
@@ -1514,61 +1730,46 @@ function Evidence({ c, id, running, canExport }: { c: CaseOut | null; id: string
         >
           {verify ? "다시 검증" : "검증"}
         </button>
-      </div>
-      <div className="integrity">
-        <Icon name="stack" />
-        <span className="integrity-text">
-          <span style={{ color: "var(--ink)" }}>보고서 · 검토 패키지</span>
-          <span className="faint small">
-            {running
-              ? "조사가 끝나면 만들 수 있습니다"
-              : !canExport
-                ? "내려받기는 조사관 이상만 할 수 있습니다"
-                : c?.verdict
-                  ? `보고서 · 탐색 기록 · 판단 결과 · 담당자 판정(판 ${c.verdict.rev}) · 증거 원본`
-                  : "보고서 초안 · 탐색 기록 · 판단 결과 · 증거 원본 (담당자 판정 전)"}
-          </span>
-        </span>
-        {canExport && (
-          <span style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-            {(
-              [
-                ["report.pdf", "보고서 PDF"],
-                ["report.json", "JSON"],
-                ["package.zip", "ZIP"],
-              ] as const
-            ).map(([kind, label]) => (
-              <button
-                key={kind}
-                type="button"
-                className="btn btn-ghost"
-                style={{ padding: "7px 10px", fontSize: 12 }}
-                title={kind === "package.zip" ? "검토 패키지: 체인 원본·파일·보고서 포함" : "보고서 초안(기관 양식용 요약)"}
-                disabled={pkgBusy !== "" || running || !c}
-                onClick={async () => {
-                  setPkgBusy(kind);
-                  setPkgMsg("");
-                  try {
-                    await downloadExport(id, kind);
-                  } catch (e) {
-                    setPkgMsg(e instanceof Error ? e.message : "내려받기 실패");
-                  } finally {
-                    setPkgBusy("");
-                  }
-                }}
-              >
-                {pkgBusy === kind ? "만드는 중" : label}
-              </button>
-            ))}
-          </span>
-        )}
-      </div>
+      </span>
+      <div className="spacer" />
+      {canExport ? (
+        (
+          [
+            ["report.pdf", "보고서 PDF"],
+            ["report.json", "JSON"],
+            ["package.zip", "검토 패키지 ZIP"],
+          ] as const
+        ).map(([kind, label]) => (
+          <button
+            key={kind}
+            type="button"
+            className="btn btn-ghost btn-sm"
+            title={kind === "package.zip" ? "검토 패키지: 체인 원본·파일·보고서 포함" : "보고서 초안(기관 양식용 요약)"}
+            disabled={pkgBusy !== "" || running || !c}
+            onClick={async () => {
+              setPkgBusy(kind);
+              setPkgMsg("");
+              try {
+                await downloadExport(id, kind);
+              } catch (e) {
+                setPkgMsg(e instanceof Error ? e.message : "내려받기 실패");
+              } finally {
+                setPkgBusy("");
+              }
+            }}
+          >
+            {pkgBusy === kind ? "만드는 중" : label}
+          </button>
+        ))
+      ) : (
+        <span className="muted small">보고서·패키지 내려받기는 조사관 이상만 할 수 있습니다</span>
+      )}
       {pkgMsg && (
-        <p className="err" role="alert" style={{ margin: 0 }}>
+        <p className="err" role="alert" style={{ flexBasis: "100%" }}>
           {pkgMsg}
         </p>
       )}
-    </section>
+    </div>
   );
 }
 
