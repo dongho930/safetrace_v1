@@ -118,7 +118,13 @@ export async function login(username: string, password: string): Promise<Me> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, password }),
   });
-  if (!r.ok) throw new ApiError(r.status, r.status === 401 ? "아이디 또는 비밀번호가 올바르지 않습니다" : `로그인 실패 (${r.status})`);
+  if (!r.ok) {
+    const msg =
+      r.status === 401 ? "아이디 또는 비밀번호가 올바르지 않습니다"
+      : r.status === 429 ? `로그인 시도가 너무 많습니다. ${Math.ceil(Number(r.headers.get("Retry-After") ?? 900) / 60)}분 뒤 다시 시도하세요`
+      : `로그인 실패 (${r.status})`;
+    throw new ApiError(r.status, msg);
+  }
   const j = (await r.json()) as { token: string; user: Me };
   setToken(j.token);
   return j.user;

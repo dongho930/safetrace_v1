@@ -246,6 +246,69 @@ def run(pw: str, svc: str, admin_svc: str | None) -> str:
     return cid
 
 
+def limit_checks(svc: str) -> None:
+    """3주차 남은 과제: 접속 주소별 로그인 제한, 접수 한도. 시험 계정을 끈 뒤 돈다(로그인 실패를 쌓으므로 맨 끝)."""
+    # ① nginx 경유: 사용자가 보낸 X-Forwarded-For 는 버려지고, 웹 컨테이너가 아닌 실제 접속 주소로 센다
+    fake = f"198.51.100.{secrets.randbelow(250) + 1}"
+    req = urllib.request.Request(B + "/api/auth/login", method="POST", data=json.dumps(
+        {"username": "qa.nobody", "password": "wrong-password-123"}).encode(),
+        headers={"Content-Type": "application/json", "X-Forwarded-For": fake})
+    try:
+        urllib.request.urlopen(req, timeout=30)  # noqa: S310 (로컬 API)
+    except urllib.error.HTTPError:
+        pass
+    seen = json.loads(api_py(
+        "import json,socket\n"
+        "from sqlalchemy import select\n"
+        "from safetrace.api.main import store\n"
+        "from safetrace.store import AuditLog\n"
+        "with store.session() as s:\n"
+        "    r=s.scalars(select(AuditLog).where(AuditLog.action=='auth.login_failed',AuditLog.actor=='qa.nobody')"
+        ".order_by(AuditLog.id.desc()).limit(1)).first()\n"
+        "print(json.dumps({'detail':r.detail if r else '','web':socket.gethostbyname('web')}))\n").strip())
+    ip = seen["detail"].rpartition("ip=")[2]
+    check("로그인 제한", "nginx 경유 실패를 실제 접속 주소로 기록(보낸 X-Forwarded-For·웹 주소 아님)",
+          bool(re.fullmatch(r"[0-9a-f.:]+", ip)) and ip not in (fake, seen["web"]), f"{ip} (보낸 값 {fake})")
+    # ② API 에 직접 붙은 쪽(믿지 않는 주소)이 X-Forwarded-For 를 바꿔 가며 보내도 한 주소로 세어 막힌다
+    out = api_py(
+        "import json,secrets,urllib.request,urllib.error,time\n"
+        "codes=[];t=time.time()\n"
+        "for i in range(40):\n"
+        "    q=urllib.request.Request('http://127.0.0.1:8000/api/auth/login',method='POST',"
+        "data=json.dumps({'username':'qa.nobody','password':'wrong-password-123'}).encode(),"
+        "headers={'Content-Type':'application/json','X-Forwarded-For':'203.0.113.%d'%(secrets.randbelow(250)+1)})\n"
+        "    try: urllib.request.urlopen(q,timeout=30); codes.append(200)\n"
+        "    except urllib.error.HTTPError as e: codes.append(e.code)\n"
+        "    if codes[-1]==429: break\n"
+        "print(json.dumps({'codes':codes,'ms':(time.time()-t)*1000}))\n")
+    r = json.loads(out.strip())
+    codes = r["codes"]
+    check("로그인 제한", "주소를 바꿔 보내도 실패 30회 안에서 429(비밀번호 확인 없이)",
+          codes[-1] == 429 and codes.count(401) <= 30 and 200 not in codes,
+          f"401×{codes.count(401)}, 마지막 {codes[-1]}, {r['ms']:.0f}ms")
+    # ③ 접수 한도: 워커를 잠시 멈춰 사건이 대기로 남게 하고 한 주체가 몰아 넣는다
+    compose("pause", "agent")
+    made, codes, retry = [], [], None
+    try:
+        for _ in range(25):
+            s, c, h = call("POST", "/api/cases", svc, {"url": "http://10.255.255.1/", "source": "test"})
+            codes.append(s)
+            if s == 201:
+                made.append(c["id"])
+            if s == 429:
+                retry = h.get("Retry-After")
+                break
+    finally:
+        compose("unpause", "agent")
+    check("접수 한도", "한 주체의 끝나지 않은 사건이 20건이면 429", codes[-1] == 429 and len(made) <= 20 and retry == "60",
+          f"접수 {len(made)}건, 마지막 {codes[-1]}")
+    t0, left = time.time(), list(made)
+    while left and time.time() - t0 < 300:
+        left = [i for i in left if call("GET", f"/api/cases/{i}", svc)[1]["status"] in ("QUEUED", "RUNNING")]
+        time.sleep(2)
+    check("접수 한도", "멈췄던 대기열이 모두 끝남", not left, f"{len(made)}건 {time.time() - t0:.0f}초")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--attacks", action="store_true", help="공격 시나리오 AT-01·04·07·15 도 함께 돌린다")
@@ -261,6 +324,7 @@ def main() -> None:
     finally:
         set_accounts(False)
     print("시험 계정을 다시 껐다", flush=True)
+    limit_checks(svc)
     if a.attacks:
         want = ["AT-01", "AT-04", "AT-07", "AT-15"]
         r = subprocess.run([sys.executable, str(ROOT / "tools" / "attack_suite.py"), "run", "--only",  # noqa: S603

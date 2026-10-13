@@ -47,6 +47,7 @@ services:
       ST_API_TOKENS: ${ST_API_TOKENS:-[]}
       ST_CORS_ORIGINS: ${ST_CORS_ORIGINS:-["http://localhost:8080"]}
       ST_ALLOWED_PORTS: "[80,443]"
+      ST_TRUSTED_PROXIES: '["web"]'   # 로그인 제한에 쓸 접속 주소: web(nginx)이 넘긴 X-Forwarded-For 만 믿는다
     volumes: [evidence:/evidence:ro]
     read_only: true
     tmpfs: [/tmp]

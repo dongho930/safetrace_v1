@@ -78,6 +78,14 @@ class Settings(BaseSettings):
 
     # API 인증: "토큰:역할" 목록. 역할 = viewer | investigator | reviewer | admin
     api_tokens: list[str] = Field(default_factory=list)
+    # 접속 주소별 로그인 실패 한도(창 안). 사무실처럼 여러 담당자가 한 주소를 같이 쓰는 경우를 생각해 계정별(5회)보다 넉넉히
+    login_ip_max_failed: int = Field(30, ge=1)
+    login_ip_window_s: int = Field(900, ge=60)
+    # X-Forwarded-For 를 믿는 프록시의 호스트 이름(Compose: ["web"]). 비우면 접속한 쪽 주소만 쓴다
+    trusted_proxies: list[str] = Field(default_factory=list)
+    # 접수 한도: 끝나지 않은(대기·조사 중) 사건 수. 주체(계정·자동화 토큰)별, 전체
+    case_max_pending_per_principal: int = Field(20, ge=1)
+    case_max_pending_total: int = Field(200, ge=1)
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
 
 

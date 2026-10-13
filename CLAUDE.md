@@ -77,7 +77,8 @@ KISA 남은 오답(모두 판단 불가·담당자 검토로 감):
 - 3주차 ② 공격 시나리오 15종(`feat/week3-attack-scenarios`, 2026-10-12): `docs/attack-scenarios.md`, `python tools/attack_suite.py run --repeat 3`(실제 스택, 결과 `var/attack/`). 새 시험 페이지 `attack/judge-injection·redirect-link·bomb·cpu.html`, 시험 서버 `/__hits`(금지 도달 기록)·`/attack/r/*`(302 내부망). 처음 11/15 — 무한 스크립트(`cpu.html`)에서 사건이 '조사 중'에 멈추고 대기열이 막힘(A03). 탐색 전체 강제 기한(예산 + 15초, `page_unresponsive`)과 정리 작업 제한으로 고쳐 3회 45/45(최종 `var/attack/20261013-0021_final3`). Codex 지적으로 판정 강화(공격 페이지에 접속 못 한 사건은 차단으로 안 셈), 시험 서버 기록은 읽기 전용(`/__hits?since=`), 녹화 정리 취소 시 ffmpeg 회수. 시연 장면 후보 5개는 문서 끝.
 - 시연 영상(장면 선택·대본)은 미룬다(사용자 결정 10/13). 장면 후보는 `docs/attack-scenarios.md` 끝.
 - 3주차 최종 점검(10/13): `docs/week3-checklist.md` — `python tools/live_check.py --attacks` 실제 스택 42/42(1·2·3주차 항목, 시험 계정은 무작위 비밀번호로 켰다 끔), 공격 15종 45/45, CI 302 passed. 남은 과제는 점검표 6절(시연 영상, IP 기준 로그인 제한, 접수 건수 제한 없음 등).
-- 다음 후보: 1주차·3주차 점검표 6절의 보안 과제(IP 기준 로그인 제한, 접수 건수 제한) → 2라운드 제출물(기획서 업데이트본·발표 자료·서비스 개요서).
+- 접속 주소별 로그인 제한·접수 한도(`feat/ip-login-and-intake-limits`, 10/13): 주소별 실패 30회/15분이면 비밀번호 확인 없이 429(`ratelimit.py`), nginx 가 `X-Forwarded-For` 를 덮어쓰고 API 는 `ST_TRUSTED_PROXIES=["web"]` 에서 온 것만 믿음(uvicorn `--no-proxy-headers`). 끝나지 않은(`QUEUED`·`RUNNING`) 사건 주체별 20(429)·전체 200(503). `live_check.py` 46/46. 상세 `docs/week3-checklist.md` 7절.
+- 다음 후보: 2라운드 제출물(기획서 업데이트본·발표 자료·서비스 개요서), 시연 영상.
 
 ## 남은 개선 후보 (품질 개선은 마침, 참고용)
 
