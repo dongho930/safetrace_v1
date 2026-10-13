@@ -997,7 +997,7 @@ function Investigation({
           <div className="screen-bar">
             <span className="obs-title">
               관찰 화면{sub ? ` · 연관 후보 ${sub}` : ""}
-              {obs && typeof obs.data.step === "number" ? ` · ${obs.data.step}단계` : ""}
+              {obs && typeof obs.data.step === "number" ? ` · ${obs.data.step + 1}단계` : ""}{/* 기록은 0부터, 머리 줄 진행 표시처럼 1부터 */}
             </span>
             <span className="obs-note">Jev 가 본 화면 · 움직이는 화면은 왼쪽 실시간 화면</span>
             <span className="obs-env">격리 브라우저{browser?.version ? ` · Chromium ${browser.version.split(".")[0]}` : ""} · 검문 프록시 경유</span>
