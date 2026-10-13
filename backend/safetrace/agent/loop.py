@@ -547,14 +547,15 @@ class AgentRun:
 
     async def _capture_many(self, page: Page, need: list[tuple[int, str, ElementInfo]], until: float) -> list:
         """이미지 버튼들을 캡처한다(_capture_many_unpaused). 버튼을 찾아 위아래로 스크롤했다가 되돌리는 장면이
-        녹화·실시간 화면에 찍히지 않게 그동안 녹화를 멈춘다(멈춘 동안은 마지막 화면이 이어진다)."""
+        콘솔 실시간 화면에서 튀지 않게 그동안 실시간 중계만 멈춘다(콘솔은 마지막 화면 유지). 녹화(증거)는 계속한다:
+        스크롤하는 동안에만 보이는 내용이 있을 수 있어 증거에서는 빼지 않는다(Codex 지적)."""
         if not need or not self.rec:
             return await self._capture_many_unpaused(page, need, until)
-        self.rec.pause()
+        self.rec.pause_live()
         try:
             return await self._capture_many_unpaused(page, need, until)
         finally:
-            self.rec.resume()
+            self.rec.resume_live()
 
     async def _capture_many_unpaused(self, page: Page, need: list[tuple[int, str, ElementInfo]], until: float) -> list:
         """이미지 버튼들을 캡처한다. 결과: PNG | None(보이지 않음) | "skip"(시간이 없어 찍지 않음).

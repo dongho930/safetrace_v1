@@ -282,6 +282,32 @@ export function clickPoint(v: unknown): ClickPoint | null {
   const r = box(v, SCREEN_W, SCREEN_H);
   return r ? { x: r[0], y: r[1], w: r[2], h: r[3] } : null;
 }
+// JPEG 머리에서 [폭, 높이]. JPEG 가 아니거나 앞부분에서 찾지 못하면 null(실시간 프레임을 디코드하기 전에 크기를 본다)
+export function jpegSize(b: Uint8Array): [number, number] | null {
+  if (b.length < 4 || b[0] !== 0xff || b[1] !== 0xd8) return null;
+  let i = 2;
+  while (i + 8 < b.length) {
+    if (b[i] !== 0xff) return null;
+    const m = b[i + 1];
+    if (m === 0xff) {
+      i += 1; // 채움 바이트
+      continue;
+    }
+    if (m === 0x01 || (m >= 0xd0 && m <= 0xd8)) {
+      i += 2; // 길이 없는 표식
+      continue;
+    }
+    const len = (b[i + 2] << 8) | b[i + 3];
+    if (len < 2) return null;
+    // SOF(프레임 시작): 정밀도 1바이트 뒤 높이·폭
+    if ((m >= 0xc0 && m <= 0xc3) || (m >= 0xc5 && m <= 0xc7) || (m >= 0xc9 && m <= 0xcb) || (m >= 0xcd && m <= 0xcf)) {
+      return [(b[i + 7] << 8) | b[i + 8], (b[i + 5] << 8) | b[i + 6]];
+    }
+    i += 2 + len;
+  }
+  return null;
+}
+
 // 실시간 화면 통로로 온 클릭 표시 {"click":[x,y,폭,높이]}(에이전트가 보낸 값, 믿지 않음)
 export function liveClick(text: string): ClickPoint | null {
   try {

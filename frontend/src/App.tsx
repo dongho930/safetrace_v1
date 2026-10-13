@@ -37,7 +37,7 @@ import {
   verifyCase,
 } from "./api";
 import {
-  buildOverlay, buildPath, buildReasons, buildScreens, clip, hostOrFile, hostPath, liveClick, recordingClicks, SCREEN_H, SCREEN_W,
+  buildOverlay, buildPath, buildReasons, buildScreens, clip, hostOrFile, hostPath, jpegSize, liveClick, recordingClicks, SCREEN_H, SCREEN_W,
   type ClickPoint, type Overlay, type Reason, type RecClick, type Screen, type Tone,
 } from "./evidence";
 import { ACTION_LABEL, NET_CATEGORY_LABEL, overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
@@ -1862,6 +1862,9 @@ const LIVE_MAX_LAG_MS = 450;
 // 정상 프레임은 1280×800 JPEG 수백 KB, 초당 30장 이하
 const LIVE_MAX_BYTES = 2 * 1024 * 1024;
 const LIVE_MAX_DECODING = 2;
+// 디코드 전에 JPEG 머리로 해상도를 본다: 2MiB 안에 압축된 초고해상도 이미지는 디코드하면 장당 수백 MB 다(Codex 지적).
+// 디코드 결과도 화면 크기로 받는다(버퍼에 쌓이는 메모리를 장당 약 4MB 로)
+const LIVE_MAX_SIDE = 2560;
 
 function LiveVideo({
   caseId,
@@ -1905,8 +1908,17 @@ function LiveVideo({
     let reading = 0; // 읽는 중인 작은 메시지 수
     const decode = (blob: Blob, at: number) => {
       decoding += 1;
-      createImageBitmap(blob) // 메인 스레드 밖에서 디코드
+      blob
+        .slice(0, 65536)
+        .arrayBuffer()
+        .then((head) => {
+          const size = jpegSize(new Uint8Array(head));
+          if (!size || size[0] > LIVE_MAX_SIDE || size[1] > LIVE_MAX_SIDE) return null; // JPEG 가 아니거나 너무 큼
+          // 메인 스레드 밖에서 디코드
+          return createImageBitmap(blob, { resizeWidth: SCREEN_W, resizeHeight: SCREEN_H, resizeQuality: "medium" });
+        })
         .then((bmp) => {
+          if (!bmp) return;
           if (!alive) return bmp.close();
           let i = queue.length; // 디코드가 순서를 바꿔 끝내도 받은 순서대로
           while (i > 0 && queue[i - 1].at > at) i--;

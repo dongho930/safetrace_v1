@@ -108,6 +108,7 @@ class ScreencastRecorder:
         self._page: Page | None = None
         self._last: bytes | None = None
         self._pauses = 0  # 멈춤 요청 수(겹쳐 불러도 마지막 resume 에서만 다시 받는다)
+        self._live_pauses = 0  # 실시간 중계만 멈춤(녹화는 계속): 증거 녹화에서는 장면을 빼지 않는다
         self._ticker: asyncio.Task | None = None
         self._writer: asyncio.Task | None = None
         self._q: asyncio.Queue[bytes | None] = asyncio.Queue()
@@ -200,7 +201,7 @@ class ScreencastRecorder:
         else:
             ts = time.time()
         self._emit(self._last, ts)
-        if self.live:
+        if self.live and not self._live_pauses:
             self.live.on_frame(self._last)
 
     async def _detach(self):
@@ -228,6 +229,13 @@ class ScreencastRecorder:
 
     def resume(self):
         self._pauses = max(0, self._pauses - 1)
+
+    def pause_live(self):
+        """보기용 실시간 중계만 멈춘다(그동안 콘솔은 마지막 화면을 유지). 녹화(증거)는 계속한다."""
+        self._live_pauses += 1
+
+    def resume_live(self):
+        self._live_pauses = max(0, self._live_pauses - 1)
 
     async def _tick(self):
         """화면이 멈춰 있을 때만 마지막 프레임을 1초 간격으로 다시 넣고, 라이브 시청자에게도 마지막 화면을 보낸다."""

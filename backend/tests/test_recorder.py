@@ -171,8 +171,8 @@ def test_capture_error_releases_pause(tmp_path):
     assert run.rec._pauses == 0
 
 
-def test_ocr_capture_pauses_recording():
-    """이미지 버튼을 찾아 위아래로 스크롤하는 동안 녹화를 멈추고, 오류가 나도 풀린다."""
+def test_ocr_capture_pauses_live_only():
+    """이미지 버튼을 찾아 위아래로 스크롤하는 동안 실시간 중계만 멈추고 녹화(증거)는 계속한다. 오류가 나도 풀린다."""
     from safetrace.agent.loop import AgentRun
 
     run = AgentRun.__new__(AgentRun)
@@ -180,7 +180,7 @@ def test_ocr_capture_pauses_recording():
     seen = []
 
     async def inner(page, need, until):
-        seen.append(run.rec._pauses)
+        seen.append((run.rec._live_pauses, run.rec._pauses))
         if len(seen) == 2:
             raise RuntimeError("boom")
         return ["png"] * len(need)
@@ -190,4 +190,29 @@ def test_ocr_capture_pauses_recording():
     assert asyncio.run(run._capture_many(None, need, 0)) == ["png"]
     with pytest.raises(RuntimeError):
         asyncio.run(run._capture_many(None, need, 0))
-    assert seen == [1, 1] and run.rec._pauses == 0
+    assert seen == [(1, 0), (1, 0)] and run.rec._live_pauses == 0 and run.rec._pauses == 0
+
+
+def test_live_pause_keeps_recording():
+    """중계만 멈춘 동안에도 화면 전송 프레임은 녹화로 들어가고, 실시간 쪽으로는 가지 않는다."""
+    import base64
+
+    class Sink:
+        def __init__(self):
+            self.n = 0
+
+        def on_frame(self, jpeg):
+            self.n += 1
+
+    sink = Sink()
+    rec = ScreencastRecorder("ffmpeg", None, live=sink)
+    emitted = []
+    rec._emit = lambda jpeg, ts: emitted.append(ts)
+    rec._cdp = cdp = object()
+    ev = {"data": base64.b64encode(_jpeg((10, 10, 10), (64, 40))).decode(), "metadata": {"timestamp": 1_800_000_000.0}}
+    rec.pause_live()
+    rec._on_frame(cdp, ev)
+    rec.resume_live()
+    rec._on_frame(cdp, ev)
+    assert len(emitted) == 2 and rec.frames_received == 2  # 녹화는 두 프레임 모두
+    assert sink.n == 1  # 실시간은 멈춘 동안의 프레임을 받지 않는다
