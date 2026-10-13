@@ -35,7 +35,7 @@ from ..proxy.egress import EGRESS_HEADER
 from . import netfilter
 from .candidates import select as select_candidates
 from .gate import Budget, ElementInfo, SafetyGate, classify_forbidden
-from .observe import BOXES_JS, CLOSE_POPUP_JS, COLLECT_JS, READ_ONE_JS, RECTS_JS
+from .observe import CLOSE_POPUP_JS, COLLECT_JS, READ_ONE_JS, RECTS_JS
 from .recorder import ScreencastRecorder, find_ffmpeg
 from .ocr import get_ocr
 
@@ -72,32 +72,66 @@ def is_auto_redirect_page(text: str) -> bool:
     return bool(_AUTO_REDIRECT.search(text[:2000]))
 
 
-_MAX_WIDTH = 10000  # 상자 좌표의 가로 상한(창 폭은 이보다 훨씬 작다)
+_EID = re.compile(r"e\d{1,6}")  # 관찰이 요소에 붙이는 ID 형식
+_BOX_TIMEOUT_MS = 150  # 상자 하나를 찾는 최대 시간(있는 요소는 바로 찾는다. 사라졌으면 이만큼 기다리고 포기, 상자들은 동시에 잰다)
 
 
-def clean_boxes(raw: object, cand_ids: list[str], n_forbidden: int, max_h: int) -> dict | None:
-    """BOXES_JS 결과(페이지 안에서 계산, 믿지 않음)를 기록 모양으로. 모양이 틀리면 None, 상자 하나가 틀리면 그 상자만 None.
-    정수만 받고 캡처 크기 안에 있어야 한다(bool 은 int 의 하위형이라 따로 뺀다)."""
-    def is_int(v) -> bool:
-        return isinstance(v, int) and not isinstance(v, bool)
+async def measure_rects(page: Page, attr: str, ids: list[str]) -> tuple[dict | None, list[dict | None]]:
+    """관찰 화면 위에 그릴 요소 상자를 잰다. 페이지 JS(바꿔치기할 수 있는 querySelector·getBoundingClientRect·scrollY)를
+    쓰지 않고 Playwright 의 bounding_box(분리된 실행 영역에서 찾고 브라우저 프로토콜로 잼)를 쓴다.
+    결과: (문서 루트 html 의 창 기준 상자 = 스크롤 위치, 요소마다 창 기준 상자). 표시 속성이 둘 이상에 붙어 있으면 None."""
+    async def bb(sel: str | None) -> dict | None:
+        if sel is None:
+            return None
+        try:
+            return await page.locator(sel).bounding_box(timeout=_BOX_TIMEOUT_MS)
+        except (PWError, PWTimeout):
+            return None
 
-    if not isinstance(raw, dict):
+    sels = [f'[{attr}="{i}"]' if _EID.fullmatch(i) else None for i in ids]
+    root, *rects = await asyncio.gather(bb("html"), *(bb(x) for x in sels))
+    return root, rects
+
+
+_PNG_SIG = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])  # PNG 파일 서명
+
+
+def png_size(path: Path) -> tuple[int, int] | None:
+    """PNG 머리에서 (폭, 높이). 상자 좌표는 실제로 저장한 캡처 크기에 맞춘다."""
+    try:
+        with path.open("rb") as f:
+            head = f.read(24)
+    except OSError:
         return None
-    size, boxes = raw.get("size"), raw.get("boxes")
-    if not (isinstance(size, list) and len(size) == 2 and all(is_int(v) for v in size)):
+    if len(head) < 24 or head[:8] != _PNG_SIG or head[12:16] != b"IHDR":
+        return None
+    return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+
+
+def boxes_from(root: dict | None, rects: list[dict | None], size: tuple[int, int] | None,
+               cand_ids: list[str], n_forbidden: int) -> dict | None:
+    """창 기준 상자를 캡처 이미지 픽셀로: 창 좌표 + 스크롤(= 창 좌표 - html 상자 위치). Chromium 전체 캡처는
+    position: fixed 요소도 캡처 순간 자리에 찍으므로 같은 식이 맞는다(시험: test_boxes_match_full_page_capture).
+    캡처 범위로 자르고, 범위 밖·너무 작으면 None. 결과: {"size": [폭, 높이], "cand": {ID: [x,y,w,h]}, "forbidden": [...]}"""
+    if root is None or size is None or len(rects) != len(cand_ids) + n_forbidden:
         return None
     w, h = size
-    if not (0 < w <= _MAX_WIDTH and 0 < h <= max_h) or not isinstance(boxes, list) or len(boxes) != len(cand_ids) + n_forbidden:
-        return None
 
-    def ok(b) -> list[int] | None:
-        if not (isinstance(b, list) and len(b) == 4 and all(is_int(v) for v in b)):
+    def one(r: dict | None) -> list[int] | None:
+        if r is None:
             return None
-        x, y, bw, bh = b
-        return b if x >= 0 and y >= 0 and bw > 0 and bh > 0 and x + bw <= w and y + bh <= h else None
+        x0, y0 = r["x"] - root["x"], r["y"] - root["y"]
+        x1, y1 = min(x0 + r["width"], w), min(y0 + r["height"], h)
+        x, y = max(0.0, x0), max(0.0, y0)
+        if x1 - x < 2 or y1 - y < 2:
+            return None
+        bx = [round(x), round(y), round(x1 - x), round(y1 - y)]
+        bx[2], bx[3] = min(bx[2], w - bx[0]), min(bx[3], h - bx[1])
+        return bx if bx[2] > 0 and bx[3] > 0 else None
 
-    cand = {i: b for i, b in zip(cand_ids, (ok(b) for b in boxes[: len(cand_ids)])) if b}
-    forbidden = [ok(b) for b in boxes[len(cand_ids):]]
+    out = [one(r) for r in rects]
+    cand = {i: b for i, b in zip(cand_ids, out[: len(cand_ids)]) if b}
+    forbidden = out[len(cand_ids):]
     if not cand and not any(forbidden):
         return None
     return {"size": [w, h], "cand": cand, "forbidden": forbidden}
@@ -409,8 +443,11 @@ class AgentRun:
         text = mask_pii(raw.get("text", ""))[:4000]
         state = PageState(step=step, url=page.url[:2048], title=mask_pii(raw.get("title", ""))[:200], text=text,
                           candidates=chosen, has_popup=bool(raw.get("popup")), history=self.history[-30:])
-        boxes = await self._boxes(page, [c.id for c in chosen], forbidden_ids[:50])
+        # 상자는 캡처 직전에 잰다(OCR 캡처가 스크롤을 되돌린 뒤), 크기는 실제 캡처 파일에서
+        cand_ids, forb_ids = [c.id for c in chosen], forbidden_ids[:50]
+        root, rects = await measure_rects(page, self.attr, cand_ids + forb_ids)
         shot = await self._screenshot(page, "observe", full=True)
+        boxes = boxes_from(root, rects, png_size(self.ev.file_path(shot)), cand_ids, len(forb_ids)) if shot else None
         text_hash = hashlib.sha256(raw.get("text", "").encode()).hexdigest()
         seq = self._record("observe", {
             "step": step, "url": page.url[:2048], "title": state.title,
@@ -424,16 +461,6 @@ class AgentRun:
         opts = "|".join(sorted(action_options(state)))
         key = hashlib.sha256((page.url + "|" + "|".join(c.text for c in chosen) + "#" + opts).encode()).hexdigest()
         return _Observation(state, infos, forbidden, seq, key)
-
-    async def _boxes(self, page: Page, cand_ids: list[str], forbidden_ids: list[str]) -> dict | None:
-        """관찰 화면 위에 그릴 상자(선택지·금지 요소). 페이지 JS 결과라 믿지 않고 모양·범위를 검사한다.
-        결과: {"size": [폭, 높이], "cand": {요소 ID: [x, y, w, h]}, "forbidden": [[x, y, w, h] | None, ...]}"""
-        ids = cand_ids + forbidden_ids
-        try:
-            raw = await page.evaluate(BOXES_JS, [self.attr, ids, self.s.screenshot_max_height])
-        except (PWError, PWTimeout):
-            return None
-        return clean_boxes(raw, cand_ids, len(forbidden_ids), self.s.screenshot_max_height)
 
     async def _capture_many(self, page: Page, need: list[tuple[int, str, ElementInfo]], until: float) -> list:
         """이미지 버튼들을 캡처한다. 결과: PNG | None(보이지 않음) | "skip"(시간이 없어 찍지 않음).

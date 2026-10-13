@@ -782,35 +782,74 @@ _BOX_PAGE = """<!doctype html><html><body style="margin:0;height:2600px;backgrou
 </body></html>"""
 
 
-@pytest.mark.parametrize("scroll", [0, 900, 1800])
-def test_boxes_match_full_page_capture(scroll):
-    """BOXES_JS 좌표가 관찰 화면(페이지 전체 캡처) 위 실제 위치와 맞는지: 상자 중심 픽셀이 그 요소의 색이어야 한다.
-    스크롤한 상태, 위·아래에 붙은 fixed 요소(fx·fb)도 맞아야 한다."""
-    import io
+_SPOOF = """
+const q = document.querySelector.bind(document);
+document.querySelector = (sel) => String(sel).startsWith('[data-t') ? { getBoundingClientRect: () => ({ left: 20, top: 20, width: 120, height: 40 }) } : q(sel);
+Element.prototype.getBoundingClientRect = () => ({ left: 20, top: 20, right: 140, bottom: 60, width: 120, height: 40, x: 20, y: 20 });
+Object.defineProperty(window, 'scrollY', { get: () => 0 });
+Object.defineProperty(window, 'innerWidth', { get: () => 99 });
+"""
+
+
+@pytest.mark.parametrize("scroll, spoof", [(0, False), (900, False), (1800, False), (900, True)])
+def test_boxes_match_full_page_capture(tmp_path, scroll, spoof):
+    """상자 좌표가 관찰 화면(페이지 전체 캡처) 위 실제 위치와 맞는지: 상자 중심 픽셀이 그 요소의 색이어야 한다.
+    스크롤한 상태, 위·아래에 붙은 fixed 요소(fx·fb)도 맞아야 한다. spoof: 페이지가 querySelector·getBoundingClientRect·
+    scrollY·innerWidth 를 바꿔치기해도 상자는 실제 위치여야 한다(페이지 JS 로 재지 않으므로)."""
+    import asyncio
 
     from PIL import Image
-    from playwright.sync_api import sync_playwright
+    from playwright.async_api import async_playwright
 
-    from safetrace.agent.loop import clean_boxes
-    from safetrace.agent.observe import BOXES_JS
+    from safetrace.agent.loop import boxes_from, measure_rects, png_size
 
     colors = {"fx": (0, 255, 0), "b1": (255, 0, 0), "pw": (0, 0, 255), "fb": (255, 0, 255)}
-    with sync_playwright() as p:
-        b = p.chromium.launch()
-        page = b.new_page(viewport={"width": 1280, "height": 800})
-        page.set_content(_BOX_PAGE)
-        for i, k in enumerate(colors):
-            page.eval_on_selector(f"#{k}", "(el, v) => el.setAttribute('data-t', v)", f"e{i}")
-        page.evaluate(f"window.scrollTo(0, {scroll})")
-        raw = page.evaluate(BOXES_JS, ["data-t", ["e0", "e1", "e2", "e3"], 6000])
-        boxes = clean_boxes(raw, ["e0", "e1", "e2"], 1, 6000)
-        vw, h = page.evaluate("() => [innerWidth, document.documentElement.scrollHeight]")
-        png = page.screenshot(full_page=True, animations="disabled", clip={"x": 0, "y": 0, "width": vw, "height": min(h, 6000)})
-        b.close()
-    img = Image.open(io.BytesIO(png)).convert("RGB")
+
+    async def go():
+        async with async_playwright() as p:
+            b = await p.chromium.launch()
+            page = await b.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content(_BOX_PAGE)
+            for i, k in enumerate(colors):
+                await page.eval_on_selector(f"#{k}", "(el, v) => el.setAttribute('data-t', v)", f"e{i}")
+            await page.evaluate(f"window.scrollTo(0, {scroll})")
+            if spoof:
+                await page.evaluate(_SPOOF)
+            root, rects = await measure_rects(page, "data-t", ["e0", "e1", "e2", "e3"])
+            png = await page.screenshot(full_page=True, animations="disabled")
+            await b.close()
+            return root, rects, png
+
+    root, rects, png = asyncio.run(go())
+    shot = tmp_path / "s.png"
+    shot.write_bytes(png)
+    img = Image.open(shot).convert("RGB")
+    assert png_size(shot) == img.size
+    boxes = boxes_from(root, rects, png_size(shot), ["e0", "e1", "e2"], 1)
     assert boxes is not None and boxes["size"] == list(img.size)
     found = {**{k: boxes["cand"].get(f"e{i}") for i, k in enumerate(["fx", "b1", "pw"])}, "fb": boxes["forbidden"][0]}
     for k, bx in found.items():
         assert bx is not None, k
         x, y, w, hh = bx
-        assert img.getpixel((x + w // 2, y + hh // 2)) == colors[k], (k, bx, scroll)
+        assert img.getpixel((x + w // 2, y + hh // 2)) == colors[k], (k, bx, scroll, spoof)
+
+
+def test_boxes_skip_duplicated_marker(tmp_path):
+    """페이지가 표시 속성을 다른 요소에도 붙이면(어느 요소인지 모름) 그 상자는 그리지 않는다."""
+    import asyncio
+
+    from playwright.async_api import async_playwright
+
+    from safetrace.agent.loop import measure_rects
+
+    async def go():
+        async with async_playwright() as p:
+            b = await p.chromium.launch()
+            page = await b.new_page()
+            await page.set_content('<button data-t="e0">a</button><button data-t="e0">b</button><button data-t="e1">c</button>')
+            r = await measure_rects(page, "data-t", ["e0", "e1", "x]"])
+            await b.close()
+            return r
+
+    root, rects = asyncio.run(go())
+    assert root is not None and rects[0] is None and rects[1] is not None and rects[2] is None

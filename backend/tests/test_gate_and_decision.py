@@ -550,15 +550,31 @@ def test_meaningless_dead_destination_kept():
     assert d.threat == "unknown" and d.override is None
 
 
-def test_clean_boxes_rejects_bad_shapes():
-    """관찰 화면 상자는 페이지 JS 가 계산한 값(믿지 않음): 정수·캡처 범위 안만 남긴다."""
-    from safetrace.agent.loop import clean_boxes
+def test_boxes_from_maps_viewport_rects_to_capture(tmp_path):
+    """창 기준 상자 + 스크롤(html 상자) → 캡처 픽셀. 캡처 범위로 자르고, 밖이거나 작으면 None. 크기는 실제 PNG 에서."""
+    import struct
+    import zlib
 
-    ok = {"size": [1280, 900], "boxes": [[10, 20, 30, 40], None, [0, 0, 5, 5]]}
-    assert clean_boxes(ok, ["e1", "e2"], 1, 6000) == {"size": [1280, 900], "cand": {"e1": [10, 20, 30, 40]}, "forbidden": [[0, 0, 5, 5]]}
-    bad_box = [[1, 2, 3], [True, 0, 5, 5], [1.5, 0, 5, 5], [1270, 0, 20, 5], [-1, 0, 5, 5], [0, 0, 0, 5], "x", {"0": 1}]
-    assert clean_boxes({"size": [1280, 900], "boxes": [*bad_box, [1, 1, 1, 1]]}, [f"e{i}" for i in range(8)], 1, 6000)["cand"] == {}
-    for raw in (None, [], {"size": [1280], "boxes": []}, {"size": [0, 10], "boxes": [[1, 1, 1, 1]]},
-                {"size": [1280, 7000], "boxes": [[1, 1, 1, 1]]}, {"size": [1280, 900], "boxes": [[1, 1, 1, 1]] * 3},
-                {"size": [1280, 900], "boxes": [None, None]}, {"size": ["1280", 900], "boxes": [[1, 1, 1, 1], None]}):
-        assert clean_boxes(raw, ["e1"], 1, 6000) is None, raw
+    from safetrace.agent.loop import boxes_from, png_size
+
+    root = {"x": 0, "y": -900, "width": 1280, "height": 2600}  # 900 만큼 스크롤
+    rects = [{"x": 300, "y": -500, "width": 160, "height": 50},   # 문서 y=400
+             {"x": 1270, "y": 10, "width": 40, "height": 20},     # 오른쪽이 잘림
+             {"x": 10, "y": 1800, "width": 40, "height": 20},     # 캡처(높이 2600) 밖
+             None,
+             {"x": 10.4, "y": -899.6, "width": 1.0, "height": 30}]  # 너무 좁음
+    out = boxes_from(root, rects, (1280, 2600), ["e1", "e2", "e3"], 2)
+    assert out == {"size": [1280, 2600], "cand": {"e1": [300, 400, 160, 50], "e2": [1270, 910, 10, 20]}, "forbidden": [None, None]}
+    assert boxes_from(None, rects, (1280, 2600), ["e1", "e2", "e3"], 2) is None
+    assert boxes_from(root, rects, None, ["e1", "e2", "e3"], 2) is None
+    assert boxes_from(root, rects[:2], (1280, 2600), ["e1", "e2", "e3"], 2) is None
+    assert boxes_from(root, [None, None], (1280, 2600), ["e1"], 1) is None
+
+    def png(w, h):
+        ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+        return bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) + struct.pack(">I", 13) + b"IHDR" + ihdr + struct.pack(">I", zlib.crc32(b"IHDR" + ihdr))
+    (tmp_path / "a.png").write_bytes(png(1280, 2600))
+    (tmp_path / "b.png").write_bytes(b"not a png at all, 24 bytes+")
+    assert png_size(tmp_path / "a.png") == (1280, 2600)
+    assert png_size(tmp_path / "b.png") is None
+    assert png_size(tmp_path / "missing.png") is None
