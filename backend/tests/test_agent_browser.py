@@ -830,10 +830,14 @@ def test_boxes_match_full_page_capture(tmp_path, scroll, spoof):
     boxes = boxes_from(root, rects, png_size(shot), ["e0", "e1", "e2"], 1)
     assert boxes is not None and boxes["size"] == list(img.size)
     found = {**{k: boxes["cand"].get(f"e{i}") for i, k in enumerate(["fx", "b1", "pw"])}, "fb": boxes["forbidden"][0]}
+    # 리눅스(CI) Chromium 은 색을 조금 바꿔 찍는다(#00ff00 → (0,247,0)). 값이 같은지 대신 가장 가까운 색(배경 포함)이 그 요소인지 본다.
+    palette = {**colors, "bg": (255, 255, 255)}
     for k, bx in found.items():
         assert bx is not None, k
         x, y, w, hh = bx
-        assert img.getpixel((x + w // 2, y + hh // 2)) == colors[k], (k, bx, scroll, spoof)
+        px = img.getpixel((x + w // 2, y + hh // 2))
+        near = min(palette, key=lambda c: sum((a - b) ** 2 for a, b in zip(px, palette[c])))
+        assert near == k, (k, px, bx, scroll, spoof)
 
 
 def test_boxes_skip_duplicated_marker(tmp_path):
