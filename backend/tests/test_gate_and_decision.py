@@ -551,13 +551,13 @@ def test_meaningless_dead_destination_kept():
 
 
 def test_boxes_from_maps_viewport_rects_to_capture(tmp_path):
-    """창 기준 상자 + 스크롤(html 상자) → 캡처 픽셀. 캡처 범위로 자르고, 밖이거나 작으면 None. 크기는 실제 PNG 에서."""
+    """창 기준 상자 + 스크롤(원점) → 캡처 픽셀. 캡처 범위로 자르고, 밖이거나 작으면 None. 크기는 실제 PNG 에서."""
     import struct
     import zlib
 
     from safetrace.agent.loop import boxes_from, png_size
 
-    root = {"x": 0, "y": -900, "width": 1280, "height": 2600}  # 900 만큼 스크롤
+    root = {"x": 0, "y": -900}  # 900 만큼 스크롤
     rects = [{"x": 300, "y": -500, "width": 160, "height": 50},   # 문서 y=400
              {"x": 1270, "y": 10, "width": 40, "height": 20},     # 오른쪽이 잘림
              {"x": 10, "y": 1800, "width": 40, "height": 20},     # 캡처(높이 2600) 밖

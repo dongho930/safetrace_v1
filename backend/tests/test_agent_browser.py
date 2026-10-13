@@ -791,7 +791,7 @@ Object.defineProperty(window, 'innerWidth', { get: () => 99 });
 """
 
 
-@pytest.mark.parametrize("scroll, spoof", [(0, False), (900, False), (1800, False), (900, True)])
+@pytest.mark.parametrize("scroll, spoof", [(0, False), (900, False), (1800, False), (900, True), (0, "root"), (900, "root")])
 def test_boxes_match_full_page_capture(tmp_path, scroll, spoof):
     """상자 좌표가 관찰 화면(페이지 전체 캡처) 위 실제 위치와 맞는지: 상자 중심 픽셀이 그 요소의 색이어야 한다.
     스크롤한 상태, 위·아래에 붙은 fixed 요소(fx·fb)도 맞아야 한다. spoof: 페이지가 querySelector·getBoundingClientRect·
@@ -813,7 +813,9 @@ def test_boxes_match_full_page_capture(tmp_path, scroll, spoof):
             for i, k in enumerate(colors):
                 await page.eval_on_selector(f"#{k}", "(el, v) => el.setAttribute('data-t', v)", f"e{i}")
             await page.evaluate(f"window.scrollTo(0, {scroll})")
-            if spoof:
+            if spoof == "root":  # 페이지가 html 자체를 옮겨도(여백·위치) 스크롤 위치로 오인하지 않아야 한다
+                await page.add_style_tag(content="html { position: relative; margin-left: 200px; top: 37px }")
+            elif spoof:
                 await page.evaluate(_SPOOF)
             root, rects = await measure_rects(page, "data-t", ["e0", "e1", "e2", "e3"])
             png = await page.screenshot(full_page=True, animations="disabled")

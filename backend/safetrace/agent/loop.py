@@ -79,7 +79,8 @@ _BOX_TIMEOUT_MS = 150  # 상자 하나를 찾는 최대 시간(있는 요소는 
 async def measure_rects(page: Page, attr: str, ids: list[str]) -> tuple[dict | None, list[dict | None]]:
     """관찰 화면 위에 그릴 요소 상자를 잰다. 페이지 JS(바꿔치기할 수 있는 querySelector·getBoundingClientRect·scrollY)를
     쓰지 않고 Playwright 의 bounding_box(분리된 실행 영역에서 찾고 브라우저 프로토콜로 잼)를 쓴다.
-    결과: (문서 루트 html 의 창 기준 상자 = 스크롤 위치, 요소마다 창 기준 상자). 표시 속성이 둘 이상에 붙어 있으면 None."""
+    스크롤 위치도 페이지가 옮길 수 있는 html 상자 대신 브라우저 프로토콜(Page.getLayoutMetrics)에서 읽는다.
+    결과: (원점 {"x": -스크롤X, "y": -스크롤Y}, 요소마다 창 기준 상자). 표시 속성이 둘 이상에 붙어 있으면 None."""
     async def bb(sel: str | None) -> dict | None:
         if sel is None:
             return None
@@ -88,8 +89,19 @@ async def measure_rects(page: Page, attr: str, ids: list[str]) -> tuple[dict | N
         except (PWError, PWTimeout):
             return None
 
+    async def origin() -> dict | None:
+        try:
+            cdp = await page.context.new_cdp_session(page)
+            try:
+                v = (await cdp.send("Page.getLayoutMetrics"))["cssVisualViewport"]
+            finally:
+                await cdp.detach()
+            return {"x": -float(v["pageX"]), "y": -float(v["pageY"])}
+        except (PWError, PWTimeout, KeyError, TypeError, ValueError):
+            return None
+
     sels = [f'[{attr}="{i}"]' if _EID.fullmatch(i) else None for i in ids]
-    root, *rects = await asyncio.gather(bb("html"), *(bb(x) for x in sels))
+    root, *rects = await asyncio.gather(origin(), *(bb(x) for x in sels))
     return root, rects
 
 
@@ -110,7 +122,7 @@ def png_size(path: Path) -> tuple[int, int] | None:
 
 def boxes_from(root: dict | None, rects: list[dict | None], size: tuple[int, int] | None,
                cand_ids: list[str], n_forbidden: int) -> dict | None:
-    """창 기준 상자를 캡처 이미지 픽셀로: 창 좌표 + 스크롤(= 창 좌표 - html 상자 위치). Chromium 전체 캡처는
+    """창 기준 상자를 캡처 이미지 픽셀로: 창 좌표 + 스크롤(= 창 좌표 - 원점). Chromium 전체 캡처는
     position: fixed 요소도 캡처 순간 자리에 찍으므로 같은 식이 맞는다(시험: test_boxes_match_full_page_capture).
     캡처 범위로 자르고, 범위 밖·너무 작으면 None. 결과: {"size": [폭, 높이], "cand": {ID: [x,y,w,h]}, "forbidden": [...]}"""
     if root is None or size is None or len(rects) != len(cand_ids) + n_forbidden:
