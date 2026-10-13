@@ -16,6 +16,7 @@ import {
   clearToken,
   createCase,
   createUser,
+  dict,
   downloadExport,
   fileUrl,
   getCase,
@@ -27,17 +28,19 @@ import {
   login,
   logout,
   me,
+  num,
   patchUser,
   saveVerdict,
   streamEvents,
   strs,
+  text,
   type Threat,
   verifyCase,
 } from "./api";
 
 // 조사 대상 페이지에서 온 문자열은 모두 React 기본 이스케이프로만 출력한다(raw HTML 금지).
 
-const STATUS_LABEL: Record<string, string> = {
+const STATUS_LABEL: Record<string, string> = dict({
   QUEUED: "대기",
   RUNNING: "조사 중",
   COMPLETED: "조사 완료",
@@ -45,9 +48,9 @@ const STATUS_LABEL: Record<string, string> = {
   FAILED: "실패",
   UNREACHABLE: "접속 불가",
   BLOCKED: "차단(정책)",
-};
+});
 // 색만으로 구분하지 않도록 상태마다 기호를 붙인다
-const STATUS_GLYPH: Record<string, string> = {
+const STATUS_GLYPH: Record<string, string> = dict({
   QUEUED: "●",
   RUNNING: "●",
   COMPLETED: "○",
@@ -55,27 +58,30 @@ const STATUS_GLYPH: Record<string, string> = {
   FAILED: "×",
   UNREACHABLE: "×",
   BLOCKED: "×",
-};
-const THREAT_LABEL: Record<string, string> = {
+});
+const THREAT_LABEL: Record<string, string> = dict({
   phishing: "피싱",
   scam: "사기",
   illegal_gambling: "불법 도박",
   malware: "악성 앱",
   benign: "정상",
   unknown: "판단 불가",
-};
+});
 // 코드 규칙이 모델 판단을 바꾼 이유
 function overrideLabel(o: Threat["override"]): string {
+  // 행동 기록의 threat 기록(믿지 않는 값)에서도 부르므로 글자로만 읽는다
   if (!o || typeof o !== "object") return "";
+  const brand = text(o.brand);
+  const dest = text(o.destination);
   if (o.reason === "shortener_warning") return "단축 URL 서비스의 위험 경고 → 담당자 검토";
   if (o.reason === "brand_lookalike")
-    return o.destination
-      ? `열리지 않은 목적지가 브랜드 사칭 도메인(${o.brand ?? ""} · ${o.destination}) → 담당자 검토`
-      : `브랜드 사칭 도메인(${o.brand ?? ""}), 화면 내용 없음 → 담당자 검토`;
+    return dest
+      ? `열리지 않은 목적지가 브랜드 사칭 도메인(${brand} · ${dest}) → 담당자 검토`
+      : `브랜드 사칭 도메인(${brand}), 화면 내용 없음 → 담당자 검토`;
   const ops = strs(o.operators);
   return `공식 사행사업자 도메인${ops.length ? ` · ${ops.join(", ")}` : ""}`;
 }
-const REASON_LABEL: Record<string, string> = {
+const REASON_LABEL: Record<string, string> = dict({
   reputation_match: "Safe Browsing 위험 일치(AI 는 정상으로 봄)",
   candidate_reputation_match: "연관 후보가 Safe Browsing 위험 일치(AI 는 정상으로 봄)",
   unreachable_reputation_match: "접속 불가 · Safe Browsing 위험 일치",
@@ -89,8 +95,8 @@ const REASON_LABEL: Record<string, string> = {
   time_budget: "최대 시간 도달",
   page_unresponsive: "페이지가 응답하지 않아 시간 예산에서 강제 종료(무한 스크립트 등)",
   threat_decision_unavailable: "위협 판단 불가(판단 서비스 장애)",
-};
-const NET_CATEGORY_LABEL: Record<string, string> = {
+});
+const NET_CATEGORY_LABEL: Record<string, string> = dict({
   dns_failure: "도메인 없음(DNS)",
   connection_refused: "연결 거부",
   connection_dropped: "응답 없이 연결 끊김",
@@ -101,11 +107,12 @@ const NET_CATEGORY_LABEL: Record<string, string> = {
   network_unreachable: "네트워크 도달 불가",
   tls_error: "인증서·TLS 오류",
   other: "기타",
-};
+});
 // 검토가 남은 사건: 검토 필요 상태이고 담당자가 아직 확정(위협·정상)하지 않음(보류는 남는다)
 const needsReview = (c: CaseOut) => c.status === "REVIEW_REQUIRED" && (!c.verdict || c.verdict.decision === "hold");
 const TERMINAL = new Set(["COMPLETED", "REVIEW_REQUIRED", "FAILED", "UNREACHABLE", "BLOCKED"]);
 const MAX_STEPS = 15; // 에이전트 기본 예산(ST_MAX_STEPS)
+const MAX_EVENTS = 3000; // 사건 하나에서 화면에 받는 기록 수 상한
 
 // ── 아이콘(선 굵기 1.6 한 가지 스타일) ─────────────────────
 const ICONS: Record<string, string[]> = {
@@ -156,7 +163,7 @@ function useFitZoom() {
 const ROLE_LABEL: Record<Role, string> = { viewer: "열람", investigator: "조사관", reviewer: "검토관", admin: "관리자" };
 
 const fmtTime = (iso: string) => new Date(iso).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", hour12: false });
-const pct = (v: number) => v.toFixed(2);
+const pct = (v: number) => (typeof v === "number" && Number.isFinite(v) ? v.toFixed(2) : "-");
 
 // ── 분류 폴더: 목록 필터이자 현황 숫자(예전 지표 카드를 대신한다) ─────────────
 const isSuspect = (c: CaseOut) => !!c.threat && !["benign", "unknown"].includes(c.threat.threat);
@@ -293,11 +300,7 @@ export default function App() {
           query={query}
           onQuery={setQuery}
           onSelect={setSelected}
-          monitor={
-            <Boundary what="실시간 화면">
-              <LiveMonitor cases={cases} onOpen={setSelected} onEnded={refresh} />
-            </Boundary>
-          }
+          monitor={<LiveMonitor cases={cases} onOpen={setSelected} onEnded={refresh} />}
         />
         <section className="detail scroll" aria-label="사건 상세">
           {selected ? (
@@ -666,7 +669,9 @@ function LiveMonitor({ cases, onOpen, onEnded }: { cases: CaseOut[]; onOpen: (id
   return (
     <section className="monitor" aria-label="실시간 조사 화면">
       {running ? (
-        <MonitorCase key={running.id} c={running} onOpen={onOpen} onEnded={onEnded} />
+        <Boundary key={running.id} what="실시간 화면">
+          <MonitorCase c={running} onOpen={onOpen} onEnded={onEnded} />
+        </Boundary>
       ) : (
         <>
           <div className="monitor-head">
@@ -685,9 +690,14 @@ function LiveMonitor({ cases, onOpen, onEnded }: { cases: CaseOut[]; onOpen: (id
   );
 }
 
-// 실행 중인 사건 하나: 자기 /events 를 따로 구독한다(사건이 바뀌면 key 로 다시 만들어 이전 연결을 끊는다)
+// 실행 중인 사건 하나: 자기 /events 를 따로 구독한다(사건이 바뀌면 key 로 다시 만들어 이전 연결을 끊는다).
+// 기록 전체를 쌓지 않고 화면에 필요한 요약(관찰 수·마지막 화면·마지막 선택)만 갱신한다(믿지 않는 기록이 몰려와도 메모리가 늘지 않게)
+type MonitorView = { maxSeq: number; steps: number; shot: string | null; cands: Map<string, string>; act: Act | null };
+type Act = { what: string; prob: number; running: boolean };
+const EMPTY_VIEW: MonitorView = { maxSeq: -1, steps: 0, shot: null, cands: new Map(), act: null };
+
 function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) => void; onEnded: () => void }) {
-  const [events, setEvents] = useState<EvidenceEvent[]>([]);
+  const [view, setView] = useState<MonitorView>(EMPTY_VIEW);
   const [ended, setEnded] = useState(false);
   const [fps, setFps] = useState(0);
   const [videoOff, setVideoOff] = useState(false);
@@ -699,7 +709,7 @@ function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) 
     streamEvents(
       c.id,
       (e: AgentEvent) => {
-        if (e.type === "evidence") setEvents((prev) => (prev.some((p) => p.seq === e.seq) ? prev : [...prev, e]));
+        if (e.type === "evidence") setView((v) => (e.seq <= v.maxSeq ? v : step(v, e)));
         if (e.type === "status" && TERMINAL.has(e.status)) {
           setEnded(true);
           endedRef.current(); // 목록을 바로 다시 받아 다음 사건으로 넘어간다
@@ -710,11 +720,7 @@ function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) 
     return () => ac.abort();
   }, [c.id]);
 
-  const sorted = useMemo(() => [...events].sort((a, b) => a.seq - b.seq), [events]);
-  const main = sorted.filter((e) => typeof e.data.sub !== "number");
-  const steps = main.filter((e) => e.kind === "observe").length;
-  const shot = [...sorted].reverse().find((e) => (e.kind === "observe" || e.kind === "finish") && e.files.some((f) => f.endsWith(".png")))?.files.find((f) => f.endsWith(".png"));
-  const act = lastAction(sorted);
+  const { steps, shot, act } = view;
   const still = shot ? <LiveScreen caseId={c.id} name={shot} /> : <span className="small">첫 화면을 기다리는 중…</span>;
   return (
     <>
@@ -756,20 +762,23 @@ function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) 
   );
 }
 
-// 마지막 Jev 선택(주 조사·하위 조사 모두): 후보 글자는 바로 앞 관찰에서 찾는다(행동 기록과 같은 방식)
-function lastAction(events: EvidenceEvent[]): { what: string; prob: number; running: boolean } | null {
-  let candidates = new Map<string, string>();
-  let out: { what: string; prob: number; running: boolean } | null = null;
-  for (const e of events) {
-    const d = e.data as Record<string, unknown>;
-    if (e.kind === "observe") candidates = new Map(clickables(d.candidates).map((x) => [x.id, x.text]));
-    else if (e.kind === "decision") {
-      const choice = String(d.choice);
-      const eid = choice.startsWith("click_") ? choice.slice(6) : "";
-      out = { what: eid ? `“${clip(candidates.get(eid) ?? eid, 40)}” 클릭` : (ACTION_LABEL[choice] ?? choice), prob: Number(d.probability), running: true };
-    } else if (out && (e.kind === "action" || (e.kind === "gate" && !d.allowed) || e.kind === "action_error")) out.running = false;
+// 기록 하나로 요약을 갱신한다. 후보 글자는 바로 앞 관찰에서 찾는다(행동 기록과 같은 방식)
+function step(v: MonitorView, e: EvidenceEvent): MonitorView {
+  const d = e.data;
+  const next = { ...v, maxSeq: e.seq };
+  const png = e.files.find((f) => f.endsWith(".png"));
+  if ((e.kind === "observe" || e.kind === "finish") && png) next.shot = png;
+  if (e.kind === "observe") {
+    if (typeof d.sub !== "number") next.steps = v.steps + 1;
+    next.cands = new Map(clickables(d.candidates).map((x) => [x.id, x.text]));
+  } else if (e.kind === "decision") {
+    const choice = text(d.choice, 60);
+    const eid = choice.startsWith("click_") ? choice.slice(6) : "";
+    next.act = { what: eid ? `“${clip(v.cands.get(eid) ?? eid, 40)}” 클릭` : (ACTION_LABEL[choice] ?? choice), prob: num(d.probability), running: true };
+  } else if (v.act && (e.kind === "action" || (e.kind === "gate" && d.allowed === false) || e.kind === "action_error")) {
+    next.act = { ...v.act, running: false };
   }
-  return out;
+  return next;
 }
 
 function StatusChip({ c }: { c: CaseOut }) {
@@ -878,13 +887,19 @@ const Workspace = memo(function Workspace({
   const [status, setStatus] = useState("");
   const [live, setLive] = useState(false);
 
+  const [overflow, setOverflow] = useState(false);
   useEffect(() => {
     const ac = new AbortController();
+    const seen = new Set<number>();
     setLive(true);
     streamEvents(
       id,
       (e: AgentEvent) => {
-        if (e.type === "evidence") setEvents((prev) => (prev.some((p) => p.seq === e.seq) ? prev : [...prev, e]));
+        if (e.type === "evidence" && !seen.has(e.seq)) {
+          if (seen.size >= MAX_EVENTS) return setOverflow(true); // 정상 사건은 수백 건. 넘치면 더 받지 않고 알린다
+          seen.add(e.seq);
+          setEvents((prev) => [...prev, e]);
+        }
         if (e.type === "status") {
           setStatus(e.status);
           if (TERMINAL.has(e.status)) getCase(id).then(setC).catch(() => undefined);
@@ -922,6 +937,11 @@ const Workspace = memo(function Workspace({
             다음 사건 ›
           </button>
         </div>
+        {overflow && (
+          <p className="err" role="alert">
+            기록이 {MAX_EVENTS}건을 넘어 그 뒤는 화면에 표시하지 않았습니다. 전체 기록은 검토 패키지로 확인하세요.
+          </p>
+        )}
         <Opinion c={c} running={running} />
         <Investigation c={c} events={sorted} status={st} running={running} id={id} />
         <Evidence c={c} id={id} running={running} canExport={canExport} />
@@ -1065,55 +1085,55 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
     const sub = typeof d.sub === "number" ? d.sub : 0; // 연관 후보 하위 조사 번호
     const before = lines.length;
     if (e.kind === "start" && sub) {
-      lines.push({ seq: e.seq, icon: "globe", tone: "orange", text: <>하위 조사 시작 · <span className="mono">{String(d.url)}</span></> });
+      lines.push({ seq: e.seq, icon: "globe", tone: "orange", text: <>하위 조사 시작 · <span className="mono">{text(d.url)}</span></> });
     } else if (e.kind === "candidates") {
       const found = list(d.found);
-      lines.push({ seq: e.seq, icon: "stack", tone: found.length ? "orange" : "", text: <>연관 후보 {found.length}곳 · {d.followup ? `하위 조사 ${String(d.investigated)}곳` : "정상으로 판단해 기록만"}</> });
+      lines.push({ seq: e.seq, icon: "stack", tone: found.length ? "orange" : "", text: <>연관 후보 {found.length}곳 · {d.followup ? `하위 조사 ${text(d.investigated)}곳` : "정상으로 판단해 기록만"}</> });
     } else if (e.kind === "observe") {
       candidates = new Map(clickables(d.candidates).map((c) => [c.id, c.text]));
       const nf = list(d.forbidden).length;
-      const skipped = Number(d.ocr_skipped ?? 0); // 시간이 없어 읽지 않은 이미지 버튼(선택지에서 뺌)
+      const skipped = num(d.ocr_skipped) || 0; // 시간이 없어 읽지 않은 이미지 버튼(선택지에서 뺌)
       lines.push({
         seq: e.seq, icon: "eye", tone: skipped ? "orange" : "",
-        text: <>관찰 · {String(d.title || d.url || "-")}{skipped ? <span className="warn"> · 시간 부족으로 이미지 버튼 {skipped}개 읽지 않음</span> : null}</>,
+        text: <>관찰 · {text(d.title) || text(d.url) || "-"}{skipped ? <span className="warn"> · 시간 부족으로 이미지 버튼 {skipped}개 읽지 않음</span> : null}</>,
         end: nf ? <span className="bad">금지 {nf} 제외</span> : `후보 ${list(d.candidates).length}`,
       });
     } else if (e.kind === "decision") {
-      const choice = String(d.choice);
+      const choice = text(d.choice);
       const eid = choice.startsWith("click_") ? choice.slice(6) : "";
       const what = eid ? `“${candidates.get(eid) ?? eid}” 클릭` : ACTION_LABEL[choice] ?? choice;
-      lines.push({ seq: e.seq, icon: "brain", tone: "", text: <>Jev 선택 · {what}</>, end: pct(Number(d.probability)), endTone: "var(--primary)" });
+      lines.push({ seq: e.seq, icon: "brain", tone: "", text: <>Jev 선택 · {what}</>, end: pct(num(d.probability)), endTone: "var(--primary)" });
     } else if (e.kind === "gate") {
-      if (!d.allowed) lines.push({ seq: e.seq, icon: "ban", tone: "red", text: <span className="bad">안전 게이트 차단 · {String(d.reason)}</span>, end: "차단", endTone: "var(--threat)" });
+      if (!d.allowed) lines.push({ seq: e.seq, icon: "ban", tone: "red", text: <span className="bad">안전 게이트 차단 · {text(d.reason)}</span>, end: "차단", endTone: "var(--threat)" });
     } else if (e.kind === "action") {
-      const out = String(d.outcome);
+      const out = text(d.outcome);
       const noEffect = out.includes("no_effect") || out.includes("failed");
-      lines.push({ seq: e.seq, icon: "cursor", tone: noEffect ? "orange" : "", text: <>실행 · {out} → <span className="mono faint">{String(d.result_url)}</span></>, end: noEffect ? "효과 없음" : "통과", endTone: noEffect ? "var(--review)" : "var(--safe)" });
+      lines.push({ seq: e.seq, icon: "cursor", tone: noEffect ? "orange" : "", text: <>실행 · {out} → <span className="mono faint">{text(d.result_url)}</span></>, end: noEffect ? "효과 없음" : "통과", endTone: noEffect ? "var(--review)" : "var(--safe)" });
     } else if (e.kind === "blocked_request") {
-      if (d.navigation) lines.push({ seq: e.seq, icon: "ban", tone: "red", text: <span className="bad">페이지 이동 차단 · {String(d.reason)} <span className="mono">{String(d.url)}</span></span>, end: "차단", endTone: "var(--threat)" });
+      if (d.navigation) lines.push({ seq: e.seq, icon: "ban", tone: "red", text: <span className="bad">페이지 이동 차단 · {text(d.reason)} <span className="mono">{text(d.url)}</span></span>, end: "차단", endTone: "var(--threat)" });
       else quiet.push(e);
     } else if (e.kind === "new_window") {
-      lines.push({ seq: e.seq, icon: "window", tone: "", text: <>새 창 채택 · <span className="mono">{String(d.url)}</span></> });
+      lines.push({ seq: e.seq, icon: "window", tone: "", text: <>새 창 채택 · <span className="mono">{text(d.url)}</span></> });
     } else if (e.kind === "navigation") {
       const redirects = strs(d.redirects);
-      lines.push({ seq: e.seq, icon: "globe", tone: redirects.length ? "orange" : "", text: <>최초 접속 {String(d.status)}{redirects.length ? ` · 리다이렉트 ${redirects.length}회` : ""}</> });
+      lines.push({ seq: e.seq, icon: "globe", tone: redirects.length ? "orange" : "", text: <>최초 접속 {text(d.status)}{redirects.length ? ` · 리다이렉트 ${redirects.length}회` : ""}</> });
     } else if (e.kind === "dialog") {
-      lines.push({ seq: e.seq, icon: "x", tone: "", text: <>대화상자 자동 닫기 · {String(d.message)}</> });
+      lines.push({ seq: e.seq, icon: "x", tone: "", text: <>대화상자 자동 닫기 · {text(d.message)}</> });
     } else if (e.kind === "unreachable") {
-      lines.push({ seq: e.seq, icon: "ban", tone: "red", text: <span className="bad">접속 불가 · {NET_CATEGORY_LABEL[String(d.category)] ?? String(d.error)}{d.net_error ? ` (${String(d.net_error)})` : ""}</span> });
+      lines.push({ seq: e.seq, icon: "ban", tone: "red", text: <span className="bad">접속 불가 · {NET_CATEGORY_LABEL[text(d.category)] ?? text(d.error)}{d.net_error ? ` (${text(d.net_error)})` : ""}</span> });
     } else if (e.kind === "escalation") {
       const why = d.reason === "unreachable_network_filtered"
         ? "회선의 도메인 차단 감지"
         : `Safe Browsing ${strs(d.threat_types).join(", ")}`;
       lines.push({ seq: e.seq, icon: "alert", tone: "orange", text: <span className="warn">담당자 검토로 전환 · {why}</span> });
     } else if (e.kind === "threat") {
-      lines.push({ seq: e.seq, icon: "flag", tone: d.threat === "benign" ? "teal" : "orange", text: <>위협 판단 · {THREAT_LABEL[String(d.threat)] ?? String(d.threat)}{d.override ? ` (${overrideLabel(d.override as Threat["override"])})` : ""}</>, end: pct(Number(d.probability)) });
+      lines.push({ seq: e.seq, icon: "flag", tone: d.threat === "benign" ? "teal" : "orange", text: <>위협 판단 · {THREAT_LABEL[text(d.threat)] ?? text(d.threat)}{d.override ? ` (${overrideLabel(d.override as Threat["override"])})` : ""}</>, end: pct(num(d.probability)) });
     } else if (e.kind === "safebrowsing") {
-      lines.push({ seq: e.seq, icon: "shieldCheck", tone: d.status === "match" ? "red" : "", text: <>Safe Browsing · {String(d.status)}</> });
+      lines.push({ seq: e.seq, icon: "shieldCheck", tone: d.status === "match" ? "red" : "", text: <>Safe Browsing · {text(d.status)}</> });
     } else if (e.kind === "finish") {
-      lines.push({ seq: e.seq, icon: "check", tone: "teal", text: <>탐색 종료 · {REASON_LABEL[String(d.reason)] ?? String(d.reason)}</> });
+      lines.push({ seq: e.seq, icon: "check", tone: "teal", text: <>탐색 종료 · {REASON_LABEL[text(d.reason)] ?? text(d.reason)}</> });
     } else if (e.kind === "action_error" || e.kind === "decision_error" || e.kind === "threat_error" || e.kind === "candidate_error") {
-      lines.push({ seq: e.seq, icon: "alert", tone: "orange", text: <span className="warn">{e.kind} · {String(d.error ?? "")}</span> });
+      lines.push({ seq: e.seq, icon: "alert", tone: "orange", text: <span className="warn">{e.kind} · {text(d.error)}</span> });
     }
     if (sub && lines.length > before) {
       const l = lines[lines.length - 1];
@@ -1137,7 +1157,7 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
           <div className="fold-body">
             {quiet.map((e) => (
               <span key={e.seq}>
-                EV-{e.seq} · {String(e.data.reason)} · {String(e.data.url)}
+                EV-{e.seq} · {text(e.data.reason)} · {text(e.data.url)}
               </span>
             ))}
           </div>
@@ -1158,7 +1178,7 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
     </>
   );
 }
-const ACTION_LABEL: Record<string, string> = { scroll: "스크롤", back: "뒤로 가기", close_popup: "팝업 닫기", finish: "조사 끝내기" };
+const ACTION_LABEL: Record<string, string> = dict({ scroll: "스크롤", back: "뒤로 가기", close_popup: "팝업 닫기", finish: "조사 끝내기" });
 
 const DECISION_LABEL: Record<Decision, string> = { threat: "위협 확정", benign: "정상", hold: "보류" };
 const THREAT_TYPES = ["phishing", "scam", "illegal_gambling", "malware"];
