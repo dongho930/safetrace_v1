@@ -35,7 +35,7 @@ from ..proxy.egress import EGRESS_HEADER
 from . import netfilter
 from .candidates import select as select_candidates
 from .gate import Budget, ElementInfo, SafetyGate, classify_forbidden
-from .observe import CLOSE_POPUP_JS, COLLECT_JS, READ_ONE_JS, RECTS_JS
+from .observe import BOXES_JS, CLOSE_POPUP_JS, COLLECT_JS, READ_ONE_JS, RECTS_JS
 from .recorder import ScreencastRecorder, find_ffmpeg
 from .ocr import get_ocr
 
@@ -70,6 +70,37 @@ _NAV_CHECK_TIMEOUT = 4.0
 
 def is_auto_redirect_page(text: str) -> bool:
     return bool(_AUTO_REDIRECT.search(text[:2000]))
+
+
+_MAX_WIDTH = 10000  # 상자 좌표의 가로 상한(창 폭은 이보다 훨씬 작다)
+
+
+def clean_boxes(raw: object, cand_ids: list[str], n_forbidden: int, max_h: int) -> dict | None:
+    """BOXES_JS 결과(페이지 안에서 계산, 믿지 않음)를 기록 모양으로. 모양이 틀리면 None, 상자 하나가 틀리면 그 상자만 None.
+    정수만 받고 캡처 크기 안에 있어야 한다(bool 은 int 의 하위형이라 따로 뺀다)."""
+    def is_int(v) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool)
+
+    if not isinstance(raw, dict):
+        return None
+    size, boxes = raw.get("size"), raw.get("boxes")
+    if not (isinstance(size, list) and len(size) == 2 and all(is_int(v) for v in size)):
+        return None
+    w, h = size
+    if not (0 < w <= _MAX_WIDTH and 0 < h <= max_h) or not isinstance(boxes, list) or len(boxes) != len(cand_ids) + n_forbidden:
+        return None
+
+    def ok(b) -> list[int] | None:
+        if not (isinstance(b, list) and len(b) == 4 and all(is_int(v) for v in b)):
+            return None
+        x, y, bw, bh = b
+        return b if x >= 0 and y >= 0 and bw > 0 and bh > 0 and x + bw <= w and y + bh <= h else None
+
+    cand = {i: b for i, b in zip(cand_ids, (ok(b) for b in boxes[: len(cand_ids)])) if b}
+    forbidden = [ok(b) for b in boxes[len(cand_ids):]]
+    if not cand and not any(forbidden):
+        return None
+    return {"size": [w, h], "cand": cand, "forbidden": forbidden}
 
 
 def classify_goto_error(e: Exception) -> dict:
@@ -311,6 +342,7 @@ class AgentRun:
         infos: dict[str, ElementInfo] = {}
         cands: list[tuple[int, Candidate]] = []
         forbidden: list[str] = []
+        forbidden_ids: list[str] = []  # forbidden 과 같은 순서의 요소 ID(화면 위 상자용)
         ocr = get_ocr() if self.s.ocr_enabled else None
         # OCR 은 조사 마감과 관찰당 상한 중 이른 시각까지만 한다. 화면 안·큰 요소부터 읽어 중요한 버튼을 먼저 처리한다
         ocr_until = time.monotonic() + min(self.budget.remaining(), self.s.ocr_observe_max_seconds)
@@ -328,6 +360,7 @@ class AgentRun:
             if reason:
                 label = (item.get("name") or info.text)[:30]
                 forbidden.append(f"{reason}:{info.type or info.tag}:{mask_pii(label)}")
+                forbidden_ids.append(eid)
                 continue
             if not info.text and item.get("imgOnly") and ocr and ocr.available:
                 need.append((len(entries), eid, info))
@@ -355,11 +388,13 @@ class AgentRun:
                     reason = classify_forbidden(ElementInfo(**{**info.__dict__, "text": text}))
                     if reason:
                         forbidden.append(f"{reason}:ocr:{mask_pii(text[:30])}")
+                        forbidden_ids.append(eid)
                         continue
             if not text and item.get("imgOnly"):
                 # 글자를 읽을 수 없는 이미지 버튼(OCR 없음·인식 실패)은 무엇인지 모르므로 누르지 않는다.
                 # 이미지로 된 '결제' 버튼이 빈 이름으로 선택지에 오르는 것을 막는다.
                 forbidden.append(f"unreadable_image:{info.tag}")
+                forbidden_ids.append(eid)
                 continue
             host = urlsplit(info.href).hostname if info.href.startswith("http") else None
             if (page.url, mask_pii(text)[:40]) in self._dead_links or host in dead_hosts:
@@ -374,6 +409,7 @@ class AgentRun:
         text = mask_pii(raw.get("text", ""))[:4000]
         state = PageState(step=step, url=page.url[:2048], title=mask_pii(raw.get("title", ""))[:200], text=text,
                           candidates=chosen, has_popup=bool(raw.get("popup")), history=self.history[-30:])
+        boxes = await self._boxes(page, [c.id for c in chosen], forbidden_ids[:50])
         shot = await self._screenshot(page, "observe", full=True)
         text_hash = hashlib.sha256(raw.get("text", "").encode()).hexdigest()
         seq = self._record("observe", {
@@ -381,12 +417,23 @@ class AgentRun:
             "candidates": [c.model_dump() for c in chosen],
             "forbidden": forbidden[:50], "has_popup": state.has_popup,
             "text_excerpt": text[:1500], "text_sha256": text_hash, "ocr_skipped": ocr_skipped,
+            **({"boxes": boxes} if shot and boxes else {}),
         }, [shot] if shot else [])
         # 같은 화면 판정: URL·버튼 글자에 '남은 선택지'까지 넣는다. 효과 없던 행동이 빠져 선택지가 줄면 다른 상태로 보고
         # (줄어들기만 하므로 끝이 있다), 페이지를 오가는 진짜 반복은 그대로 잡는다.
         opts = "|".join(sorted(action_options(state)))
         key = hashlib.sha256((page.url + "|" + "|".join(c.text for c in chosen) + "#" + opts).encode()).hexdigest()
         return _Observation(state, infos, forbidden, seq, key)
+
+    async def _boxes(self, page: Page, cand_ids: list[str], forbidden_ids: list[str]) -> dict | None:
+        """관찰 화면 위에 그릴 상자(선택지·금지 요소). 페이지 JS 결과라 믿지 않고 모양·범위를 검사한다.
+        결과: {"size": [폭, 높이], "cand": {요소 ID: [x, y, w, h]}, "forbidden": [[x, y, w, h] | None, ...]}"""
+        ids = cand_ids + forbidden_ids
+        try:
+            raw = await page.evaluate(BOXES_JS, [self.attr, ids, self.s.screenshot_max_height])
+        except (PWError, PWTimeout):
+            return None
+        return clean_boxes(raw, cand_ids, len(forbidden_ids), self.s.screenshot_max_height)
 
     async def _capture_many(self, page: Page, need: list[tuple[int, str, ElementInfo]], until: float) -> list:
         """이미지 버튼들을 캡처한다. 결과: PNG | None(보이지 않음) | "skip"(시간이 없어 찍지 않음).

@@ -359,3 +359,16 @@ button.reason:hover { border-color: var(--line-strong); }
 .monitor-jev { color: var(--primary); font-weight: 700; flex: none; }
 .monitor-act { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .monitor-prob { font-weight: 600; }
+
+/* 화면 위 표시(근거 화면): 금지 요소 빨간 점선, 고른 버튼 파랑, 게이트가 막은 클릭 빨간 실선. 흰 테두리로 어떤 바탕에서도 보이게 */
+.frame .marks { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; pointer-events: none; }
+.mark-halo { fill: none; stroke: #fff; stroke-width: 5px; stroke-opacity: .85; }
+.mark { fill: none; stroke-width: 2.5px; }
+.mark-forbidden { stroke: var(--threat); stroke-dasharray: 6 4; fill: rgba(198, 40, 40, .07); }
+.mark-picked { stroke: var(--primary); stroke-width: 3px; }
+.mark-blocked { stroke: var(--threat); stroke-width: 3px; fill: rgba(198, 40, 40, .07); }
+.mark-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; width: 100%; font-size: 12px; color: var(--ink-2); }
+.lg::before { content: ""; display: inline-block; width: 14px; height: 9px; margin-right: 5px; vertical-align: -1px; border: 2px solid var(--primary); border-radius: 2px; }
+.lg-forbidden::before { border: 2px dashed var(--threat); }
+.lg-blocked::before { border-color: var(--threat); }
+.mark-legend .btn { margin-left: auto; }

@@ -548,3 +548,17 @@ def test_meaningless_dead_destination_kept():
                         blocked_destinations=[BlockedDestination(host="ven.nibyol.fun", reason="ssrf:dns_failure")])
     d = Engine([p], 0.45, 0.6).decide_threat(req)
     assert d.threat == "unknown" and d.override is None
+
+
+def test_clean_boxes_rejects_bad_shapes():
+    """관찰 화면 상자는 페이지 JS 가 계산한 값(믿지 않음): 정수·캡처 범위 안만 남긴다."""
+    from safetrace.agent.loop import clean_boxes
+
+    ok = {"size": [1280, 900], "boxes": [[10, 20, 30, 40], None, [0, 0, 5, 5]]}
+    assert clean_boxes(ok, ["e1", "e2"], 1, 6000) == {"size": [1280, 900], "cand": {"e1": [10, 20, 30, 40]}, "forbidden": [[0, 0, 5, 5]]}
+    bad_box = [[1, 2, 3], [True, 0, 5, 5], [1.5, 0, 5, 5], [1270, 0, 20, 5], [-1, 0, 5, 5], [0, 0, 0, 5], "x", {"0": 1}]
+    assert clean_boxes({"size": [1280, 900], "boxes": [*bad_box, [1, 1, 1, 1]]}, [f"e{i}" for i in range(8)], 1, 6000)["cand"] == {}
+    for raw in (None, [], {"size": [1280], "boxes": []}, {"size": [0, 10], "boxes": [[1, 1, 1, 1]]},
+                {"size": [1280, 7000], "boxes": [[1, 1, 1, 1]]}, {"size": [1280, 900], "boxes": [[1, 1, 1, 1]] * 3},
+                {"size": [1280, 900], "boxes": [None, None]}, {"size": ["1280", 900], "boxes": [[1, 1, 1, 1], None]}):
+        assert clean_boxes(raw, ["e1"], 1, 6000) is None, raw

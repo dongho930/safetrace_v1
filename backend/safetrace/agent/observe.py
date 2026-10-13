@@ -118,3 +118,28 @@ RECTS_JS = r"""
   return { vw: window.innerWidth, vh: window.innerHeight, sy: window.scrollY, rects };
 }
 """
+
+# 관찰 화면(페이지 전체 캡처) 위에 그릴 요소 상자. 캡처 바로 전에 잰다(OCR 캡처가 스크롤을 움직였다 되돌린 뒤).
+# 좌표는 캡처 이미지 기준 [x, y, w, h] 정수: 창 좌표 + 스크롤. Chromium 전체 캡처는 position: fixed 요소도
+# 캡처 순간 보이던 자리(창 좌표 + 스크롤)에 찍으므로 같은 식으로 맞는다(시험: test_boxes_match_full_page_capture).
+# 캡처 범위(폭 = 창 폭, 높이 = 문서 높이와 maxH 중 작은 값)로 자르고, 범위 밖이거나 보이지 않으면 null.
+BOXES_JS = r"""
+([attr, ids, maxH]) => {
+  const W = window.innerWidth;
+  const H = Math.max(1, Math.min(Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0), maxH));
+  const sx = window.scrollX, sy = window.scrollY;
+  const box = (id) => {
+    if (typeof id !== 'string' || !/^e\d{1,6}$/.test(id)) return null;
+    const el = document.querySelector('[' + attr + '="' + id + '"]');
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 2 || r.height <= 2) return null;
+    const x0 = r.left + sx, y0 = r.top + sy;
+    const x1 = Math.min(x0 + r.width, W), y1 = Math.min(y0 + r.height, H);
+    const x = Math.max(0, x0), y = Math.max(0, y0);
+    if (x1 - x < 2 || y1 - y < 2) return null;
+    return [Math.round(x), Math.round(y), Math.round(x1 - x), Math.round(y1 - y)];
+  };
+  return { size: [W, H], boxes: ids.map(box) };
+}
+"""

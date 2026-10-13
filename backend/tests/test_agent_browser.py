@@ -57,6 +57,13 @@ def test_gamble_reaches_hidden_deposit_screen(settings, testpages):
     texts = [c["text"] for c in deposit_obs["data"]["candidates"]]
     assert not any("결제" in t or "충전 신청" in t for t in texts)
     assert any(f.startswith("input") for f in deposit_obs["data"]["forbidden"])
+    # 화면 위 상자: 금지 요소와 같은 순서·개수, 입력 칸 상자가 있다. 고른 버튼은 선택지 상자에 있다
+    boxes = deposit_obs["data"]["boxes"]
+    assert len(boxes["forbidden"]) == len(deposit_obs["data"]["forbidden"])
+    assert any(b for f, b in zip(deposit_obs["data"]["forbidden"], boxes["forbidden"]) if f.startswith("input"))
+    for d in (r["data"] for r in chain if r["kind"] == "decision" and r["data"]["choice"].startswith("click_")):
+        obs = next(r for r in chain if r["seq"] == d["observe_seq"])
+        assert d["choice"].removeprefix("click_") in obs["data"]["boxes"]["cand"]
     assert_no_forbidden(chain, testpages)
     # 계좌번호 원문은 증거의 텍스트 발췌에도 마스킹
     assert "123-456-789012" not in json.dumps([r["data"] for r in chain], ensure_ascii=False)
@@ -762,3 +769,48 @@ def test_reputation_match_holds_benign(settings, testpages, monkeypatch):
     esc = next(r["data"] for r in chain if r["kind"] == "escalation")
     assert esc["threat_types"] == ["SOCIAL_ENGINEERING"]
     assert next(r["data"] for r in chain if r["kind"] == "candidates")["followup"] is True
+
+
+# ── 관찰 화면 위 상자 ─────────────────────────────────────
+_BOX_PAGE = """<!doctype html><html><body style="margin:0;height:2600px;background:#fff">
+<div style="position:fixed;top:0;left:0;right:0;height:60px;background:#fff">
+  <button id="fx" style="position:absolute;left:20px;top:10px;width:120px;height:40px;border:0;background:#00ff00">고정</button></div>
+<button id="b1" style="position:absolute;left:300px;top:400px;width:160px;height:50px;border:0;background:#ff0000">일반</button>
+<input id="pw" type="password" style="position:absolute;left:100px;top:1500px;width:200px;height:40px;border:0;background:#0000ff">
+<div style="position:fixed;bottom:0;left:0;width:100%;height:50px;background:#fff">
+  <button id="fb" style="position:absolute;left:400px;top:5px;width:100px;height:40px;border:0;background:#ff00ff">아래</button></div>
+</body></html>"""
+
+
+@pytest.mark.parametrize("scroll", [0, 900, 1800])
+def test_boxes_match_full_page_capture(scroll):
+    """BOXES_JS 좌표가 관찰 화면(페이지 전체 캡처) 위 실제 위치와 맞는지: 상자 중심 픽셀이 그 요소의 색이어야 한다.
+    스크롤한 상태, 위·아래에 붙은 fixed 요소(fx·fb)도 맞아야 한다."""
+    import io
+
+    from PIL import Image
+    from playwright.sync_api import sync_playwright
+
+    from safetrace.agent.loop import clean_boxes
+    from safetrace.agent.observe import BOXES_JS
+
+    colors = {"fx": (0, 255, 0), "b1": (255, 0, 0), "pw": (0, 0, 255), "fb": (255, 0, 255)}
+    with sync_playwright() as p:
+        b = p.chromium.launch()
+        page = b.new_page(viewport={"width": 1280, "height": 800})
+        page.set_content(_BOX_PAGE)
+        for i, k in enumerate(colors):
+            page.eval_on_selector(f"#{k}", "(el, v) => el.setAttribute('data-t', v)", f"e{i}")
+        page.evaluate(f"window.scrollTo(0, {scroll})")
+        raw = page.evaluate(BOXES_JS, ["data-t", ["e0", "e1", "e2", "e3"], 6000])
+        boxes = clean_boxes(raw, ["e0", "e1", "e2"], 1, 6000)
+        vw, h = page.evaluate("() => [innerWidth, document.documentElement.scrollHeight]")
+        png = page.screenshot(full_page=True, animations="disabled", clip={"x": 0, "y": 0, "width": vw, "height": min(h, 6000)})
+        b.close()
+    img = Image.open(io.BytesIO(png)).convert("RGB")
+    assert boxes is not None and boxes["size"] == list(img.size)
+    found = {**{k: boxes["cand"].get(f"e{i}") for i, k in enumerate(["fx", "b1", "pw"])}, "fb": boxes["forbidden"][0]}
+    for k, bx in found.items():
+        assert bx is not None, k
+        x, y, w, hh = bx
+        assert img.getpixel((x + w // 2, y + hh // 2)) == colors[k], (k, bx, scroll)
