@@ -84,18 +84,29 @@ export function buildReasons(events: EvidenceEvent[], c: CaseOut): Reason[] {
     const why = esc.data.reason === "unreachable_network_filtered" ? "회선의 도메인 차단 감지" : `Safe Browsing ${strs(esc.data.threat_types).join(", ")}`;
     push({ key: "escalation", title: "담당자 검토 전환", text: why, ev: `EV-${esc.seq}`, tone: "review", shot: null, shotSeq: null });
   }
-  // ⑤ 연관 사이트도 의심(하위 조사 결과)
+  // ⑤ 연관 사이트도 의심: Safe Browsing 위험 일치(AI 유형과 무관하게 먼저), 없으면 하위 조사에서 AI 가 위협으로 본 후보
   const cands = (c.candidates ?? []).filter((x): x is Candidate => typeof x !== "string");
-  const sus = [...cands].reverse().find((x) => x.sub && x.threat && x.threat !== "benign");
-  if (sus?.sub) {
-    const first = events.find((e) => e.kind === "observe" && e.data.sub === sus.sub && png(e)?.startsWith(`c${sus.sub}_`));
+  const rep = [...cands].reverse().find((x) => x.reputation_match);
+  const sus = rep ?? [...cands].reverse().find((x) => x.sub && x.threat && x.threat !== "benign");
+  if (sus) {
+    const first = sus.sub ? events.find((e) => e.kind === "observe" && e.data.sub === sus.sub && png(e)?.startsWith(`c${sus.sub}_`)) : undefined;
     const where = sus.source === "via" ? "경유" : "링크";
-    const prob = sus.probability != null ? ` ${pct(sus.probability)}` : "";
-    push({
-      key: "candidate", title: "연관 사이트도 의심",
-      text: `${where} ${clip(str(sus.host ?? sus.url), 40)}도 ${THREAT_LABEL[sus.threat ?? ""] ?? sus.threat}${prob}${sus.hold ? "(보류)" : ""}`,
-      ev: `하위 조사 ${sus.sub}`, tone: sus.hold ? "review" : "threat", shot: png(first), shotSeq: first?.seq ?? null,
-    });
+    const host = clip(sus.host ?? sus.url, 40);
+    const ai = sus.threat ? `${THREAT_LABEL[sus.threat] ?? sus.threat}${sus.probability != null ? ` ${pct(sus.probability)}` : ""}` : "";
+    if (rep) {
+      const sb = last((e) => e.kind === "candidate_safebrowsing");
+      push({
+        key: "candidate", title: "연관 사이트 평판 위험",
+        text: `${where} ${host}(또는 그 이동 주소)이 Safe Browsing 위험 일치${ai ? ` · AI 판단 ${ai}` : ""}`,
+        ev: sb ? `EV-${sb.seq}` : sus.sub ? `하위 조사 ${sus.sub}` : "평판", tone: "threat", shot: png(first), shotSeq: first?.seq ?? null,
+      });
+    } else {
+      push({
+        key: "candidate", title: "연관 사이트도 의심",
+        text: `${where} ${host}도 ${ai}${sus.hold ? "(보류)" : ""}`,
+        ev: `하위 조사 ${sus.sub}`, tone: sus.hold ? "review" : "threat", shot: png(first), shotSeq: first?.seq ?? null,
+      });
+    }
   }
   // ⑥ Safe Browsing 일치
   if (c.safebrowsing?.status === "match") {
@@ -175,15 +186,19 @@ export function buildPath(c: CaseOut, events: EvidenceEvent[]): PathMap {
   // 연관 후보는 마지막 주소에 붙인다(후보는 조사가 끝난 뒤 고른다). 3개만 그리고 나머지는 +n개
   const cands = (c.candidates ?? []).map((x) => (typeof x === "string" ? ({ url: x, host: x } as Candidate) : x));
   const lastIdx = nodes.length - 1;
-  for (const x of cands.slice(0, 3)) {
+  // 평판 위험 후보를 앞에 둔다(3개만 그릴 때 빠지지 않게)
+  const ordered = [...cands.filter((x) => x.reputation_match), ...cands.filter((x) => !x.reputation_match)];
+  for (const x of ordered.slice(0, 3)) {
     const where = x.source === "via" ? "경유" : "링크";
+    // 평판은 AI 유형과 따로 표시한다: 위험 일치는 AI 가 정상으로 봐도 빨강, 조회 못 한 주소가 있으면 '평판 미확인'
+    const repNote = x.reputation_match ? " · 평판 위험" : x.reputation_unchecked ? " · 평판 미확인" : "";
     if (x.sub) {
       const th = x.threat ?? "";
-      const tone: Tone = !th || th === "benign" ? "idle" : x.hold ? "review" : "threat";
+      const tone: Tone = x.reputation_match ? "threat" : !th || th === "benign" ? (x.hold ? "review" : "idle") : x.hold ? "review" : "threat";
       const verdict = th ? `${THREAT_LABEL[th] ?? th}${x.hold ? "(보류)" : ""}` : "판단 없음";
-      branches[lastIdx].push({ kind: "cand", title: `${where} 후보 · ${verdict}`, sub: clip(str(x.host ?? x.url), 24), tone, dashed: false });
+      branches[lastIdx].push({ kind: "cand", title: `${where} 후보 · ${verdict}${repNote}`, sub: clip(str(x.host ?? x.url), 24), tone, dashed: false });
     } else {
-      branches[lastIdx].push({ kind: "cand-record", title: `${where} 후보 · 기록만`, sub: clip(str(x.host ?? x.url), 24), tone: "idle", dashed: true });
+      branches[lastIdx].push({ kind: "cand-record", title: `${where} 후보 · 기록만${repNote}`, sub: clip(str(x.host ?? x.url), 24), tone: x.reputation_match ? "threat" : "idle", dashed: true });
     }
   }
   return fold({ nodes, branches, more: Math.max(0, cands.length - 3) });
