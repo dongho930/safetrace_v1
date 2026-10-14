@@ -481,11 +481,21 @@ _IIIM_EN = ("[0] iii.im URL Shortener | https://iii.im/ZujV | Warning The link y
             "we cannot automatically redirect you as the full URL may be unsafe.")
 
 
+def _url_of(page: str) -> str:
+    """시험용 요약 '[단계] 제목 | 주소 | 글' 에서 주소(실제로는 에이전트가 page_urls 로 따로 보낸다)."""
+    return page.split(" | ")[1]
+
+
 @pytest.mark.parametrize("page, expected", [
     (_IIIM_KO, True),
     (_IIIM_EN, True),
     ("[0] Warning! | https://bit.ly/3GWIQhx | Warning: This URL has been blocked by Bitly's systems as potentially "
      "harmful. We recommend you close your browser window and notify the person who sent you the link.", True),
+    # Bitly 의 다른 문구(KISA 2024 bit.ly/4bXhEwR 에서 관찰)
+    ("[0] Warning! | https://bit.ly/4bXhEwR | Warning: This URL has been flagged by Bitly's systems as potentially "
+     "harmful. We recommend you close your browser window and notify the person who sent you the link.", True),
+    # 같은 경고 글을 다른 사이트가 흉내 내면 아니다(경고는 그 단축 서비스의 화면에 있어야 한다)
+    (_IIIM_KO.replace("https://iii.im/ZujV", "https://attacker.example/"), False),
     ("[0] 로그인 | https://bank.example/ | 비밀번호 5회 오류로 로그인이 차단되었습니다. 피싱에 주의하세요", False),
     ("[0] Bitly | https://bit.ly/1TV4K | 다음은 귀하의 목적지에 대한 미리보기입니다. 현재 위협이 감지되지 않았습니다", False),
     ("[0] 링크 이동 | https://me2.kr/a | 외부 사이트로 이동합니다. 계속하려면 이동하기를 누르세요", False),
@@ -495,13 +505,14 @@ _IIIM_EN = ("[0] iii.im URL Shortener | https://iii.im/ZujV | Warning The link y
 def test_shortener_warning_detected(page, expected):
     from safetrace.decision.engine import shortener_warning
 
-    assert shortener_warning([page]) is expected
+    assert shortener_warning([page], [_url_of(page)]) is expected
+    assert not shortener_warning([page], [])  # 화면 주소가 없으면(예전 에이전트) 적용하지 않는다
 
 
 def test_shortener_warning_threat_goes_to_review():
     # 판단 모델이 판단 불가·정상으로 봐도 단축 서비스의 위험 경고가 있으면 피싱(담당자 검토)으로, 원래 판단은 남긴다
     req = ThreatRequest(url="https://iii.im/ZujV", final_url="https://iii.im/ZujV", redirect_count=0,
-                        domains=["iii.im"], pages=[_IIIM_KO])
+                        domains=["iii.im"], pages=[_IIIM_KO], page_urls=["https://iii.im/ZujV"])
     for choice in ("unknown", "benign"):
         p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
                         transport=_jev_transport({"type": "choice", "choice": choice,
@@ -519,7 +530,8 @@ def test_shortener_warning_keeps_other_threats():
                     transport=_jev_transport({"type": "choice", "choice": "illegal_gambling",
                                               "probabilities": {"illegal_gambling": 0.9, "benign": 0.1}}))
     d = Engine([p], 0.45, 0.6).decide_threat(ThreatRequest(
-        url="https://iii.im/x", final_url="https://iii.im/x", redirect_count=0, domains=["iii.im"], pages=[_IIIM_KO]))
+        url="https://iii.im/x", final_url="https://iii.im/x", redirect_count=0, domains=["iii.im"], pages=[_IIIM_KO],
+        page_urls=["https://iii.im/x"]))
     assert d.threat == "illegal_gambling" and d.override is None
 
 
@@ -620,6 +632,60 @@ def test_link_takedown_keeps_other_threats():
         url="https://tny.kr/x", final_url="https://tny.kr/x", redirect_count=0, domains=["tny.kr"], pages=[_TINY_KR],
         page_urls=["https://tny.kr/x"]))
     assert d.threat == "illegal_gambling" and d.override is None
+
+
+# ── 신고 주소가 조사 전에 브랜드 공식 사이트로 넘김(피싱 키트의 봇 회피) ─────
+# 관찰(OpenPhish 2026-10-14): iCloud 사칭 → 서버가 www.apple.com 으로, Meta 비즈니스 사칭 pages.dev → JS 로
+# www.facebook.com 으로. 살아 있는 피싱 주소는 저장소에 두지 않으므로 시작 주소는 example 로 바꿔 쓴다
+@pytest.mark.parametrize("url, page_urls, expected", [
+    ("https://phish.example/theme/cmd", ["https://www.apple.com/"], ("apple", "www.apple.com")),
+    ("https://x-y-z.pages.dev/", ["https://www.facebook.com/", "https://www.facebook.com/reg/"],
+     ("facebook", "www.facebook.com")),
+    # 첫 화면은 신고 사이트였고 에이전트가 링크를 눌러 공식 사이트로 간 경우: 정상 사이트도 공식 SNS 를 링크한다
+    ("https://phish.example/", ["https://phish.example/", "https://www.facebook.com/"], None),
+    ("https://bit.ly/abc", ["https://www.apple.com/"], None),  # 단축 서비스는 남의 주소로 넘기는 것이 본업
+    ("http://gourl.kr/abc", ["https://www.naver.com/"], None),  # 사라진 링크를 naver.com 으로(KISA 자료에서 관찰)
+    ("https://naver.me/abc", ["https://www.naver.com/"], None),  # 공식 도메인끼리의 이동
+    ("https://www.apple.com/", ["https://www.apple.com/kr/"], None),
+    ("https://phish.example/", [], None),
+])
+def test_official_redirect(url, page_urls, expected):
+    from safetrace.decision.brands import official_redirect
+
+    assert official_redirect(url, page_urls) == expected
+
+
+def test_official_redirect_not_on_normal_eval_set():
+    # 평가 세트 정상 사이트는 자기 도메인에서 시작해 자기 화면을 보여 준다
+    import csv
+    from pathlib import Path
+
+    from safetrace.decision.brands import official_redirect
+
+    rows = csv.DictReader((Path(__file__).resolve().parents[2] / "data" / "eval_set.csv").open(encoding="utf-8"))
+    for r in rows:
+        if r["group"] == "normal":
+            assert official_redirect(r["url"], [r["url"]]) is None, r["url"]
+
+
+def test_official_redirect_threat_goes_to_review():
+    sent = []
+    p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
+                    transport=_jev_transport({"type": "choice", "choice": "benign",
+                                              "probabilities": {"benign": 0.55, "phishing": 0.45}}, capture=sent))
+    req = ThreatRequest(url="https://x-y-z.pages.dev/", final_url="https://www.facebook.com/reg/", redirect_count=2,
+                        domains=["x-y-z.pages.dev", "www.facebook.com"],
+                        pages=["[0] Facebook | https://www.facebook.com/ | Facebook에 로그인"],
+                        page_urls=["https://www.facebook.com/"])
+    d = Engine([p], 0.45, 0.6).decide_threat(req)
+    assert d.threat == "phishing" and d.hold and d.provider == "official_redirect"
+    assert d.override == {"reason": "official_redirect", "brand": "facebook", "destination": "www.facebook.com",
+                          "original": {"threat": "benign", "probability": 0.55, "provider": "jev_typesafe"}}
+    # 모델이 위협 유형을 골랐으면 그대로 둔다
+    p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
+                    transport=_jev_transport({"type": "choice", "choice": "phishing",
+                                              "probabilities": {"phishing": 0.9, "benign": 0.1}}))
+    assert Engine([p], 0.45, 0.6).decide_threat(req).override is None
 
 
 # ── 브랜드 사칭 도메인 ───────────────────────────────────

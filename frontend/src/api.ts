@@ -10,6 +10,7 @@ export type Threat = {
   // 코드 규칙이 모델 판단을 바꾼 경우: 공식 사행사업자 도메인(official_betting_domain → 정상),
   // 단축 URL 서비스의 위험 경고(shortener_warning → 피싱, 담당자 검토),
   // 단축·호스팅 서비스가 링크를 정지한 안내 화면(link_takedown → 피싱, 담당자 검토),
+  // 신고 주소가 조사 전에 브랜드 공식 사이트로 넘김(official_redirect → 피싱, 담당자 검토),
   // 화면 내용이 없는 브랜드 사칭 도메인(brand_lookalike → 피싱, 담당자 검토)
   override?: { reason: string; operators?: string[]; brand?: string; destination?: string; original: { threat: string; probability: number; provider: string } };
 };
