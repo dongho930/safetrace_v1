@@ -372,11 +372,17 @@ def test_no_wait_on_ordinary_page(settings, testpages):
     assert not any(r["kind"] == "wait_redirect" for r in chain)
 
 
-def test_shortener_warning_judged_threat_with_review(settings, testpages):
-    """단축 URL 서비스가 위험 링크라며 자동 이동을 막은 화면: 목적지를 못 봐도 위협(담당자 검토)으로 본다."""
+def test_shortener_warning_judged_threat_with_review(settings, testpages, monkeypatch):
+    """단축 URL 서비스가 위험 링크라며 자동 이동을 막은 화면: 목적지를 못 봐도 위협(담당자 검토)으로 본다.
+    경고는 단축 서비스 도메인의 화면에서만 인정하므로, 시험 페이지 주소를 그 목록에 잠시 넣는다(화면 주소가
+    에이전트 → 판단 요청 page_urls 로 이어지는지 함께 확인)."""
+    from safetrace.decision import engine
+
+    monkeypatch.setattr(engine, "_SHORTENER_WARNING_HOSTS", (*engine._SHORTENER_WARNING_HOSTS, "127.0.0.1"))
     settings.max_steps = 3
     _, final, chain, _ = run(f"{BASE}/phish/short-warn.html", settings, testpages)
     assert final["threat"]["threat"] == "phishing" and final["threat"]["hold"], final["threat"]
+    assert next(r["data"] for r in chain if r["kind"] == "threat")["provider"] == "shortener_warning"
     assert final["status"] == "REVIEW_REQUIRED"
     assert_no_forbidden(chain, testpages)
 

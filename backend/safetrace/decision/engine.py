@@ -7,7 +7,7 @@ import re
 from urllib.parse import urlsplit
 
 from ..config import Settings
-from .brands import lookalike_destination, lookalike_in, thin_content
+from .brands import lookalike_destination, lookalike_in, official_redirect, on_domain, thin_content
 from .official import all_official
 from .providers import JevProvider, Provider, ProviderError, RuleProvider, state_for_jev, timed
 from .schema import (
@@ -40,16 +40,23 @@ THREAT_QUESTION = (
 )
 
 
-# 단축 URL 서비스의 위험 경고 화면: 위험 문구와 '자동 이동·링크를 막음' 문구가 한 화면에 함께 있다(iii.im, Bitly)
+# 단축 URL 서비스의 위험 경고 화면: 위험 문구와 '자동 이동·링크를 막음' 문구가 한 화면에 함께 있다.
+# 실제로 관찰한 서비스의 화면에서만 인정한다(페이지 글자는 누구나 흉내 낼 수 있다)
+_SHORTENER_WARNING_HOSTS: tuple[str, ...] = ("iii.im", "bit.ly")
 _DANGER = re.compile(r"위험|악성|피싱|유해|unsafe|dangerous|malicious|phishing|harmful", re.I)
 _NO_REDIRECT = re.compile(r"자동\s?(?:으로\s?)?이동\S{0,2}\s?(?:막|차단|중단)"
                           r"|cannot\s+(?:automatically\s+)?redirect|redirect(?:ion)?\s+(?:is\s+|has\s+been\s+)?blocked"
-                          r"|(?:url|link)\s+(?:is\s+|was\s+|has\s+been\s+)blocked", re.I)
+                          r"|(?:url|link)\s+(?:is\s+|was\s+|has\s+been\s+)blocked"
+                          r"|(?:url|link)\s+has\s+been\s+flagged\s+by\s+bitly", re.I)  # Bitly 의 다른 문구(KISA 2024)
 
 
-def shortener_warning(pages: list[str]) -> bool:
-    """단축 URL 서비스가 위험 링크라며 자동 이동을 막은 경고 화면을 거쳤는지."""
-    return any(_DANGER.search(p) and _NO_REDIRECT.search(p) for p in pages)
+def shortener_warning(pages: list[str], page_urls: list[str]) -> bool:
+    """단축 URL 서비스가 위험 링크라며 자동 이동을 막은 경고 화면을 거쳤는지. 경고는 그 서비스 도메인의 화면에
+    있어야 한다(page_urls 는 pages 와 같은 순서의 브라우저 주소). 짝이 맞지 않으면 적용하지 않는다."""
+    if len(page_urls) != len(pages):
+        return False
+    return any(on_domain(urlsplit(u).hostname or "", _SHORTENER_WARNING_HOSTS)
+               and _DANGER.search(p) and _NO_REDIRECT.search(p) for p, u in zip(pages, page_urls))
 
 
 # 단축·호스팅 서비스가 링크를 정지·차단한 안내 화면: 차단 안내 문구와 그 이유(불법·유해·약관 위반·영구 정지)가
@@ -76,10 +83,9 @@ def link_takedown(pages: list[str], page_urls: list[str]) -> bool:
     if len(page_urls) != len(pages):
         return False
     for page, url in zip(pages, page_urls):
-        host = (urlsplit(url).hostname or "").rstrip(".")
+        host = urlsplit(url).hostname or ""
         for hosts, notice in _TAKEDOWN_NOTICES:
-            if (any(host == s or host.endswith("." + s) for s in hosts)
-                    and notice.search(page) and _VIOLATION.search(page)):
+            if on_domain(host, hosts) and notice.search(page) and _VIOLATION.search(page):
                 return True
     return False
 
@@ -157,7 +163,7 @@ class Engine:
                     override={"reason": "official_betting_domain", "operators": operators,
                               "original": {"threat": res.choice, "probability": prob, "provider": provider}},
                 )
-        if res.choice in (Threat.UNKNOWN, Threat.BENIGN) and shortener_warning(req.pages):
+        if res.choice in (Threat.UNKNOWN, Threat.BENIGN) and shortener_warning(req.pages, req.page_urls):
             # 단축 URL 서비스가 위험 링크로 판정해 자동 이동을 막았다: 목적지는 못 봤지만 그 판정을 근거로 피싱(신고 문자에
             # 가장 흔한 유형)으로 보고 담당자 검토로 보낸다. 판단 문구를 바꾸면 다른 사이트 판단이 흔들려 여기서 따로 정한다
             return ThreatDecision(
@@ -173,6 +179,16 @@ class Engine:
                 choice=Threat.PHISHING.value, probabilities={Threat.PHISHING.value: 1.0}, confidence=None,
                 model=res.model, provider="link_takedown", latency_ms=ms, threat=Threat.PHISHING, hold=True,
                 override={"reason": "link_takedown",
+                          "original": {"threat": res.choice, "probability": prob, "provider": provider}},
+            )
+        moved = official_redirect(req.url, req.page_urls)
+        if moved and res.choice in (Threat.UNKNOWN, Threat.BENIGN):
+            # 신고 주소가 조사 전에(첫 화면) 스스로 브랜드 공식 사이트로 넘겼다: 피싱 키트가 봇을 진짜 사이트로 돌려보내
+            # 화면을 숨기는 흔적이다. 모델은 진짜 사이트만 보고 정상으로 보기 쉬워 담당자 검토로 보낸다
+            return ThreatDecision(
+                choice=Threat.PHISHING.value, probabilities={Threat.PHISHING.value: 1.0}, confidence=None,
+                model=res.model, provider="official_redirect", latency_ms=ms, threat=Threat.PHISHING, hold=True,
+                override={"reason": "official_redirect", "brand": moved[0], "destination": moved[1],
                           "original": {"threat": res.choice, "probability": prob, "provider": provider}},
             )
         dest = lookalike_destination([b.host for b in req.blocked_destinations])

@@ -26,9 +26,44 @@ OFFICIAL_BRAND_DOMAINS: dict[str, tuple[str, ...]] = {
     "kbank": ("kbanknow.com",),                 # 케이뱅크
     "ilogen": ("ilogen.com",),                  # 로젠택배
     "lotteglo": ("lotteglogis.com",),           # 롯데글로벌로지스
+    # 해외 피싱이 봇을 진짜 사이트로 돌려보낸 곳(OpenPhish 2026-10-14: iCloud 사칭 → www.apple.com,
+    # Meta 비즈니스 사칭 → www.facebook.com)
+    "apple": ("apple.com",),
+    "facebook": ("facebook.com",),
 }
+# 단축 URL 서비스: 평가 세트·KISA 신고 자료(var/probe)에서 실제로 본 것만. 남의 주소로 넘기는 것이 본업이라 넘긴 곳을
+# 근거로 삼지 않는다(gourl.kr·vo.la 는 사라진 링크를 naver.com·쿠팡 검색으로 넘긴다)
+SHORTENER_HOSTS: tuple[str, ...] = ("bit.ly", "tinyurl.com", "t.ly", "han.gl", "lrl.kr", "goo.su", "c11.kr", "go9.co",
+                                    "iii.im", "xzx.kr", "muz.so", "tny.kr", "5du.pl", "gourl.kr", "vo.la")
 THIN_TEXT_CHARS = 200  # 조사한 화면 글자를 다 합쳐 이보다 적으면 '내용이 거의 없음'
 _TOKEN = re.compile(r"[.\-_]")
+
+
+def on_domain(host: str, domains: tuple[str, ...]) -> bool:
+    """host 가 domains 중 하나이거나 그 하위 도메인인지."""
+    h = host.lower().rstrip(".")
+    return any(h == d or h.endswith("." + d) for d in domains)
+
+
+def official_brand(host: str) -> str | None:
+    """host 가 어느 브랜드의 공식 도메인(하위 포함)이면 그 브랜드."""
+    return next((b for b, ds in OFFICIAL_BRAND_DOMAINS.items() if on_domain(host, ds)), None)
+
+
+def official_redirect(url: str, page_urls: list[str]) -> tuple[str, str] | None:
+    """신고된 주소가 에이전트가 아무것도 누르기 전에(첫 관찰 화면) 브랜드 공식 사이트로 넘겼으면 (브랜드, 도착 호스트).
+
+    피싱 키트는 봇·조사 도구를 진짜 사이트로 돌려보내 화면을 숨긴다(관찰: iCloud 사칭 → www.apple.com, Meta 사칭
+    pages.dev → www.facebook.com). 시작 주소가 공식 도메인이거나(공식끼리의 이동) 단축 서비스면 근거로 삼지 않는다.
+    page_urls 는 화면마다 브라우저가 연 주소다(페이지가 정할 수 없는 값)."""
+    if not page_urls:
+        return None
+    start = urlsplit(url).hostname or ""
+    first = urlsplit(page_urls[0]).hostname or ""
+    brand = official_brand(first)
+    if not brand or official_brand(start) or on_domain(start, SHORTENER_HOSTS):
+        return None
+    return brand, first.lower().rstrip(".")
 
 
 def lookalike_brand(host: str) -> str | None:

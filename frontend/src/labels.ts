@@ -17,6 +17,7 @@ export function overrideLabel(o: Threat["override"]): string {
   const dest = text(o.destination);
   if (o.reason === "shortener_warning") return "단축 URL 서비스의 위험 경고 → 담당자 검토";
   if (o.reason === "link_takedown") return "단축·호스팅 서비스가 불법·약관 위반으로 링크를 정지 → 담당자 검토";
+  if (o.reason === "official_redirect") return `조사 전에 공식 사이트(${brand} · ${dest})로 바로 넘김(봇 회피 흔적) → 담당자 검토`;
   if (o.reason === "brand_lookalike")
     return dest
       ? `열리지 않은 목적지가 브랜드 사칭 도메인(${brand} · ${dest}) → 담당자 검토`

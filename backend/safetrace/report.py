@@ -105,6 +105,8 @@ def _override_ko(o: object) -> str | None:
         out = "단축 URL 서비스의 위험 경고 → 담당자 검토"
     elif reason == "link_takedown":
         out = "단축·호스팅 서비스가 불법·약관 위반으로 링크를 정지 → 담당자 검토"
+    elif reason == "official_redirect":
+        out = f"조사 전에 공식 사이트({brand} · {dest})로 바로 넘김(봇 회피 흔적) → 담당자 검토"
     elif reason == "brand_lookalike":
         out = (f"열리지 않은 목적지가 브랜드 사칭 도메인({brand} · {dest}) → 담당자 검토" if dest
                else f"브랜드 사칭 도메인({brand}), 화면 내용 없음 → 담당자 검토")
