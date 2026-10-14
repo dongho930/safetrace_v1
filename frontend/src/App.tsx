@@ -37,7 +37,7 @@ import {
   verifyCase,
 } from "./api";
 import {
-  buildOverlay, buildPath, buildReasons, buildScreens, clip, hostOrFile, hostPath, jpegSize, liveClick, recordingClicks, SCREEN_H, SCREEN_W,
+  buildOverlay, buildPath, buildReasons, buildScreens, clip, hostOrFile, hostPath, jpegSize, liveClick, recordingClicks, recordings, SCREEN_H, SCREEN_W,
   type ClickPoint, type Overlay, type Reason, type RecClick, type Screen, type Tone,
 } from "./evidence";
 import { ACTION_LABEL, NET_CATEGORY_LABEL, overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
@@ -1431,13 +1431,15 @@ function CaseTabs({
   pick: string | null;
   onPick: (f: string) => void;
 }) {
-  const recEvent = events.find((e) => e.kind === "recording");
-  const recording = recEvent?.files[0];
-  const recClicks = useMemo(() => recordingClicks(events, recEvent), [events, recEvent]);
+  // 녹화: 원래 주소와 연관 후보 하위 조사마다 하나씩(고른 것은 사건이 바뀌면 원래 주소로)
+  const recs = useMemo(() => recordings(events), [events]);
+  const [recPick, setRecPick] = useState({ id, sub: 0 });
+  const rec = recs.find((r) => r.sub === (recPick.id === id ? recPick.sub : 0)) ?? recs[0];
+  const recClicks = useMemo(() => recordingClicks(events, rec?.ev), [events, rec]);
   const tabs: [TabId, string][] = [
     ["screens", `근거 화면 ${screens.length}`],
     ["path", "경로 지도"],
-    ["rec", "조사 녹화"],
+    ["rec", recs.length > 1 ? `조사 녹화 ${recs.length}` : "조사 녹화"],
     ["log", `행동 기록 ${events.length}`],
   ];
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -1485,7 +1487,18 @@ function CaseTabs({
         {tab === "path" && c && <PathTab c={c} events={events} />}
         {tab === "rec" && (
           <div className="floor">
-            <div className="rec-box">{recording ? <Recording caseId={id} name={recording} clicks={recClicks} /> : <span className="small">녹화 없음</span>}</div>
+            {recs.length > 1 && (
+              <div className="rec-pick" role="group" aria-label="녹화 고르기">
+                {recs.map((r) => (
+                  <button key={r.sub} type="button" className="chip-filter" aria-pressed={r === rec} onClick={() => setRecPick({ id, sub: r.sub })}>
+                    {r.sub ? `후보 ${r.sub}` : "원래 주소"}
+                    {r.host && <> · <span className="mono">{clip(r.host, 40)}</span></>}
+                    {r.seconds !== null && ` · ${r.seconds.toFixed(1)}초`}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="rec-box">{rec ? <Recording key={rec.file} caseId={id} name={rec.file} clicks={recClicks} /> : <span className="small">녹화 없음</span>}</div>
           </div>
         )}
         {tab === "log" && (

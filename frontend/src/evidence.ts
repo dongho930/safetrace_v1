@@ -335,3 +335,26 @@ export function recordingClicks(events: EvidenceEvent[], rec: EvidenceEvent | un
   }
   return out.sort((a, b) => a.t - b.t);
 }
+
+// 조사 녹화 목록: 원래 주소(sub 없음)와 연관 후보 하위 조사(sub 1~)마다 하나씩. 실시간 화면은 하위 조사까지 이어지므로
+// 녹화도 모두 고를 수 있게 한다(예전엔 첫 녹화만 보여 후보 조사 부분이 콘솔에서 빠졌다). 주소는 같은 조사의 시작 기록에서
+export type RecItem = { ev: EvidenceEvent; file: string; sub: number; host: string; seconds: number | null };
+export function recordings(events: EvidenceEvent[]): RecItem[] {
+  const out: RecItem[] = [];
+  const seen = new Set<number>();
+  for (const e of events) {
+    if (e.kind !== "recording") continue;
+    const sub = isSub(e) ? (e.data.sub as number) : 0;
+    const file = e.files.find((f) => f.endsWith(".webm"));
+    if (!file || !Number.isInteger(sub) || sub < 0 || sub > 99 || seen.has(sub)) continue;
+    seen.add(sub);
+    const start = events.find((x) => x.kind === "start" && (sub ? x.data.sub === sub : !isSub(x)));
+    const d = e.data.duration_s;
+    out.push({
+      ev: e, file, sub, host: hostOrFile(str(start?.data.url, 300)),
+      seconds: typeof d === "number" && Number.isFinite(d) && d >= 0 ? d : null,
+    });
+    if (out.length >= 10) break;
+  }
+  return out.sort((a, b) => a.sub - b.sub);
+}
