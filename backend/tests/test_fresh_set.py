@@ -50,7 +50,7 @@ def test_same_screen_capped_and_dead_dropped():
     probed = [{**base, "url": f"https://p{i}.pages.dev/", "title": "Meta for Business | Page Appeal"} for i in range(5)]
     probed += [{**base, "url": "https://dead.example/", "title": "x", "status": 404},
                {**base, "url": "https://n.duckdns.org/", "title": "Naver Sign in", "text": "로그인"}]
-    rows = fresh_set.candidates(probed)
+    rows = fresh_set.candidates(probed, {r["url"] for r in probed})
     assert not any(r["url"] == "https://dead.example/" for r in rows)
     meta = [r for r in rows if r["title"].startswith("Meta")]
     assert sum(r["keep"] == "Y" for r in meta) == fresh_set.SAME_TITLE_MAX
@@ -104,7 +104,7 @@ def test_review_csv_does_not_store_formulas(tmp_path, bad):
 
     r = {"url": "https://x.example/", "final_url": "https://x.example/", "status": 200, "bytes": 5000,
          "refused": "", "error": "", "title": bad, "text": bad}
-    rows = fresh_set.candidates([r])
+    rows = fresh_set.candidates([r], {r["url"]})
     out = tmp_path / "c.csv"
     fresh_set._write_csv(out, rows, ["keep", "reason", "url", "final_url", "title", "text"])
     got = next(_csv.DictReader(out.open(encoding="utf-8-sig")))
@@ -112,3 +112,22 @@ def test_review_csv_does_not_store_formulas(tmp_path, bad):
         assert got[k][:1] not in "=+-@\t\r", (k, got[k])
         assert got[k].endswith(bad.strip()), got[k]  # 원래 글자는 그대로(앞에 ' 만)
     assert got["url"] == "https://x.example/"  # 평가에 쓰는 주소는 바꾸지 않는다
+
+
+def test_worker_results_only_for_asked_urls(tmp_path):
+    """Codex 2회차 지적(CWE-1236, 신뢰 경계): 침해된 워커가 결과의 주소를 수식·다른 주소로 바꾸거나
+    칸의 자료형을 바꿔도, 요청한 주소의 결과만 받고 글자 칸은 문자열만 쓴다."""
+    import csv as _csv
+
+    base = {"final_url": "https://x.example/", "status": 200, "bytes": 5000, "refused": "", "error": "",
+            "title": "Naver Sign in", "text": "로그인"}
+    asked = {"https://x.example/", "https://y.example/"}
+    probed = [{**base, "url": "=1+1"}, {**base, "url": "https://not-asked.example/"}, {**base, "url": ["x"]},
+              "not a dict", {**base, "url": "https://x.example/", "bytes": "9999"},
+              {**base, "url": "https://y.example/", "title": ["=1+1"], "text": 7, "final_url": {"a": 1}}]
+    rows = fresh_set.candidates(probed, asked)
+    out = tmp_path / "c.csv"
+    fresh_set._write_csv(out, rows, ["keep", "reason", "url", "final_url", "title", "text"])
+    got = list(_csv.DictReader(out.open(encoding="utf-8-sig")))
+    assert [r["url"] for r in got] == ["https://y.example/"]
+    assert got[0]["title"] == got[0]["text"] == got[0]["final_url"] == ""

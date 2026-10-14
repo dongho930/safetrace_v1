@@ -114,9 +114,21 @@ def suggest(r: dict) -> tuple[str, str]:
     return "?", "단서 약함"
 
 
-def candidates(probed: list[dict]) -> list[dict]:
-    alive = [r for r in probed if not r.get("refused") and not r.get("error") and r.get("status") == 200
-             and (r.get("bytes") or 0) > 300]
+def _alive(probed: list, asked: set[str]) -> list[dict]:
+    """워커(침해될 수 있음)가 돌려준 확인 결과: 요청한 주소(asked, 피드에서 http(s) 로 확인한 값)만 받고, 글자 칸은 문자열만."""
+    out = []
+    for r in probed:
+        if not isinstance(r, dict) or not isinstance(r.get("url"), str) or r["url"] not in asked:
+            continue
+        if r.get("refused") or r.get("error") or r.get("status") != 200 or not isinstance(r.get("bytes"), int) \
+                or r["bytes"] <= 300:
+            continue
+        out.append({**r, **{k: r[k] if isinstance(r.get(k), str) else "" for k in ("final_url", "title", "text")}})
+    return out
+
+
+def candidates(probed: list, asked: set[str]) -> list[dict]:
+    alive = _alive(probed, asked)
     rows, per_title = [], Counter()
     for r in alive:
         keep, why = suggest(r)
@@ -124,11 +136,11 @@ def candidates(probed: list[dict]) -> list[dict]:
             per_title[r["title"]] += 1
             if per_title[r["title"]] > SAME_TITLE_MAX:
                 keep, why = "N", "같은 화면 반복"
-        if _KOREAN.search(r["url"] + " " + r.get("title", "") + " " + r.get("text", "")[:300]):
+        if _KOREAN.search(r["url"] + " " + r["title"] + " " + r["text"][:300]):
             why += " · 한국 대상 단서"
-        # 주소(url)는 피드에서 http(s) 로 확인한 값이라 그대로(build 가 평가에 씀), 페이지가 정한 칸만 글자로 막는다
-        rows.append({"keep": keep, "reason": why, "url": r["url"], "final_url": _cell(r.get("final_url") or ""),
-                     "title": _cell((r.get("title") or "")[:120]), "text": _cell((r.get("text") or "")[:200])})
+        # 주소(url)는 요청한 목록과 맞춘 값이라 그대로(build 가 평가에 씀), 페이지가 정한 칸만 글자로 막는다
+        rows.append({"keep": keep, "reason": why, "url": r["url"], "final_url": _cell(r["final_url"]),
+                     "title": _cell(r["title"][:120]), "text": _cell(r["text"][:200])})
     order = {"Y": 0, "?": 1, "N": 2}
     return sorted(rows, key=lambda x: (order[x["keep"]], x["title"]))
 
@@ -165,7 +177,7 @@ def cmd_collect(a) -> None:
     (day / "probe.txt").write_text("\n".join(todo) + "\n", encoding="utf-8")
     probe_urls._run_host(day / "probe.txt", day / "probe.jsonl", a.workers)
     probed = [json.loads(x) for x in (day / "probe.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
-    rows = candidates(probed)
+    rows = candidates(probed, set(todo))
     _write_csv(day / "candidates.csv", rows, ["keep", "reason", "url", "final_url", "title", "text"])
     c = Counter(r["keep"] for r in rows)
     print(f"살아 있음 {len(rows)}개 → 제안 Y {c['Y']} · ? {c['?']} · N {c['N']}")
