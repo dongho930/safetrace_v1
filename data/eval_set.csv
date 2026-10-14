@@ -47,3 +47,10 @@ kisa,malicious,https://han.gl/ICrVHZ,KISA 2023. 첫 접속에서 서버가 바�
 kisa,malicious,https://han.gl/lSFnPG,KISA 2023. 첫 접속에서 서버가 바로 넘김 → gkk.ilogenskns.com(로젠택배 사칭·소멸)
 kisa,malicious,https://han.gl/WBTaOc,KISA 2023. 첫 접속에서 서버가 바로 넘김 → kks.lotteglo.com(롯데글로벌로지스 사칭·소멸)
 kisa,malicious,https://han.gl/nYQWfx,KISA 2023. 첫 접속에서 서버가 바로 넘김 → m.appcard.pro(카드사 앱 사칭·소멸)
+kisa,illegal_gambling,http://cs-telegram.com,KISA 2024. 텔레그램 사칭 도메인 → 중국 도박 브랜드(华体会)를 제목에 붙인 회사 사이트 복제(2026-10-14 접속 확인)
+kisa,illegal_gambling,http://km-telegram.com,KISA 2024. 텔레그램 사칭 도메인 → 중국 도박 브랜드(开云)를 제목에 붙인 회사 사이트 복제(2026-10-14 접속 확인)
+kisa,malicious,http://xzx.kr/telegram,KISA 2024-12. 단축 서비스(MU-star)가 '불법·유해 내용으로 정지된 URL' 경고 화면
+kisa,malicious,http://5du.pl/1341,KISA 2024-12. 단축 서비스(SDU)가 약관 위반으로 차단한 링크 화면(Link zablokovaný)
+kisa,malicious,https://tinyurl.com/fgr5DF,KISA 2024. TinyURL 이 악용으로 종료한 링크 화면(URL Terminated)
+kisa,malicious,https://tny.kr/tzsy0,KISA 2024. 단축 서비스 tny.kr 의 '영구정지·리디렉트 차단' 화면
+kisa,malicious,https://taxservice.creatorlink.net,"KISA 2024. 세무 서비스 사칭, 호스팅(크리에이터링크)의 '불법/유해 사이트 접속 차단' 화면"
