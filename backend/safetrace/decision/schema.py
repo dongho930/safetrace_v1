@@ -113,6 +113,8 @@ class ThreatRequest(BaseModel):
     redirect_count: int = Field(ge=0, le=100)
     domains: list[str] = Field(max_length=30)  # 실제로 열린 페이지의 도메인
     pages: list[str] = Field(max_length=20)  # 단계별 마스킹된 텍스트 요약
+    # pages 와 같은 순서로 그 화면을 연 주소(브라우저 값, 페이지가 정할 수 없음). 코드 규칙만 쓰고 Jev 로는 보내지 않는다
+    page_urls: list[str] = Field(default_factory=list, max_length=20)
     forbidden_seen: list[str] = Field(default_factory=list, max_length=50)  # 예: "input:password", "download:apk"
     blocked_destinations: list[BlockedDestination] = Field(default_factory=list, max_length=20)
 

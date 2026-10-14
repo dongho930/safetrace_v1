@@ -337,6 +337,40 @@ def test_malformed_signed_records_do_not_break_exports(tmp_path, client, case_id
     assert "report.json" not in z.namelist() and "package.json" in z.namelist()
 
 
+@pytest.mark.parametrize("override, label", [
+    ({"reason": "link_takedown", "original": {"threat": "benign", "probability": 0.65, "provider": "jev_typesafe"}},
+     "단축·호스팅 서비스가 불법·약관 위반으로 링크를 정지 → 담당자 검토 · 모델 원래 판단 정상 65%"),
+    ({"reason": "brand_lookalike", "brand": "kbank", "destination": "g.kbank.mywire.org",
+      "original": {"threat": "unknown", "probability": 0.5, "provider": "jev_typesafe"}},
+     "열리지 않은 목적지가 브랜드 사칭 도메인(kbank · g.kbank.mywire.org) → 담당자 검토 · 모델 원래 판단 판단 불가 50%"),
+    ({"reason": "official_betting_domain", "operators": ["betman"],
+      "original": {"threat": "illegal_gambling", "probability": 0.9, "provider": "jev_typesafe"}},
+     "공식 사행사업자 도메인 · betman · 모델 원래 판단 불법 도박 의심 90%"),
+    ({"reason": ["x"], "original": "y"}, "코드 규칙"),  # 자료형이 어긋난 값은 글자로만, 지어내지 않는다
+])
+def test_code_rule_override_kept_in_package_and_report(tmp_path, override, label):
+    """판단 엔진의 코드 규칙(override)은 사전이다. 패키지가 자료형 오류로 버리거나 malformed 로 적지 않고,
+    보고서에는 사람이 읽는 설명으로 나온다."""
+    from safetrace.evidence import EvidenceWriter, Signer, verify_case
+
+    signer = Signer(secrets.token_bytes(32), "k1")
+    cid = "eeeeeeee-0000-0000-0000-000000000000"
+    w = EvidenceWriter(tmp_path / "ev", cid, signer)
+    w.append("start", {"url": "https://tny.kr/tzsy0"})
+    w.append("threat", {"threat": "phishing", "probability": 1.0, "probabilities": {"phishing": 1.0}, "hold": True,
+                        "provider": "link_takedown", "model": "jev-1.13.0", "evidence_seqs": [], "override": override})
+    case = Case(id=cid, url="https://tny.kr/tzsy0", source="test", status="REVIEW_REQUIRED", created_by="t",
+                created_at=now())
+    res = verify_case(tmp_path / "ev", cid, signer, None)
+    records = package.read_chain(tmp_path / "ev", cid)
+    pkg = package.build(case, records, res, [], [], generated_by="t", key_id="k1")
+    assert pkg["integrity"]["malformed"] == []
+    assert pkg["assessment"]["threat"]["override"] == override
+    rep = report.build(pkg, records)
+    assert rep["assessment"]["ai"]["override"] == label
+    assert report.render_pdf(rep, tmp_path / "ev").startswith(b"%PDF")
+
+
 def test_zip_uses_verified_file_bytes(client, case_id, monkeypatch):
     """Codex 2회차 F1: 검증 뒤(보고서 PDF 를 만드는 사이) 증거 파일을 바꿔도, 바뀐 파일이 '검증 통과'·서명된 ZIP 에
     들어가면 안 된다. 받은 쪽 확인(verify_zip)도 체인의 파일 해시와 대조해 잡아야 한다."""

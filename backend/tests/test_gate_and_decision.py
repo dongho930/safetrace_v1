@@ -523,6 +523,105 @@ def test_shortener_warning_keeps_other_threats():
     assert d.threat == "illegal_gambling" and d.override is None
 
 
+# ── 단축·호스팅 서비스가 링크를 정지·차단한 안내 화면(KISA 신고 URL 에서 관찰한 문구, 2026-10-14) ──
+_TINY_KR = "[0] 링크 접속불가 | https://tny.kr/tzsy0 | 링크 접속불가 이 페이지는 영구정지 되었거나 리디렉트가 차단된 상태입니다. 뒤로가기"
+_TAKEDOWNS = [  # (그 화면을 연 주소(브라우저 값), 화면 요약)
+    ("https://xzx.kr/warning.php", "[0] xzx.kr warning :: MU-star.net | https://xzx.kr/warning.php | < 단축URL 생성 단축URL 풀기 > "
+     "xzx.krWARNING 등록된 단축URL 접속차단 안내 귀하가 접속하려고 단축URL는 불법·유해 내용이 제공되거나 "
+     "이용약관에 위반되어 접속차단이 되었음을 알려드립니다."),
+    ("https://muz.so/warning.php", "[0] muz.so warning :: MU-star.net | https://muz.so/warning.php | unShorten URL > muz.soWARNING URL "
+     "Access Suspended We inform you that the shortened URL you have accessed has been suspended due to illegal or "
+     "harmful contents or violation of the Terms of Use."),
+    ("https://5du.pl/1341", "[0] Link zablokovaný | SDU.sk | https://5du.pl/1341 | Domov Prihlásiť Registrovať LINK ZABLOKOVANÝ "
+     "Objaviť viac Tento link bol zablokovaný z dôvodu porušovania Podmienok SDU. Menu O SDU"),
+    ("https://tinyurl.com/app/nospam/tinyurl.com/fgr5DF", "[0] URL Shortener, Branded Short Links & Analytics | TinyURL | "
+     "https://tinyurl.com/app/nospam/tinyurl.com/fgr5DF | TinyURL Visit TinyURL.com URL Terminated The TinyURL link you "
+     "are visiting was used by its creator in violation of our Terms of Use. TinyURL has a strict no-abuse policy"),
+    ("https://tny.kr/tzsy0", _TINY_KR),
+    ("https://taxservice.creatorlink.net/",
+     "[0] Server Blacklist Site | https://taxservice.creatorlink.net/ | 불법 / 유해 사이트 접속 차단 안내 BACK TO CREATORLINK"),
+]
+
+
+@pytest.mark.parametrize("page_url, page, expected", [
+    *((d, p, True) for d, p in _TAKEDOWNS),
+    # 같은 서비스의 보통 화면, 정지 안내가 아닌 차단·위반 문구
+    ("https://sdu.sk/sk", "[0] Skracovač dlhých URL adries a linkov | SDU.sk | https://sdu.sk/sk | Skrátiť link Podmienky", False),
+    ("https://tinyurl.com/", "[0] TinyURL | https://tinyurl.com/ | Shorten a long URL. By clicking you agree to our Terms of Use",
+     False),
+    ("https://tny.kr/", "[0] tny.kr | https://tny.kr/ | 단축 URL 만들기 긴 주소를 짧게 줄여 드립니다. 이용약관 개인정보처리방침", False),
+    ("https://news.example/", "[0] 뉴스 | https://news.example/ | 방심위, 불법 도박 사이트 접속 차단 확대… 유해 정보 신고 급증", False),
+    ("https://shop.example/", "[0] 로그인 | https://shop.example/ | 이용약관 위반으로 계정이 정지되었습니다. 고객센터로 문의하세요", False),
+    ("https://tinyurl.com/x", "[0] Error | https://tinyurl.com/x | URL Terminated", False),  # 이유 없이 '종료'만 있는 화면
+    # 다른 서비스의 안내 문구: 문구를 관찰한 그 서비스의 도메인이어야 한다
+    ("https://tny.kr/x", _TAKEDOWNS[3][1], False),
+    ("https://notcreatorlink.net/", _TAKEDOWNS[5][1], False),
+])
+def test_link_takedown_detected(page_url, page, expected):
+    from safetrace.decision.engine import link_takedown
+
+    assert link_takedown([page], [page_url]) is expected
+    assert not link_takedown([page], [])  # 화면 주소가 없으면(예전 에이전트) 적용하지 않는다
+
+
+def test_link_takedown_threat_goes_to_review():
+    # 판단 모델이 정상·판단 불가로 봐도 서비스의 정지 안내가 있으면 피싱(담당자 검토)으로, 원래 판단은 남긴다
+    req = ThreatRequest(url="https://tny.kr/tzsy0", final_url="https://tny.kr/tzsy0", redirect_count=0,
+                        domains=["tny.kr"], pages=[_TINY_KR], page_urls=["https://tny.kr/tzsy0"])
+    for choice in ("unknown", "benign"):
+        sent = []
+        p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
+                        transport=_jev_transport({"type": "choice", "choice": choice,
+                                                  "probabilities": {choice: 0.7, "phishing": 0.3}}, capture=sent))
+        d = Engine([p], 0.45, 0.6).decide_threat(req)
+        assert d.threat == "phishing" and d.hold and d.provider == "link_takedown"
+        assert d.override["reason"] == "link_takedown" and d.override["original"]["threat"] == choice
+        assert "page_urls" not in json.dumps(sent[0])  # 화면별 주소는 코드 규칙만 쓴다(Jev 입력은 그대로)
+    d = Engine([RuleProvider()], 0.45, 0.6).decide_threat(req)
+    assert d.threat == "phishing" and d.hold
+
+
+@pytest.mark.parametrize("page", [
+    "[0] 일반 안내 | https://attacker.example/ | URL Terminated illegal",
+    # 페이지 제목으로 서비스 주소를 흉내 내도(요약의 주소 칸은 제목 뒤에 붙는다) 실제로 거친 도메인이 아니면 아니다
+    "[0] x | https://tinyurl.com/app/nospam/x | URL Terminated The TinyURL link you are visiting was used by its "
+    "creator in violation of our Terms of Use | https://attacker.example/ | 안내",
+])
+def test_link_takedown_needs_visited_service_domain(page):
+    # Codex F1: 페이지 글자만으로 '서비스가 링크를 정지했다'고 단정하지 않는다. 그 문구가 서비스 도메인의
+    # 화면에 있을 때(그 화면을 브라우저가 연 주소, page_urls)만 적용한다
+    d = Engine([RuleProvider()], 0.45, 0.6).decide_threat(ThreatRequest(
+        url="https://attacker.example/", final_url="https://attacker.example/", redirect_count=0,
+        domains=["attacker.example"], pages=[page], page_urls=["https://attacker.example/"]))
+    assert d.override is None or d.override["reason"] != "link_takedown"
+
+
+def test_link_takedown_needs_notice_on_service_page():
+    # Codex 2회차 F1: 서비스 도메인을 거쳤어도 안내 문구는 그 서비스의 화면에 있어야 한다. 정상 단축 링크가
+    # 공격자 페이지로 넘기고 그 본문에 정지 문구를 적은 경우는 아니다
+    req = ThreatRequest(url="https://tinyurl.com/demo", final_url="https://attacker.example/", redirect_count=1,
+                        domains=["tinyurl.com", "attacker.example"],
+                        pages=["[0] 안내 | https://attacker.example/ | URL Terminated illegal"],
+                        page_urls=["https://attacker.example/"])
+    d = Engine([RuleProvider()], 0.45, 0.6).decide_threat(req)
+    assert d.override is None or d.override["reason"] != "link_takedown"
+    # 같은 문구가 서비스 도메인의 화면에 있으면 적용한다
+    req = req.model_copy(update={"page_urls": ["https://tinyurl.com/app/nospam/tinyurl.com/demo"]})
+    d = Engine([RuleProvider()], 0.45, 0.6).decide_threat(req)
+    assert d.override and d.override["reason"] == "link_takedown"
+
+
+def test_link_takedown_keeps_other_threats():
+    # 판단 모델이 이미 위협 유형을 골랐으면 그대로 둔다
+    p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
+                    transport=_jev_transport({"type": "choice", "choice": "illegal_gambling",
+                                              "probabilities": {"illegal_gambling": 0.9, "benign": 0.1}}))
+    d = Engine([p], 0.45, 0.6).decide_threat(ThreatRequest(
+        url="https://tny.kr/x", final_url="https://tny.kr/x", redirect_count=0, domains=["tny.kr"], pages=[_TINY_KR],
+        page_urls=["https://tny.kr/x"]))
+    assert d.threat == "illegal_gambling" and d.override is None
+
+
 # ── 브랜드 사칭 도메인 ───────────────────────────────────
 @pytest.mark.parametrize("host, brand", [
     ("mi-telegram.com", "telegram"),
