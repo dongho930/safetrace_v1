@@ -52,21 +52,32 @@ def shortener_warning(pages: list[str]) -> bool:
 
 
 # 단축·호스팅 서비스가 링크를 정지·차단한 안내 화면: 차단 안내 문구와 그 이유(불법·유해·약관 위반·영구 정지)가
-# 한 화면에 함께 있다. 실제로 관찰한 문구만 넣는다(KISA 신고 URL, 2026-10-14)
-_TAKEDOWN = re.compile(r"단축\s?URL\s?접속\s?차단\s?안내"  # MU-star(xzx.kr·muz.so) 한국어 화면
-                       r"|URL\s+Access\s+Suspended"  # MU-star 영어 화면
-                       r"|유해\s?사이트\s?접속\s?차단\s?안내"  # 크리에이터링크 "불법 / 유해 사이트 접속 차단 안내"
-                       r"|영구\s?정지\s?되었거나\s?리디렉트가\s?차단"  # tny.kr
-                       r"|URL\s+Terminated"  # TinyURL
-                       r"|link\s+(?:bol\s+)?zablokovan", re.I)  # SDU(5du.pl) "Tento link bol zablokovaný"
+# 한 화면에 함께 있다. 실제로 관찰한 문구와 그 서비스의 도메인만 넣는다(KISA 신고 URL, 2026-10-14).
+# 페이지 글자는 누구나 흉내 낼 수 있으므로 그 서비스의 도메인을 실제로 거쳤을 때만 서비스의 조치로 본다
+_TAKEDOWN_NOTICES: list[tuple[tuple[str, ...], re.Pattern[str]]] = [
+    (("xzx.kr", "muz.so"),  # MU-star: 한국어·영어 화면
+     re.compile(r"단축\s?URL\s?접속\s?차단\s?안내|URL\s+Access\s+Suspended", re.I)),
+    (("5du.pl", "sdu.sk", "skrat.it", "0a.sk", "xn--a-4ka.eu"),  # SDU: 화면에 적힌 자사 단축 도메인(ľa.eu 포함)
+     re.compile(r"link\s+(?:bol\s+)?zablokovan", re.I)),
+    (("tinyurl.com",), re.compile(r"URL\s+Terminated", re.I)),
+    (("tny.kr",), re.compile(r"영구\s?정지\s?되었거나\s?리디렉트가\s?차단")),
+    (("creatorlink.net",), re.compile(r"유해\s?사이트\s?접속\s?차단\s?안내")),  # "불법 / 유해 사이트 접속 차단 안내"
+]
 _VIOLATION = re.compile(r"불법|유해|약관\S{0,2}\s?위반|영구\s?정지"
                         r"|illegal|harmful|violation\s+of\s+(?:our\s+|the\s+)?terms"
                         r"|porušovani\w*\s+podmienok", re.I)
 
 
-def link_takedown(pages: list[str]) -> bool:
-    """단축·호스팅 서비스가 불법·유해 내용이나 약관 위반으로 이 링크를 정지·차단한 안내 화면을 거쳤는지."""
-    return any(_TAKEDOWN.search(p) and _VIOLATION.search(p) for p in pages)
+def link_takedown(pages: list[str], domains: list[str]) -> bool:
+    """단축·호스팅 서비스가 불법·유해 내용이나 약관 위반으로 이 링크를 정지·차단한 안내 화면을 거쳤는지.
+    domains 는 브라우저가 실제로 연 주소에서 뽑은 도메인이다(페이지가 정할 수 없는 값)."""
+    visited = {d.lower().rstrip(".") for d in domains}
+    for hosts, notice in _TAKEDOWN_NOTICES:
+        if not any(h == s or h.endswith("." + s) for h in visited for s in hosts):
+            continue
+        if any(notice.search(p) and _VIOLATION.search(p) for p in pages):
+            return True
+    return False
 
 
 class NoProviderAvailable(Exception):
@@ -151,7 +162,7 @@ class Engine:
                 override={"reason": "shortener_warning",
                           "original": {"threat": res.choice, "probability": prob, "provider": provider}},
             )
-        if res.choice in (Threat.UNKNOWN, Threat.BENIGN) and link_takedown(req.pages):
+        if res.choice in (Threat.UNKNOWN, Threat.BENIGN) and link_takedown(req.pages, req.domains):
             # 단축·호스팅 서비스가 불법·유해 내용이나 약관 위반으로 이 링크를 정지했다(xzx.kr·TinyURL·크리에이터링크 등):
             # 화면은 서비스의 안내뿐이라 모델은 정상으로 보기 쉽지만, 운영자의 정지 조치를 근거로 피싱으로 보고 담당자 검토로 보낸다
             return ThreatDecision(
