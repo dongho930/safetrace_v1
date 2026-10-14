@@ -95,3 +95,20 @@ def test_date_must_be_digits():
     assert fresh_set._date("20261015") == "20261015"
     with pytest.raises(SystemExit):
         fresh_set._date("../../etc")
+
+
+@pytest.mark.parametrize("bad", ["=HYPERLINK(\"https://evil.invalid/\",\"Naver Sign in\")", "+1+1", "-1+1", "@SUM(1)", "\t=1+1"])
+def test_review_csv_does_not_store_formulas(tmp_path, bad):
+    """Codex 지적(CWE-1236): 페이지가 정한 제목·글자·주소가 엑셀에서 수식으로 읽히지 않게 글자로 저장한다."""
+    import csv as _csv
+
+    r = {"url": "https://x.example/", "final_url": "https://x.example/", "status": 200, "bytes": 5000,
+         "refused": "", "error": "", "title": bad, "text": bad}
+    rows = fresh_set.candidates([r])
+    out = tmp_path / "c.csv"
+    fresh_set._write_csv(out, rows, ["keep", "reason", "url", "final_url", "title", "text"])
+    got = next(_csv.DictReader(out.open(encoding="utf-8-sig")))
+    for k in ("title", "text"):
+        assert got[k][:1] not in "=+-@\t\r", (k, got[k])
+        assert got[k].endswith(bad.strip()), got[k]  # 원래 글자는 그대로(앞에 ' 만)
+    assert got["url"] == "https://x.example/"  # 평가에 쓰는 주소는 바꾸지 않는다

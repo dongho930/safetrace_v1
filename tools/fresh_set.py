@@ -48,6 +48,14 @@ _PHISHY = re.compile(r"sign[ -]?in|log[ -]?in|password|passcode|verify|verificat
                      r"instagram|whatsapp|coinbase|metamask|trust wallet|kucoin|binance|ledger|webmail|docusign|adobe|"
                      r"dhl|usps|fedex|ups|seur|post|parcel|delivery|tax|irs|credit|loan|naver|kakao|coupang|"
                      r"로그인|비밀번호|인증|계좌|택배|배송", re.I)
+_FORMULA = ("=", "+", "-", "@", chr(9), chr(13))  # 탭·CR 로 시작해도 수식으로 읽힐 수 있다
+
+
+def _cell(v: str) -> str:
+    """검토용 CSV 칸: 페이지가 정한 글자가 엑셀에서 수식으로 읽히지 않게, 수식 시작 문자로 시작하면 앞에 ' 를 붙인다(CWE-1236)."""
+    return "'" + v if v[:1] in _FORMULA else v
+
+
 _KOREAN = re.compile(r"naver|kakao|coupang|toss|shinhan|woori|nonghyup|kbstar|hanjin|epost|\.kr\b|[가-힣]", re.I)
 
 
@@ -118,8 +126,9 @@ def candidates(probed: list[dict]) -> list[dict]:
                 keep, why = "N", "같은 화면 반복"
         if _KOREAN.search(r["url"] + " " + r.get("title", "") + " " + r.get("text", "")[:300]):
             why += " · 한국 대상 단서"
-        rows.append({"keep": keep, "reason": why, "url": r["url"], "final_url": r.get("final_url", ""),
-                     "title": (r.get("title") or "")[:120], "text": (r.get("text") or "")[:200]})
+        # 주소(url)는 피드에서 http(s) 로 확인한 값이라 그대로(build 가 평가에 씀), 페이지가 정한 칸만 글자로 막는다
+        rows.append({"keep": keep, "reason": why, "url": r["url"], "final_url": _cell(r.get("final_url") or ""),
+                     "title": _cell((r.get("title") or "")[:120]), "text": _cell((r.get("text") or "")[:200])})
     order = {"Y": 0, "?": 1, "N": 2}
     return sorted(rows, key=lambda x: (order[x["keep"]], x["title"]))
 
