@@ -17,7 +17,9 @@ import re
 import subprocess
 import sys
 import time
+import zlib
 from pathlib import Path
+from urllib.parse import urljoin
 
 ROOT = Path(__file__).resolve().parents[1]
 IN_BOX = "/tmp/probe"
@@ -29,6 +31,8 @@ EGRESS_HEADER = "x-safetrace-egress"  # 검문 프록시가 거부할 때 붙이
 _TITLE = re.compile(r"<title\b[^<>]*>([^<]{0,500})", re.I)
 _TAG = re.compile(r"<[^<>]*>")
 _BLOCKS = ("script", "style")
+_REDIRECT = {301, 302, 303, 307, 308}
+MAX_REDIRECTS = 5
 
 
 def _drop_blocks(body: str) -> str:
@@ -60,22 +64,49 @@ def _text(body: str) -> tuple[str, str]:
     return title, text
 
 
+async def _read_capped(r) -> bytes:
+    """압축을 풀기 전 바이트를 MAX_BODY 까지만 읽는다(큰 청크가 한 번에 와도 자른다)."""
+    buf = bytearray()
+    async for chunk in r.aiter_raw():
+        buf += chunk[: MAX_BODY - len(buf)]
+        if len(buf) >= MAX_BODY:
+            break
+    return bytes(buf)
+
+
+def _decode(raw: bytes, encoding: str) -> bytes:
+    """gzip·deflate 는 결과를 MAX_BODY 까지만 푼다(작은 압축이 크게 풀리는 응답 대비). 그 밖의 인코딩은 글자 없이."""
+    enc = encoding.lower().strip()
+    if enc in ("", "identity"):
+        return raw
+    if enc in ("gzip", "x-gzip", "deflate"):
+        try:
+            return zlib.decompressobj(zlib.MAX_WBITS | 32).decompress(raw, MAX_BODY)  # 32: gzip·zlib 머리 자동 판별
+        except zlib.error:
+            return b""
+    return b""
+
+
 async def _one(client, url: str, budget: float = BUDGET_S) -> dict:
     t0 = time.monotonic()
     out = {"url": url, "status": None, "final_url": "", "redirects": 0, "title": "", "text": "", "bytes": 0,
            "refused": "", "error": ""}
 
     async def fetch():
-        async with client.stream("GET", url) as r:
-            out["status"], out["final_url"], out["redirects"] = r.status_code, str(r.url), len(r.history)
-            out["refused"] = r.headers.get(EGRESS_HEADER, "")
-            buf = b""
-            async for chunk in r.aiter_bytes():
-                buf += chunk
-                if len(buf) >= MAX_BODY:
-                    break
-            out["bytes"] = len(buf)
-            out["title"], out["text"] = _text(buf.decode(r.encoding or "utf-8", errors="replace"))
+        # 리다이렉트는 직접 따라간다: 클라이언트가 따라가면 중간 응답 본문을 크기 제한 없이 끝까지 읽는다(httpx aread)
+        cur, hops = url, 0
+        while True:
+            async with client.stream("GET", cur) as r:
+                loc = r.headers.get("location")
+                if r.status_code in _REDIRECT and loc and hops < MAX_REDIRECTS:
+                    cur, hops = urljoin(str(r.url), loc), hops + 1  # 중간 응답 본문은 읽지 않고 닫는다
+                    continue
+                out["status"], out["final_url"], out["redirects"] = r.status_code, str(r.url), hops
+                out["refused"] = r.headers.get(EGRESS_HEADER, "")
+                body = _decode(await _read_capped(r), r.headers.get("content-encoding", ""))[:MAX_BODY]
+                out["bytes"] = len(body)
+                out["title"], out["text"] = _text(body.decode(r.encoding or "utf-8", errors="replace"))
+                return
 
     try:
         await asyncio.wait_for(fetch(), budget)  # 넘으면 응답을 닫고 실패로 기록한다
@@ -97,8 +128,9 @@ async def _run_inside(src: Path, dst: Path, workers: int) -> None:
         raise SystemExit("ST_EGRESS_PROXY 가 없다: 에이전트 컨테이너 안에서 돌아야 한다")
     sem = asyncio.Semaphore(workers)
     # 피싱 사이트는 인증서가 틀린 경우가 많다. 내용만 보는 확인이라 인증서 검증을 끈다(바깥 연결은 검문 프록시가 통제)
-    async with httpx.AsyncClient(proxy=proxy, follow_redirects=True, max_redirects=5, timeout=8,
-                                 headers={"User-Agent": UA}, verify=False) as client:  # nosec B501
+    # 리다이렉트는 _one 이 직접 따라가고(중간 본문을 읽지 않게), 압축하지 말라고 요청한다(_decode 는 보낸 압축도 상한까지만 푼다)
+    async with httpx.AsyncClient(proxy=proxy, follow_redirects=False, timeout=8, verify=False,  # nosec B501
+                                 headers={"User-Agent": UA, "Accept-Encoding": "identity"}) as client:
         async def go(u):
             async with sem:
                 return await _one(client, u)

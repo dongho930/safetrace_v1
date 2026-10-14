@@ -37,7 +37,7 @@ def test_slow_trickle_hits_total_deadline():
     class Resp:
         status_code, url, history, headers, encoding = 200, "http://slow.example/", [], {}, "utf-8"
 
-        async def aiter_bytes(self):
+        async def aiter_raw(self):
             for _ in range(30):
                 await asyncio.sleep(0.02)
                 yield b"x"
@@ -100,3 +100,61 @@ def test_eval_tool_copies_set_under_fixed_name(monkeypatch, tmp_path, name):
         pass
     copies = [c[-1] for c in calls if "cp" in c and c[-1].startswith("agent:")]
     assert len(set(copies)) == len(copies), copies  # 같은 자리에 두 번 복사하지 않는다
+
+
+class _Resp:
+    def __init__(self, url, status=200, body=b"", headers=None):
+        self.url, self.status_code, self.history, self.encoding = url, status, [], "utf-8"
+        self.headers = headers or {}
+        self._body, self.read_raw = body, 0
+
+    async def aiter_raw(self):
+        self.read_raw += 1
+        yield self._body  # 한 번에 큰 청크
+
+
+class _Client:
+    """주소마다 정해 둔 응답을 돌려주는 가짜 클라이언트(리다이렉트를 따라가는지·본문을 읽는지 본다)."""
+
+    def __init__(self, table):
+        self.table, self.asked = table, []
+
+    def stream(self, method, url):
+        self.asked.append(url)
+        resp = self.table[url]
+
+        class S:
+            async def __aenter__(self_inner):
+                return resp
+
+            async def __aexit__(self_inner, *a):
+                return False
+
+        return S()
+
+
+def test_one_huge_chunk_is_capped():
+    """Codex 2회차: 큰 청크가 한 번에 와도 본문 상한(256KB)까지만 다룬다."""
+    big = _Resp("http://a/", body=b"<title>t</title>" + b"A" * (4 * 1024 * 1024))
+    r = asyncio.run(probe_urls._one(_Client({"http://a/": big}), "http://a/"))
+    assert r["bytes"] <= probe_urls.MAX_BODY and r["title"] == "t", r["bytes"]
+
+
+def test_redirect_body_is_not_read():
+    """리다이렉트 중간 응답의 본문은 읽지 않고(크기 제한 밖) 다음 주소로 간다."""
+    hop = _Resp("http://a/", status=302, body=b"X" * (8 * 1024 * 1024), headers={"location": "/b"})
+    end = _Resp("http://a/b", body=b"<title>end</title>")
+    c = _Client({"http://a/": hop, "http://a/b": end})
+    r = asyncio.run(probe_urls._one(c, "http://a/"))
+    assert c.asked == ["http://a/", "http://a/b"] and hop.read_raw == 0
+    assert r["final_url"] == "http://a/b" and r["redirects"] == 1 and r["title"] == "end"
+
+
+def test_gzip_bomb_is_bounded():
+    """작은 gzip 이 크게 풀려도(10MB) 압축 해제 결과를 본문 상한까지만 만든다."""
+    import gzip
+
+    bomb = gzip.compress(b"<title>bomb</title>" + b"Z" * (10 * 1024 * 1024))
+    resp = _Resp("http://a/", body=bomb, headers={"content-encoding": "gzip"})
+    r = asyncio.run(probe_urls._one(_Client({"http://a/": resp}), "http://a/"))
+    assert r["bytes"] <= probe_urls.MAX_BODY and r["title"] == "bomb", (r["bytes"], r["title"])
