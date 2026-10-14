@@ -88,8 +88,36 @@ def _ai(threat: dict | None) -> dict | None:
         return None
     return {"threat": threat.get("threat"), "threat_ko": THREAT_KO.get(threat.get("threat"), threat.get("threat")),
             "probability": threat.get("probability"), "hold": bool(threat.get("hold")),
-            "override": _cut(threat.get("override"), _TEXT), "provider": threat.get("provider"),
+            "override": _override_ko(threat.get("override")), "provider": threat.get("provider"),
             "model": threat.get("model")}
+
+
+def _override_ko(o: object) -> str | None:
+    """코드 규칙이 모델 판단을 바꾼 이유(콘솔 labels.ts overrideLabel 과 같은 문구). 기록 값은 글자로만 읽는다."""
+    if not isinstance(o, dict):
+        return None
+
+    def s(v: object) -> str:
+        return v if isinstance(v, str) else ""
+
+    reason, brand, dest = s(o.get("reason")), s(o.get("brand")), s(o.get("destination"))
+    if reason == "shortener_warning":
+        out = "단축 URL 서비스의 위험 경고 → 담당자 검토"
+    elif reason == "link_takedown":
+        out = "단축·호스팅 서비스가 불법·약관 위반으로 링크를 정지 → 담당자 검토"
+    elif reason == "brand_lookalike":
+        out = (f"열리지 않은 목적지가 브랜드 사칭 도메인({brand} · {dest}) → 담당자 검토" if dest
+               else f"브랜드 사칭 도메인({brand}), 화면 내용 없음 → 담당자 검토")
+    elif reason == "official_betting_domain":
+        ops = o.get("operators")
+        ops = [x for x in ops if isinstance(x, str)] if isinstance(ops, list) else []
+        out = "공식 사행사업자 도메인" + (f" · {', '.join(ops)}" if ops else "")
+    else:
+        out = f"코드 규칙({reason})" if reason else "코드 규칙"
+    orig = o.get("original")
+    if isinstance(orig, dict) and isinstance(orig.get("threat"), str):
+        out += f" · 모델 원래 판단 {THREAT_KO.get(orig['threat'], orig['threat'])} {_pct(orig.get('probability'))}"
+    return _cut(out, _TEXT)
 
 
 def _steps(exp: dict) -> tuple[list[dict], int]:

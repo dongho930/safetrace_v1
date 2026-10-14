@@ -49,7 +49,7 @@ _SCHEMA: dict[str, dict[str, object]] = {
     "gate": {"action": _STR, "element": _STR, "allowed": _BOOL, "point": [_INT], "at": _NUM},
     "action": {"action": _STR, "element": _STR, "outcome": _STR, "result_url": _STR},
     "finish": {"nav_chain": [_STR], "final_url": _STR, "capture": _STR},
-    "threat": {"threat": _STR, "probability": _PROB, "probabilities": _DICT, "hold": _BOOL, "override": _STR,
+    "threat": {"threat": _STR, "probability": _PROB, "probabilities": _DICT, "hold": _BOOL, "override": _DICT,
                "provider": _STR, "model": _STR, "evidence_seqs": [_INT]},
     "safebrowsing": {"status": _STR, "matches": [_DICT]},
     "candidates": {"found": [_DICT], "followup": _BOOL},
