@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from urllib.parse import urlsplit
 
 from ..config import Settings
 from .brands import lookalike_destination, lookalike_in, thin_content
@@ -53,7 +54,7 @@ def shortener_warning(pages: list[str]) -> bool:
 
 # 단축·호스팅 서비스가 링크를 정지·차단한 안내 화면: 차단 안내 문구와 그 이유(불법·유해·약관 위반·영구 정지)가
 # 한 화면에 함께 있다. 실제로 관찰한 문구와 그 서비스의 도메인만 넣는다(KISA 신고 URL, 2026-10-14).
-# 페이지 글자는 누구나 흉내 낼 수 있으므로 그 서비스의 도메인을 실제로 거쳤을 때만 서비스의 조치로 본다
+# 페이지 글자는 누구나 흉내 낼 수 있으므로 그 문구가 서비스 도메인의 화면에 있을 때만 서비스의 조치로 본다
 _TAKEDOWN_NOTICES: list[tuple[tuple[str, ...], re.Pattern[str]]] = [
     (("xzx.kr", "muz.so"),  # MU-star: 한국어·영어 화면
      re.compile(r"단축\s?URL\s?접속\s?차단\s?안내|URL\s+Access\s+Suspended", re.I)),
@@ -68,15 +69,18 @@ _VIOLATION = re.compile(r"불법|유해|약관\S{0,2}\s?위반|영구\s?정지"
                         r"|porušovani\w*\s+podmienok", re.I)
 
 
-def link_takedown(pages: list[str], domains: list[str]) -> bool:
+def link_takedown(pages: list[str], page_urls: list[str]) -> bool:
     """단축·호스팅 서비스가 불법·유해 내용이나 약관 위반으로 이 링크를 정지·차단한 안내 화면을 거쳤는지.
-    domains 는 브라우저가 실제로 연 주소에서 뽑은 도메인이다(페이지가 정할 수 없는 값)."""
-    visited = {d.lower().rstrip(".") for d in domains}
-    for hosts, notice in _TAKEDOWN_NOTICES:
-        if not any(h == s or h.endswith("." + s) for h in visited for s in hosts):
-            continue
-        if any(notice.search(p) and _VIOLATION.search(p) for p in pages):
-            return True
+    page_urls 는 pages 와 같은 순서로 그 화면을 연 주소다(브라우저 값). 요약 글 속 주소는 페이지 제목으로
+    흉내 낼 수 있어 쓰지 않는다. 짝이 맞지 않으면(예전 에이전트) 적용하지 않는다."""
+    if len(page_urls) != len(pages):
+        return False
+    for page, url in zip(pages, page_urls):
+        host = (urlsplit(url).hostname or "").rstrip(".")
+        for hosts, notice in _TAKEDOWN_NOTICES:
+            if (any(host == s or host.endswith("." + s) for s in hosts)
+                    and notice.search(page) and _VIOLATION.search(page)):
+                return True
     return False
 
 
@@ -138,7 +142,7 @@ class Engine:
 
     def decide_threat(self, req: ThreatRequest) -> ThreatDecision:
         opts = {t.value: THREAT_CRITERIA[t] for t in Threat}
-        state = req.model_dump()
+        state = req.model_dump(exclude={"page_urls"})  # 화면별 주소는 코드 규칙만 쓴다(Jev 입력은 그대로)
         provider, res, ms = self._choose(state, THREAT_QUESTION, opts)
         prob = res.probabilities.get(res.choice, 0.0)
         if res.choice == Threat.ILLEGAL_GAMBLING:
@@ -162,7 +166,7 @@ class Engine:
                 override={"reason": "shortener_warning",
                           "original": {"threat": res.choice, "probability": prob, "provider": provider}},
             )
-        if res.choice in (Threat.UNKNOWN, Threat.BENIGN) and link_takedown(req.pages, req.domains):
+        if res.choice in (Threat.UNKNOWN, Threat.BENIGN) and link_takedown(req.pages, req.page_urls):
             # 단축·호스팅 서비스가 불법·유해 내용이나 약관 위반으로 이 링크를 정지했다(xzx.kr·TinyURL·크리에이터링크 등):
             # 화면은 서비스의 안내뿐이라 모델은 정상으로 보기 쉽지만, 운영자의 정지 조치를 근거로 피싱으로 보고 담당자 검토로 보낸다
             return ThreatDecision(
