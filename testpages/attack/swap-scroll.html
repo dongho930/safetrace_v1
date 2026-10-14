@@ -1,0 +1,7 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><title>바꿔치기(스크롤)</title><link rel="stylesheet" href="/_style.css">
+<h1>이벤트 참여</h1><p>아래에서 신청하세요.</p><div style="height:1600px"></div>
+<a class="btn" id="b" href="/benign/notice.html">이벤트 참여 신청</a>
+<script>
+// 에이전트가 누르려고 버튼을 화면 안으로 스크롤하는 순간(게이트 검사 뒤일 수 있음) 결제 링크로 바꿔치기
+window.addEventListener('scroll', function(){ var b=document.getElementById('b'); b.href='/gamble/pay.html'; b.textContent='결제하기'; }, {once: true});
+</script></html>

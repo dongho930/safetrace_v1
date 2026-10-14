@@ -271,3 +271,67 @@ export function buildOverlay(events: EvidenceEvent[], seq: number | null): Overl
   }
   return marks.length ? { w, h, marks: marks.slice(0, MAX_MARKS) } : null;
 }
+
+// ── 클릭 표시: 게이트를 통과한 클릭의 창 기준 상자(에이전트가 누르기 직전에 잼, 화면 1280×800 픽셀)와 시각 ─────────────
+// 실시간 화면과 녹화 재생 위에 커서·클릭 물결로 그린다. 녹화 파일은 바꾸지 않는다.
+export const SCREEN_W = 1280;
+export const SCREEN_H = 800;
+export type ClickPoint = { x: number; y: number; w: number; h: number };
+// 기록 값(믿지 않음): 정수 4개이고 화면 안의 상자만
+export function clickPoint(v: unknown): ClickPoint | null {
+  const r = box(v, SCREEN_W, SCREEN_H);
+  return r ? { x: r[0], y: r[1], w: r[2], h: r[3] } : null;
+}
+// JPEG 머리에서 [폭, 높이]. JPEG 가 아니거나 앞부분에서 찾지 못하면 null(실시간 프레임을 디코드하기 전에 크기를 본다)
+export function jpegSize(b: Uint8Array): [number, number] | null {
+  if (b.length < 4 || b[0] !== 0xff || b[1] !== 0xd8) return null;
+  let i = 2;
+  while (i + 8 < b.length) {
+    if (b[i] !== 0xff) return null;
+    const m = b[i + 1];
+    if (m === 0xff) {
+      i += 1; // 채움 바이트
+      continue;
+    }
+    if (m === 0x01 || (m >= 0xd0 && m <= 0xd8)) {
+      i += 2; // 길이 없는 표식
+      continue;
+    }
+    const len = (b[i + 2] << 8) | b[i + 3];
+    if (len < 2) return null;
+    // SOF(프레임 시작): 정밀도 1바이트 뒤 높이·폭
+    if ((m >= 0xc0 && m <= 0xc3) || (m >= 0xc5 && m <= 0xc7) || (m >= 0xc9 && m <= 0xcb) || (m >= 0xcd && m <= 0xcf)) {
+      return [(b[i + 7] << 8) | b[i + 8], (b[i + 5] << 8) | b[i + 6]];
+    }
+    i += 2 + len;
+  }
+  return null;
+}
+
+// 실시간 화면 통로로 온 클릭 표시 {"click":[x,y,폭,높이]}(에이전트가 보낸 값, 믿지 않음)
+export function liveClick(text: string): ClickPoint | null {
+  try {
+    const v: unknown = JSON.parse(text);
+    return v && typeof v === "object" && !Array.isArray(v) ? clickPoint((v as { click?: unknown }).click) : null;
+  } catch {
+    return null;
+  }
+}
+export type RecClick = ClickPoint & { t: number };
+// 녹화 위 클릭: 게이트 기록의 클릭 시각(at) - 녹화 0초 시각(t0) = 영상 시간(초). 둘 다 에이전트 쪽 같은 시계(epoch 초)
+export function recordingClicks(events: EvidenceEvent[], rec: EvidenceEvent | undefined): RecClick[] {
+  const t0 = rec?.data.t0;
+  if (!rec || typeof t0 !== "number" || !Number.isFinite(t0)) return [];
+  const out: RecClick[] = [];
+  for (const e of events) {
+    // 같은 조사(하위 조사 번호)의 클릭만: 하위 조사는 녹화가 따로 있다
+    if (e.kind !== "gate" || e.data.allowed !== true || e.data.sub !== rec.data.sub) continue;
+    const p = clickPoint(e.data.point);
+    const at = e.data.at;
+    if (!p || typeof at !== "number" || !Number.isFinite(at)) continue;
+    const t = at - t0;
+    if (t >= 0 && t < 3600) out.push({ ...p, t });
+    if (out.length >= 200) break;
+  }
+  return out.sort((a, b) => a.t - b.t);
+}

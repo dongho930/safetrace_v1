@@ -34,7 +34,7 @@ from ..live import CHANNEL as LIVE_CHANNEL
 from ..live import END as LIVE_END
 from ..live import WATCH_KEY as LIVE_WATCH_KEY
 from ..live import WATCH_TTL_S as LIVE_WATCH_TTL_S
-from ..live import LocalLive
+from ..live import ForwardLimit, LocalLive
 from ..masking import mask_secrets
 from ..netguard import BlockedURL, parse_url
 from ..preview import preview_image
@@ -626,7 +626,8 @@ def case_file(case_id: str, name: str, p: Annotated[Principal, Depends(need("vie
 @app.websocket("/api/cases/{case_id}/live")
 async def case_live(ws: WebSocket, case_id: str):
     """실시간 화면(보기용, 증거 아님). 브라우저 WebSocket 은 인증 헤더를 못 붙이고 주소의 토큰은 접속 기록에 남으므로,
-    연결 뒤 첫 메시지 {"token": ...} 로 인증한다. 이후 서버는 JPEG 프레임(바이너리)만 보낸다."""
+    연결 뒤 첫 메시지 {"token": ...} 로 인증한다. 이후 서버는 JPEG 프레임과 클릭 표시({"click": [x, y, 폭, 높이]} JSON)를
+    바이너리로 그대로 보낸다(에이전트가 보낸 값이라 콘솔이 다시 검사한다)."""
     await ws.accept()
     try:
         msg = await asyncio.wait_for(ws.receive_json(), 5)
@@ -659,6 +660,8 @@ async def case_live(ws: WebSocket, case_id: str):
         except (WebSocketDisconnect, RuntimeError):
             return
 
+    limit = ForwardLimit()  # 너무 크거나 몰려오는 메시지는 넘기지 않는다
+
     async def forward_local():
         async with _live_local.subscribe(case_id) as q:
             while True:
@@ -670,7 +673,8 @@ async def case_live(ws: WebSocket, case_id: str):
                     continue
                 if frame == LIVE_END:
                     return
-                await ws.send_bytes(frame)
+                if limit.ok(frame):
+                    await ws.send_bytes(frame)
 
     async def forward_redis():
         import redis.asyncio as aioredis  # noqa: PLC0415
@@ -694,7 +698,8 @@ async def case_live(ws: WebSocket, case_id: str):
                     continue
                 if m["data"] == LIVE_END:
                     return
-                await ws.send_bytes(m["data"])
+                if isinstance(m["data"], bytes) and limit.ok(m["data"]):
+                    await ws.send_bytes(m["data"])
         finally:
             watch.cancel()
             await ps.aclose()
