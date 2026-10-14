@@ -41,7 +41,7 @@ python tools/eval_agent.py compare var/eval/A.jsonl var/eval/B.jsonl
 
 - `data/eval_set.csv`: 55개 URL = 시험 페이지 11 · 정상 사이트 16 · KISA 실제 신고 URL 28(2024-12 자료 11 + 2023 자료 10(#24) + 2024 자료 7(`feat/more-real-sites`: 중국 도박 복제 2, 단축·호스팅 서비스의 차단 화면 5)). 예전 문서의 '49개'는 실제로 48개였다.
 - KISA 원본은 공공데이터포털 `한국인터넷진흥원_피싱사이트_20241231`(131,752개, 연 1회 갱신, 로그인 없이 내려받음, git 밖 `var/sources/`). 대부분 이미 사라졌으니, 보탤 때는 `python tools/probe_urls.py 후보.txt --out var/probe/이름.jsonl`(에이전트 컨테이너 안에서 검문 프록시를 거쳐 GET만)로 살아 있는지 먼저 확인하고 정답을 정할 수 있는 것만 넣는다. 2024 자료 직접 도메인 5,919개 중 내용 있는 응답은 106개였고 대부분 정상·주차·청첩장·부고장 페이지로 바뀌어 정답을 정할 수 없었다.
-- **오늘의 실사이트 세트**(고정 세트와 따로): OpenPhish 무료 피드(`https://openphish.com/feed.txt` → GitHub, 6~12시간 갱신)를 받아 `probe_urls.py` 로 확인하고, 브랜드 사칭·입력 화면이 확인된 것만 `var/fresh/<출처>_<날짜>.csv`(그룹 `fresh`, 정답 `malicious`)에 넣어 **같은 날** `--set` 으로 3회 평가한다. 봇 확인 화면·학생용 클론·내용 불명은 뺀다. 며칠이면 사라져 날을 달리한 비교에는 쓰지 않고, 공개 저장소에 살아 있는 피싱 주소를 올리지 않으려고 목록은 git 밖에 둔다.
+- **오늘의 실사이트 세트**(고정 세트와 따로, 사용자 결정 2026-10-14: **하루 한 번** 진행해 누적, 3회 평가): OpenPhish 무료 피드(`https://openphish.com/feed.txt` → GitHub, 6~12시간 갱신)에서 그날 살아 있는 피싱 사이트를 고른다. `python tools/fresh_set.py collect`(피드 → 이전 회차 주소·호스트 빼기 → 검문 프록시 접속 확인 → `var/fresh/<날짜>/candidates.csv` 에 Y/?/N 제안) → candidates.csv 의 keep 을 직접 정함(브랜드 사칭·입력 화면이 확인된 것만 Y, 봇 확인 화면·학생용 클론·내용 불명은 N) → `build`(→ `var/fresh/openphish_<날짜>.csv`) → `eval`(3회, 약 1시간 40분, 그동안 콘솔에 사건을 넣지 않음) → `summary`(누적, 주소 없이 숫자만 → `var/fresh/SUMMARY.md`). 며칠이면 사라져 날을 달리한 비교에는 쓰지 않고, 공개 저장소에 살아 있는 피싱 주소를 올리지 않으려고 목록은 git 밖에 둔다. 발표·기획서에는 누적 숫자만 옮긴다.
 - 평가가 도는 동안 콘솔에 사건을 넣지 않는다. 에이전트 컨테이너의 CPU 2개를 나눠 써서 시간 초과가 난다.
 - 메모리가 적은 PC에서는 백그라운드 평가 프로세스가 죽을 수 있다. 컨테이너 안 프로세스는 계속 돌므로 결과는 컨테이너의 `/tmp/eval/out.jsonl`에서 회수한다.
 - `testpages/server.py`를 고치면 `testpages` 컨테이너를 재시작한다.
