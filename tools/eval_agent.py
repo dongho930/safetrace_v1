@@ -224,13 +224,14 @@ def run_host(args) -> None:
     local = out_dir / f"{name}.jsonl"
     meta = {"meta": True, "started": started.isoformat(timespec="minutes"), "repeat": args.repeat,
             "group": args.group, "label": args.label, "git": _git()}
-    subprocess.run(dc + ["exec", "-T", "agent", "sh", "-c", f"rm -rf {IN_BOX} && mkdir -p {IN_BOX}"],
+    subprocess.run(dc + ["exec", "-T", "agent", "sh", "-c", f"rm -rf {IN_BOX} && mkdir -p {IN_BOX}/bin"],
                    cwd=ROOT, check=True)
-    for src in (Path(__file__), ROOT / args.set):
-        subprocess.run(dc + ["cp", str(src), f"agent:{IN_BOX}/{src.name}"], cwd=ROOT, check=True,
-                       capture_output=True)
-    cmd = ["python", "-u", f"{IN_BOX}/eval_agent.py", "run", "--inside", "--repeat", str(args.repeat),
-           "--set", f"{IN_BOX}/{Path(args.set).name}", "--out", f"{IN_BOX}/out.jsonl"]
+    # 도구와 평가 목록을 다른 자리·고정 이름에 둔다(목록 파일 이름이 도구와 같아도 도구를 덮어써 실행되지 않게)
+    tool, data = f"{IN_BOX}/bin/eval_agent.py", f"{IN_BOX}/set.csv"
+    subprocess.run(dc + ["cp", str(Path(__file__)), f"agent:{tool}"], cwd=ROOT, check=True, capture_output=True)
+    subprocess.run(dc + ["cp", str(ROOT / args.set), f"agent:{data}"], cwd=ROOT, check=True, capture_output=True)
+    cmd = ["python", "-u", tool, "run", "--inside", "--repeat", str(args.repeat),
+           "--set", data, "--out", f"{IN_BOX}/out.jsonl"]
     if args.group:
         cmd += ["--group", args.group]
     try:
