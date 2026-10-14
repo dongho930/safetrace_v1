@@ -51,6 +51,24 @@ def shortener_warning(pages: list[str]) -> bool:
     return any(_DANGER.search(p) and _NO_REDIRECT.search(p) for p in pages)
 
 
+# 단축·호스팅 서비스가 링크를 정지·차단한 안내 화면: 차단 안내 문구와 그 이유(불법·유해·약관 위반·영구 정지)가
+# 한 화면에 함께 있다. 실제로 관찰한 문구만 넣는다(KISA 신고 URL, 2026-10-14)
+_TAKEDOWN = re.compile(r"단축\s?URL\s?접속\s?차단\s?안내"  # MU-star(xzx.kr·muz.so) 한국어 화면
+                       r"|URL\s+Access\s+Suspended"  # MU-star 영어 화면
+                       r"|유해\s?사이트\s?접속\s?차단\s?안내"  # 크리에이터링크 "불법 / 유해 사이트 접속 차단 안내"
+                       r"|영구\s?정지\s?되었거나\s?리디렉트가\s?차단"  # tny.kr
+                       r"|URL\s+Terminated"  # TinyURL
+                       r"|link\s+(?:bol\s+)?zablokovan", re.I)  # SDU(5du.pl) "Tento link bol zablokovaný"
+_VIOLATION = re.compile(r"불법|유해|약관\S{0,2}\s?위반|영구\s?정지"
+                        r"|illegal|harmful|violation\s+of\s+(?:our\s+|the\s+)?terms"
+                        r"|porušovani\w*\s+podmienok", re.I)
+
+
+def link_takedown(pages: list[str]) -> bool:
+    """단축·호스팅 서비스가 불법·유해 내용이나 약관 위반으로 이 링크를 정지·차단한 안내 화면을 거쳤는지."""
+    return any(_TAKEDOWN.search(p) and _VIOLATION.search(p) for p in pages)
+
+
 class NoProviderAvailable(Exception):
     pass
 
@@ -131,6 +149,15 @@ class Engine:
                 choice=Threat.PHISHING.value, probabilities={Threat.PHISHING.value: 1.0}, confidence=None,
                 model=res.model, provider="shortener_warning", latency_ms=ms, threat=Threat.PHISHING, hold=True,
                 override={"reason": "shortener_warning",
+                          "original": {"threat": res.choice, "probability": prob, "provider": provider}},
+            )
+        if res.choice in (Threat.UNKNOWN, Threat.BENIGN) and link_takedown(req.pages):
+            # 단축·호스팅 서비스가 불법·유해 내용이나 약관 위반으로 이 링크를 정지했다(xzx.kr·TinyURL·크리에이터링크 등):
+            # 화면은 서비스의 안내뿐이라 모델은 정상으로 보기 쉽지만, 운영자의 정지 조치를 근거로 피싱으로 보고 담당자 검토로 보낸다
+            return ThreatDecision(
+                choice=Threat.PHISHING.value, probabilities={Threat.PHISHING.value: 1.0}, confidence=None,
+                model=res.model, provider="link_takedown", latency_ms=ms, threat=Threat.PHISHING, hold=True,
+                override={"reason": "link_takedown",
                           "original": {"threat": res.choice, "probability": prob, "provider": provider}},
             )
         dest = lookalike_destination([b.host for b in req.blocked_destinations])
