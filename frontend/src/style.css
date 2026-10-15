@@ -396,3 +396,4 @@ button.reason:hover { border-color: var(--line-strong); }
 .linkish { background: none; border: 0; padding: 0; color: var(--primary); text-decoration: underline; cursor: pointer; font: inherit; }
 .row-badge { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 4px; font-size: 11px; font-weight: 700; color: var(--primary); background: var(--primary-tint); }
 .source-filter { width: auto; padding-right: 24px; }
+.sub-h { margin: 14px 0 4px; font-size: 13px; font-weight: 700; color: var(--ink-2); }

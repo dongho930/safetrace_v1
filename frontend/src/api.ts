@@ -173,6 +173,68 @@ export const createCase = (url: string, source: string) =>
     body: JSON.stringify({ url, source }),
     headers: { "Idempotency-Key": crypto.randomUUID() },
   });
+// 사건 간 연결(related-sites PR 5). 값은 조사 대상 페이지에서 온 글자라 정해진 모양만 남긴다
+export type CaseBrief = { id: string; url: string; status: string; threat: string | null; verdict: string | null };
+export type CaseLinks = { parent: CaseBrief | null; children: (CaseBrief & { auto: boolean })[]; shared: { site: string; hosts: string[]; roles: string[]; cases: CaseBrief[] }[] };
+export type GroupSite = { site: string; hosts: string[]; threat: string | null; blocked: boolean; cases: number; candidate: { case_id: string; host: string } | null };
+export type RelatedGroup = { key: string; cases: CaseBrief[]; sites: GroupSite[]; threat_sites: number; open_threat_sites: number };
+const brief = (x: unknown): CaseBrief[] =>
+  isObj(x) && typeof x.id === "string" && typeof x.url === "string" && typeof x.status === "string"
+    ? [{ id: x.id.slice(0, 36), url: x.url.slice(0, 2000), status: x.status.slice(0, 24), threat: strOr(x.threat)?.slice(0, 32) ?? null, verdict: strOr(x.verdict)?.slice(0, 16) ?? null }]
+    : [];
+export const getLinks = async (id: string): Promise<CaseLinks> => {
+  const v = await req<unknown>(`/api/cases/${encodeURIComponent(id)}/links`);
+  const o = isObj(v) ? v : {};
+  return {
+    parent: brief(o.parent)[0] ?? null,
+    children: list(o.children).slice(0, 50).flatMap((x) => brief(x).map((b) => ({ ...b, auto: isObj(x) && x.auto === true }))),
+    shared: list(o.shared)
+      .slice(0, 50)
+      .flatMap((g) => (isObj(g) && typeof g.site === "string" ? [{ site: g.site.slice(0, 253), hosts: strs(g.hosts).slice(0, 10), roles: strs(g.roles).slice(0, 5), cases: list(g.cases).slice(0, 50).flatMap(brief) }] : [])),
+  };
+};
+export const listGroups = async (): Promise<{ groups: RelatedGroup[]; truncated: boolean; ms: number }> => {
+  const v = await req<unknown>("/api/related-groups?min=2&limit=50");
+  const o = isObj(v) ? v : {};
+  const groups = list(o.groups)
+    .slice(0, 50)
+    .flatMap((g): RelatedGroup[] =>
+      isObj(g) && typeof g.key === "string" && /^[0-9a-f]{16}$/.test(g.key)
+        ? [{
+            key: g.key,
+            cases: list(g.cases).slice(0, 200).flatMap(brief),
+            sites: list(g.sites)
+              .slice(0, 300)
+              .flatMap((x): GroupSite[] =>
+                isObj(x) && typeof x.site === "string"
+                  ? [{
+                      site: x.site.slice(0, 253),
+                      hosts: strs(x.hosts).slice(0, 10),
+                      threat: strOr(x.threat)?.slice(0, 32) ?? null,
+                      blocked: x.blocked === true,
+                      cases: typeof x.cases === "number" ? x.cases : 0,
+                      candidate: isObj(x.candidate) && typeof x.candidate.case_id === "string" && typeof x.candidate.host === "string" ? { case_id: x.candidate.case_id.slice(0, 36), host: x.candidate.host.slice(0, 253) } : null,
+                    }]
+                  : [],
+              ),
+            threat_sites: typeof g.threat_sites === "number" ? g.threat_sites : 0,
+            open_threat_sites: typeof g.open_threat_sites === "number" ? g.open_threat_sites : 0,
+          }]
+        : [],
+    );
+  return { groups, truncated: o.truncated === true, ms: typeof o.ms === "number" ? o.ms : 0 };
+};
+export async function downloadGroupCsv(key: string): Promise<void> {
+  const r = await send(`/api/related-groups/${encodeURIComponent(key)}.csv`, {});
+  const name = /filename="([^"]+)"/.exec(r.headers.get("Content-Disposition") ?? "")?.[1] ?? `safetrace-related-${key.slice(0, 8)}.csv`;
+  const url = URL.createObjectURL(await r.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
 // 연관 후보 하나를 새 사건으로 접수(조사관 이상). 이미 만든 후보면 그 사건을 돌려준다
 export const createRelated = async (id: string, url: string) => {
   const c = cleanCase(await req<unknown>(`/api/cases/${encodeURIComponent(id)}/related`, { method: "POST", body: JSON.stringify({ url }) }));

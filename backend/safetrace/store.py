@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import (JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine,
-                        select)
+                        delete, select)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
@@ -77,6 +77,22 @@ class CaseLink(Base):
     target_host: Mapped[str] = mapped_column(String(253), index=True)  # 하위 조사가 도착한 호스트(없으면 후보 호스트)
     auto: Mapped[bool] = mapped_column(Boolean, default=False)
     created_by: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CaseSite(Base):
+    """끝난 사건에서 나온 호스트(시작·최종·경유·링크·후보의 도착). 같은 site 가 나온 사건끼리 잇는다(related-sites PR 5).
+    site 는 이을 열쇠: 보통 등록 도메인, 공용 호스팅(generic)은 호스트 그대로. 단축 서비스·공식·흔한 대형 사이트는 쓰지 않는다."""
+
+    __tablename__ = "case_sites"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), index=True)
+    host: Mapped[str] = mapped_column(String(253), index=True)
+    site: Mapped[str] = mapped_column(String(253), index=True)
+    role: Mapped[str] = mapped_column(String(16))  # start | final | via | link | candidate_final
+    threat: Mapped[str | None] = mapped_column(String(32))
+    blocked: Mapped[bool] = mapped_column(Boolean, default=False)
+    generic: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -204,6 +220,19 @@ class Store:
             rows = s.execute(select(CaseLink, Case).join(Case, Case.id == CaseLink.child_id)
                              .where(CaseLink.parent_id == parent_id).order_by(CaseLink.created_at).limit(limit))
             return [(link, c) for link, c in rows]
+
+    def write_sites(self, case_id: str) -> int:
+        """끝난 사건의 연결 호스트를 다시 쓴다(지우고 넣기라 여러 번 불러도 같다). 반환: 쓴 줄 수."""
+        from .related import case_sites  # related 는 이 모듈을 쓰지 않는다(순환 없음)
+
+        with self.session() as s, s.begin():
+            c = s.get(Case, case_id)
+            if c is None or c.status not in TERMINAL:
+                return 0
+            rows = case_sites(c.url, c.final_url, c.threat, c.candidates)
+            s.execute(delete(CaseSite).where(CaseSite.case_id == case_id))
+            s.add_all(CaseSite(case_id=case_id, **r) for r in rows)
+        return len(rows)
 
     def set_head(self, case_id: str, seq: int, hash_: str) -> None:
         """head 가 비어 있는 사건에 서명 서비스의 head 를 채운다(닫기에 실패했다가 나중에 다시 닫아 받은 값)."""

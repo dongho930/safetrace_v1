@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
-from .decision.brands import SHORTENER_HOSTS, on_domain
+from .decision.brands import SHARED_HOSTING, SHORTENER_HOSTS, on_domain
 
 AUTO_ACTOR = "system:related"  # 자동 생성 주체(사람 계정·자동화 토큰 이름과 겹치지 않는 내부 이름)
 _NOT_THREAT = (None, "benign", "unknown")
@@ -63,3 +63,99 @@ def auto_targets(parent_source: str, candidates: list, *, enabled: bool, threat_
             out.append((c, "reputation" if c.get("reputation_match") is True and c.get("threat") in _NOT_THREAT
                         else "threat"))
     return out
+
+
+# ── 사건 간 연결(related-sites PR 5, §7) ─────────────────────────
+SITES_PER_CASE = 30  # 사건 하나에서 남기는 호스트
+
+
+def link_key(host: str) -> tuple[str, bool] | None:
+    """사건을 잇는 열쇠와 공용 호스팅 여부. 잇지 않는 호스트면 None.
+
+    - 단축 서비스는 잇지 않는다(같은 단축 서비스를 썼다고 같은 조직이 아니다)
+    - 공식 브랜드·사행사업자 도메인과 흔한 대형 사이트도 잇지 않는다(피싱 키트가 봇을 진짜 사이트로 보내거나 꾸밈으로 단다)
+    - 공용 호스팅은 하위 도메인이 다르면 다른 운영자라 호스트가 정확히 같을 때만, 나머지는 등록 도메인으로 잇는다"""
+    from .agent.candidates import GENERIC_SITES, _official, site_of  # 사이트 계산은 후보 고르기와 같게
+
+    h = (host or "").lower().rstrip(".")[:253]
+    if not h or on_domain(h, SHORTENER_HOSTS) or _official(h):
+        return None
+    if on_domain(h, SHARED_HOSTING):
+        return h, True
+    site = site_of(h)
+    return (None if site in GENERIC_SITES else (site, False))
+
+
+def case_sites(url: str, final_url: str | None, threat: dict | None, candidates: list | None) -> list[dict]:
+    """끝난 사건 하나에서 이을 호스트 목록 {host, site, role, threat, blocked, generic}. role: start | final | via | link |
+    candidate_final. 값은 조사 대상 페이지에서 온 것이라 길이를 자르고 정해진 모양으로만 만든다."""
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    main_threat = threat.get("threat") if isinstance(threat, dict) and isinstance(threat.get("threat"), str) else None
+
+    def add(u, role, th=None, blocked=False):
+        host = urlsplit(u).hostname if isinstance(u, str) and u else None
+        key = link_key(host or "")
+        if key is None or (host, role) in seen or len(out) >= SITES_PER_CASE:
+            return
+        seen.add((host, role))
+        out.append({"host": host[:253], "site": key[0][:253], "role": role,
+                    "threat": th[:32] if isinstance(th, str) else None, "blocked": blocked is True, "generic": key[1]})
+
+    add(url, "start", main_threat)
+    add(final_url, "final", main_threat)
+    for c in candidates if isinstance(candidates, list) else []:
+        if not isinstance(c, dict):
+            continue
+        role = "via" if c.get("source") == "via" else "link"
+        add(c.get("url"), role, c.get("threat") if c.get("sub") else None, c.get("blocked"))
+        if c.get("sub"):
+            add(c.get("final_url"), "candidate_final", c.get("threat"), c.get("blocked"))
+    return out
+
+
+def groups(case_sites_rows: list[tuple[str, str, bool]], min_cases: int = 2) -> list[set[str]]:
+    """(사건 id, 열쇠, 공용 호스팅) 목록을 열쇠로 이어(합집합 찾기) 사건이 min_cases 개 이상인 묶음."""
+    parent: dict[str, str] = {}
+
+    def find(x):
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    by_key: dict[str, str] = {}
+    for cid, key, _ in case_sites_rows:
+        find(cid)
+        if key in by_key:
+            parent[find(cid)] = find(by_key[key])
+        else:
+            by_key[key] = cid
+    out: dict[str, set[str]] = {}
+    for cid in parent:
+        out.setdefault(find(cid), set()).add(cid)
+    return [g for g in out.values() if len(g) >= min_cases]
+
+
+def backfill(store) -> int:
+    """종료된 사건 전부의 연결 호스트를 다시 쓴다(여러 번 돌려도 같은 결과). 반환: 쓴 사건 수."""
+    from sqlalchemy import select
+
+    from .store import TERMINAL, Case
+
+    with store.session() as s:
+        ids = list(s.scalars(select(Case.id).where(Case.status.in_(TERMINAL))))
+    for cid in ids:
+        store.write_sites(cid)
+    return len(ids)
+
+
+if __name__ == "__main__":
+    import sys
+
+    if sys.argv[1:] != ["backfill"]:
+        raise SystemExit("사용법: python -m safetrace.related backfill")
+    from .config import get_settings
+    from .store import Store
+
+    print(f"연결 호스트를 다시 쓴 사건: {backfill(Store(get_settings().database_url))}건")

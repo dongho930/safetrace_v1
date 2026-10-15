@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import hashlib
+import io
 import hmac
 import ipaddress
 import json
@@ -42,7 +44,7 @@ from ..netguard import BlockedURL, parse_url
 from ..preview import preview_image
 from ..ratelimit import FailureLimiter
 from ..signer.client import ChainAdmin, SignerError
-from ..store import TERMINAL, AuditLog, Case, CaseLink, CasePhase, Store, Verdict
+from ..store import TERMINAL, AuditLog, Case, CaseLink, CasePhase, CaseSite, Store, Verdict
 from ..store import now as now_utc
 
 log = logging.getLogger("safetrace.api")
@@ -184,6 +186,11 @@ def record_event(case_id: str, payload: dict) -> None:
     if not store.add_event(case_id, payload):
         store.audit("system", "event.rejected", case_id, f"status={str(payload.get('status'))[:24]}")
     elif payload.get("type") == "status" and payload.get("status") in TERMINAL:
+        try:
+            store.write_sites(case_id)  # 사건 간 연결(PR 5). 실패해도 원 사건 처리는 계속
+        except Exception as e:
+            log.exception("write sites failed")
+            store.audit("system", "case.sites_failed", case_id, type(e).__name__)
         _auto_related(case_id)
 
 
@@ -715,6 +722,139 @@ def create_related(case_id: str, body: RelatedIn, response: Response,
     if not created:
         response.status_code = 200
     return _case_detail(child)
+
+
+# ── 사건 간 연결(related-sites PR 5) ─────────────────────────
+LINKS_MAX = 50
+GROUP_CASES_MAX, GROUP_SITES_MAX = 500, 5000  # 묶음 계산 범위(최근 종료 사건)·호스트 줄 상한
+_GROUP_KEY = re.compile(r"^[0-9a-f]{16}$")
+
+
+def _briefs(ids: list[str]) -> dict[str, dict]:
+    """사건 요약(id·신고 URL·상태·AI 위협 유형·담당자 판정). 연결 목록·묶음에 쓴다."""
+    if not ids:
+        return {}
+    with store.session() as s:
+        cases = list(s.scalars(select(Case).where(Case.id.in_(ids))))
+    latest = verdicts.latest_for(store, ids)
+    return {c.id: {"id": c.id, "url": c.url, "status": c.status,
+                   "threat": c.threat.get("threat") if isinstance(c.threat, dict) else None,
+                   "verdict": latest[c.id].decision if c.id in latest else None} for c in cases}
+
+
+@app.get("/api/cases/{case_id}/links")
+def case_links(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]):
+    """연결된 사건: 부모·자식(연관 후보로 만든 사건)과, 같은 사이트가 나온 다른 사건(사이트별, 최대 50건)."""
+    c = _get_case(case_id)
+    parent = store.parents_for([c.id]).get(c.id)
+    kids = store.children_of(c.id, limit=LINKS_MAX)
+    with store.session() as s:
+        keys = set(s.scalars(select(CaseSite.site).where(CaseSite.case_id == c.id)))
+        rows = s.execute(select(CaseSite).join(Case, Case.id == CaseSite.case_id)
+                         .where(CaseSite.site.in_(keys), CaseSite.case_id != c.id)
+                         .order_by(Case.created_at.desc()).limit(GROUP_SITES_MAX)).scalars().all() if keys else []
+    shared: dict[str, dict] = {}
+    others: list[str] = []
+    for r in rows:
+        if r.case_id not in others:
+            if len(others) >= LINKS_MAX:
+                continue
+            others.append(r.case_id)
+        g = shared.setdefault(r.site, {"site": r.site, "hosts": set(), "roles": set(), "cases": []})
+        g["hosts"].add(r.host)
+        g["roles"].add(r.role)
+        if r.case_id not in g["cases"]:
+            g["cases"].append(r.case_id)
+    info = _briefs([*others, *([parent[0].parent_id] if parent else []), *(k.id for _, k in kids)])
+    return {
+        "parent": info.get(parent[0].parent_id) if parent else None,
+        "children": [{**info[k.id], "auto": link.auto} for link, k in kids if k.id in info],
+        "shared": [{"site": g["site"], "hosts": sorted(g["hosts"])[:10], "roles": sorted(g["roles"]),
+                    "cases": [info[x] for x in g["cases"] if x in info]} for g in shared.values()],
+    }
+
+
+def _related_groups(min_cases: int) -> tuple[list[dict], bool]:
+    """최근 종료 사건(최대 500)에서 같은 사이트로 이어지는 사건 묶음. 반환: (묶음, 계산 범위를 잘랐는지)."""
+    with store.session() as s:
+        recent = list(s.scalars(select(Case.id).where(Case.status.in_(TERMINAL))
+                                .order_by(Case.created_at.desc()).limit(GROUP_CASES_MAX + 1)))
+        truncated = len(recent) > GROUP_CASES_MAX
+        recent = recent[:GROUP_CASES_MAX]
+        rows = list(s.scalars(select(CaseSite).where(CaseSite.case_id.in_(recent)).order_by(CaseSite.id)
+                              .limit(GROUP_SITES_MAX + 1))) if recent else []
+    if len(rows) > GROUP_SITES_MAX:
+        truncated, rows = True, rows[:GROUP_SITES_MAX]
+    found = related.groups([(r.case_id, r.site, r.generic) for r in rows], min_cases)
+    by_case: dict[str, list[CaseSite]] = {}
+    for r in rows:
+        by_case.setdefault(r.case_id, []).append(r)
+    info = _briefs([cid for g in found for cid in g])
+    out = []
+    for g in found:
+        sites: dict[str, dict] = {}
+        for cid in g:
+            for r in by_case.get(cid, []):
+                x = sites.setdefault(r.site, {"site": r.site, "hosts": set(), "threat": None, "blocked": False,
+                                              "cases": set(), "candidate": None})
+                x["hosts"].add(r.host)
+                x["cases"].add(cid)
+                if r.threat and r.threat not in ("benign", "unknown"):
+                    x["threat"] = r.threat
+                x["blocked"] = x["blocked"] or r.blocked
+                if r.role in ("via", "link") and x["candidate"] is None:
+                    x["candidate"] = {"case_id": cid, "host": r.host}
+        key = hashlib.sha256("|".join(sorted(sites)).encode()).hexdigest()[:16]
+        listed = sorted(sites.values(), key=lambda x: (-len(x["cases"]), x["site"]))
+        out.append({
+            "key": key,
+            "cases": [info[c] for c in sorted(g) if c in info],
+            "sites": [{"site": x["site"], "hosts": sorted(x["hosts"])[:10], "threat": x["threat"],
+                       "blocked": x["blocked"], "cases": len(x["cases"]), "candidate": x["candidate"]} for x in listed],
+            "threat_sites": sum(1 for x in listed if x["threat"]),
+            "open_threat_sites": sum(1 for x in listed if x["threat"] and not x["blocked"]),
+        })
+    out.sort(key=lambda g: (-len(g["cases"]), g["key"]))
+    return out, truncated
+
+
+@app.get("/api/related-groups")
+def related_groups(p: Annotated[Principal, Depends(need("viewer"))], min: int = Query(2, ge=2, le=50),  # noqa: A002
+                   limit: int = Query(50, ge=1, le=50)):
+    """연관 묶음: 같은 사이트로 이어지는 사건들(단축 서비스·공식·흔한 대형 사이트로는 잇지 않고, 공용 호스팅은 호스트가
+    같을 때만). 계산 범위(최근 종료 사건 500건·호스트 5,000줄)를 넘으면 잘라서 truncated."""
+    t0 = time.monotonic()
+    groups, truncated = _related_groups(min)
+    return {"groups": groups[:limit], "truncated": truncated, "ms": round((time.monotonic() - t0) * 1000)}
+
+
+def _csv_cell(v: object) -> str:
+    """CSV 칸: 페이지가 정한 글자가 표 계산 프로그램에서 수식으로 읽히지 않게 수식 시작 문자 앞에 ' 를 붙인다(CWE-1236)."""
+    s = "" if v is None else str(v)
+    return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
+
+
+@app.get("/api/related-groups/{group_key}.csv")
+def related_group_csv(group_key: str, p: Annotated[Principal, Depends(need("investigator"))]):
+    """연관 묶음 하나의 사이트·사건 표(조사관 이상, 감사로그). 묶음이 바뀌었으면 404(목록을 새로 받는다)."""
+    if not _GROUP_KEY.match(group_key):
+        raise HTTPException(404, "not found")
+    groups, _ = _related_groups(2)
+    g = next((x for x in groups if x["key"] == group_key), None)
+    if g is None:
+        raise HTTPException(404, "묶음이 바뀌었습니다. 연관 묶음 목록을 다시 불러오세요")
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["구분", "사이트", "호스트", "AI 판단", "이미 차단됨", "사건 수", "사건 id", "신고 URL", "사건 상태", "담당자 판정"])
+    for x in g["sites"]:
+        w.writerow([_csv_cell(v) for v in ("사이트", x["site"], " ".join(x["hosts"]), x["threat"], x["blocked"], x["cases"],
+                                           "", "", "", "")])
+    for c in g["cases"]:
+        w.writerow([_csv_cell(v) for v in ("사건", "", "", c["threat"], "", "", c["id"], c["url"], c["status"], c["verdict"])])
+    store.audit(p.name, "related.export", None, f"group={group_key} cases={len(g['cases'])} sites={len(g['sites'])}")
+    name = f"safetrace-related-{now_utc().strftime('%Y%m%d')}-{group_key[:8]}.csv"
+    return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 # ── 담당자 판정 ─────────────────────────────────────────
