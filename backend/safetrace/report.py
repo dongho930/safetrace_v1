@@ -92,6 +92,18 @@ def _ai(threat: dict | None) -> dict | None:
             "model": threat.get("model")}
 
 
+# 회선 차단은 '추정'이다: 이름으로 연결하면 끊기고 다른 이름으로는 응답하는 동작을 조사 대상 서버가 흉내 낼 수 있다(Codex 지적)
+BLOCKED_KO = "회선 차단 추정"
+
+
+def related_opinion(r: dict) -> str:
+    """연관 사이트 표의 AI 의견 칸."""
+    if r.get("error"):
+        return "조사 실패"
+    return (f"{r.get('threat_ko') or '-'} ({_pct(r.get('probability'))})" + (" · 보류" if r.get("hold") else "")
+            + (f" · {BLOCKED_KO}" if r.get("blocked") else ""))
+
+
 def _override_ko(o: object) -> str | None:
     """코드 규칙이 모델 판단을 바꾼 이유(콘솔 labels.ts overrideLabel 과 같은 문구). 기록 값은 글자로만 읽는다."""
     if not isinstance(o, dict):
@@ -178,6 +190,7 @@ def build(pkg: dict, records: list[dict]) -> dict:
                         "hold": bool(r.get("hold") or t.get("hold")),
                         "reputation_match": bool(r.get("reputation_match")),
                         "reputation_unchecked": bool(r.get("reputation_unchecked")),
+                        "blocked": r.get("blocked") is True,
                         "status": r.get("status"), "error": bool(c.get("error"))})
     integ = pkg["integrity"]
     return {
@@ -407,8 +420,7 @@ def render_pdf(rep: dict, evidence_dir: Path) -> bytes:
         out.append(P(_t(f"페이지에서 찾은 연관 후보 {rel['found']}개 중 {len(rel['investigated'])}개를 같은 안전 조건으로 조사했다."), small))
         data = [[P("주소", key), P("AI 의견", key), P("외부 평판", key)]]
         for r in rel["investigated"]:
-            op = ("조사 실패" if r["error"] else
-                  f"{r['threat_ko'] or '-'} ({_pct(r['probability'])})" + (" · 보류" if r["hold"] else ""))
+            op = related_opinion(r)
             rep_ = "위험 일치" if r["reputation_match"] else "미확인" if r["reputation_unchecked"] else "일치 없음"
             data.append([P(_t(r["url"]) + (f"<br/>→ {_t(r['final_url'])}" if r.get("final_url") and r["final_url"] != r["url"] else ""), base),
                          P(_t(op), base), P(_t(rep_), base)])

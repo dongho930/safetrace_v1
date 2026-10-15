@@ -44,7 +44,7 @@ _SCHEMA: dict[str, dict[str, object]] = {
     "browser": {"version": _STR},
     "navigation": {"final_url": _STR},
     "observe": {"title": _STR, "candidates": [_DICT], "forbidden": [_STR], "has_popup": _BOOL, "boxes": _DICT,
-                "text_excerpt": _STR, "text_sha256": _STR, "capture": _STR},
+                "text_excerpt": _STR, "text_sha256": _STR, "capture": _STR, "links_seen": _INT},
     "decision": {"choice": _STR, "probability": _PROB, "probabilities": _DICT, "provider": _STR, "model": _STR},
     "gate": {"action": _STR, "element": _STR, "allowed": _BOOL, "point": [_INT], "at": _NUM},
     "action": {"action": _STR, "element": _STR, "outcome": _STR, "result_url": _STR},
@@ -59,10 +59,11 @@ _SCHEMA: dict[str, dict[str, object]] = {
 }
 _ITEM = {  # 목록 안 사전의 필드
     "candidates": {"id": _STR, "text": _STR},
-    "found": {"url": _STR},
+    "found": {"url": _STR, "host": _STR, "source": _STR, "score": _INT, "text": _STR},
     "matches": {"url": _STR, "threatType": _STR},
     "results": {"sub": _INT, "url": _STR, "final_url": _STR, "threat": _STR, "probability": _PROB, "hold": _BOOL,
-                "status": _STR, "reason": _STR, "reputation_match": _BOOL, "reputation_unchecked": _BOOL},
+                "status": _STR, "reason": _STR, "reputation_match": _BOOL, "reputation_unchecked": _BOOL,
+                "blocked": _BOOL, "score": _INT, "text": _STR},
 }
 
 

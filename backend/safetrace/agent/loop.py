@@ -34,6 +34,7 @@ from ..evidence import EvidenceWriter
 from ..masking import mask_pii
 from ..proxy.egress import EGRESS_HEADER
 from . import netfilter
+from .candidates import TEXT_MAX
 from .candidates import select as select_candidates
 from .gate import Budget, ElementInfo, SafetyGate, classify_forbidden
 from .observe import CLOSE_POPUP_JS, COLLECT_JS, READ_ONE_JS, RECTS_JS
@@ -230,6 +231,34 @@ _PW_DEFAULT_TIMEOUT_MS = 30000  # Playwright 기본 제한(이 모듈은 따로 
 # 닿지 못하므로, 탐색 전체에 예산 + 여유의 강제 기한을 둔다. 정리(녹화 중지·브라우저 닫기)에도 제한을 둔다
 _HARD_GRACE_S = 15.0
 _CLEANUP_TIMEOUT_S = 10.0
+_PAGE_LINKS_MAX = 200  # 관찰 한 번에 받는 링크(COLLECT_JS 와 같은 상한)
+
+
+def _page_links(raw) -> list[dict]:
+    """COLLECT_JS 가 모은 링크(페이지가 정한 값)를 정해진 모양으로만 받는다: http·https 절대 주소 2048자 이하,
+    앵커 글자는 개인정보를 가린 뒤 80자. 보이는지 여부는 남기지만 고르는 데는 쓰지 않는다.
+    클릭 후보에서 막는 링크(결제·다운로드·로그인 등, gate.classify_forbidden)는 받지 않는다: 연관 후보로 골라 하위 조사가
+    그 주소를 열면 클릭 금지를 우회하게 된다(Codex 지적)."""
+    out = []
+    for x in raw if isinstance(raw, list) else []:
+        if len(out) >= _PAGE_LINKS_MAX:
+            break
+        if not isinstance(x, dict) or not isinstance(x.get("href"), str):
+            continue
+        href = x["href"]
+        if len(href) > 2048 or not href.startswith(("http://", "https://")):
+            continue
+        text = x.get("text") if isinstance(x.get("text"), str) else ""
+        info = ElementInfo.from_js({"tag": "a", "href": href, "text": text, "hasDownload": x.get("hasDownload") is True,
+                                    "inForm": x.get("inForm") is True})
+        if classify_forbidden(info):
+            continue
+        if x.get("imgOnly") is True and not text.strip():
+            # 글자 없는 이미지 링크는 무엇인지 모른다(이미지 '결제' 버튼일 수 있다). 클릭 후보로 OCR 을 거쳐 통과한 것만
+            # _note_links 가 클릭 후보 쪽에서 받는다
+            continue
+        out.append({"url": href, "text": mask_pii(text[:200])[:TEXT_MAX], "visible": x.get("visible") is True})
+    return out
 
 
 def _is_main_frame(req) -> bool:
@@ -268,8 +297,9 @@ class RunResult:
     threat: dict | None = None
     steps: int = 0
     nav_chain: list[str] = field(default_factory=list)
-    candidates_found: list[dict] = field(default_factory=list)  # 연관 후보 {url, host, source}(candidates.select)
-    links_found: list[str] = field(default_factory=list)  # 관찰한 화면의 링크 주소(외부 링크 후보의 원천)
+    candidates_found: list[dict] = field(default_factory=list)  # 연관 후보 {url, host, source, score, text}(candidates.select)
+    # 관찰한 화면의 링크 {url, text}(외부 링크 후보의 원천, 사건 전체 100개). text 는 개인정보를 가린 앵커 글자
+    links_found: list[dict] = field(default_factory=list)
     blocked_requests: int = 0
     forbidden_seen: list[str] = field(default_factory=list)
     blocked_destinations: list[dict] = field(default_factory=list)  # 열리지 않은 이동 목적지 {host, reason}
@@ -283,6 +313,7 @@ class _Observation:
     forbidden: list[str]
     evidence_seq: int
     state_key: str
+    links: list[dict] = field(default_factory=list)  # 화면의 모든 링크 {url, text}(판단 모델에는 보내지 않음)
 
 
 async def _bounded(aw, what: str):
@@ -532,11 +563,13 @@ class AgentRun:
             shot = await self._screenshot(page, "observe", full=True)
         boxes = boxes_from(root, rects, png_size(self.ev.file_path(shot)), cand_ids, len(forb_ids)) if shot else None
         text_hash = hashlib.sha256(raw.get("text", "").encode()).hexdigest()
+        links = _page_links(raw.get("links"))
         seq = self._record("observe", {
             "step": step, "url": page.url[:2048], "title": state.title,
             "candidates": [c.model_dump() for c in chosen],
             "forbidden": forbidden[:50], "has_popup": state.has_popup,
             "text_excerpt": text[:1500], "text_sha256": text_hash, "ocr_skipped": ocr_skipped,
+            "links_seen": len(links),
             **({"boxes": boxes} if shot and boxes else {}),
             **({"capture": "expanded"} if shot and expanded else {}),
         }, [shot] if shot else [])
@@ -544,7 +577,7 @@ class AgentRun:
         # (줄어들기만 하므로 끝이 있다), 페이지를 오가는 진짜 반복은 그대로 잡는다.
         opts = "|".join(sorted(action_options(state)))
         key = hashlib.sha256((page.url + "|" + "|".join(c.text for c in chosen) + "#" + opts).encode()).hexdigest()
-        return _Observation(state, infos, forbidden, seq, key)
+        return _Observation(state, infos, forbidden, seq, key, links)
 
     async def _capture_many(self, page: Page, need: list[tuple[int, str, ElementInfo]], until: float) -> list:
         """이미지 버튼들을 캡처한다(_capture_many_unpaused). 버튼을 찾아 위아래로 스크롤했다가 되돌리는 장면이
@@ -1126,12 +1159,17 @@ class AgentRun:
         self._collect_candidates()
 
     def _note_links(self, obs: _Observation):
-        """관찰한 화면의 링크 주소를 모은다(외부 링크 후보). 값은 페이지에서 온 것이라 candidates.select 가 다시 검사한다."""
+        """관찰한 화면의 링크를 모은다(외부 링크 후보, 사건 전체 100개). 클릭 후보의 링크를 먼저, 그다음 화면의 나머지
+        링크. 값은 페이지에서 온 것이라 candidates.select 가 다시 검사한다."""
         seen = self.result.links_found
-        for info in obs.infos.values():
-            href = info.href
-            if href and href.startswith(("http://", "https://")) and href not in seen and len(seen) < 100:
-                seen.append(href[:2048])
+        urls = {x["url"] for x in seen}
+        clicks = [{"url": i.href, "text": mask_pii(i.text)[:TEXT_MAX]} for i in obs.infos.values() if len(i.href) <= 2048]
+        for x in [*clicks, *obs.links]:
+            if len(seen) >= 100:
+                break
+            if x["url"].startswith(("http://", "https://")) and x["url"] not in urls:
+                urls.add(x["url"])
+                seen.append(x)
 
     def _collect_candidates(self):
         """보조 기능: 연관 후보(경유 도메인·외부 링크). 하위 조사는 runner 가 정한다."""

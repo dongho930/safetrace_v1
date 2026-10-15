@@ -1,0 +1,22 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><title>링크가 많은 안내 페이지</title><link rel="stylesheet" href="/_style.css">
+<!-- related-sites PR 2: 연관 후보 링크 수집 상한·정리 시험. 클릭 후보(판단 모델에 보내는 것)와 따로 화면의 모든 링크를 모은다 -->
+<h1>이벤트 안내</h1>
+<p><a href="https://casino-camp.example/">카지노 바로가기</a></p>
+<p><a href="https://contact-camp.example/">문의 010-1234-5678 / alice@example.com</a></p>
+<p style="display:none"><a href="https://hidden-camp.example/">환전 안내</a></p>
+<p><a href="javascript:alert(1)">스크립트</a> <a href="http://10.0.0.1/admin">내부</a>
+<a href="https://long.example/?q=PLACEHOLDER_LONG">긴 주소</a> <a href="https://www.facebook.com/">페이스북</a></p>
+<div id="many"></div>
+<script>
+  // 긴 주소(2048자 초과)는 모으지 않는다
+  document.querySelector('a[href^="https://long.example"]').href = "https://long.example/" + "a".repeat(3000);
+  const box = document.getElementById("many");
+  for (let i = 0; i < 230; i++) {
+    const a = document.createElement("a");
+    a.href = `https://filler${i}.example/`;
+    a.textContent = `링크 ${i}`;
+    box.appendChild(a);
+    box.appendChild(document.createTextNode(" "));
+  }
+</script>
+</html>
