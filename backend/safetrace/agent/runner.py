@@ -146,8 +146,12 @@ def _investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], Non
     transport = httpx.HTTPTransport(proxy=s.egress_proxy) if s.egress_proxy else None
     # 후보 주소 가운데 개인정보가 든 것은 외부로 보내지 않는다(페이지가 링크에 넣은 값이다)
     cand_urls = [c["url"] for c in cands[:10] if not _has_pii(c["url"])]
-    sb = lookup([url, *result.nav_chain[-10:], *cand_urls], s.safebrowsing_api_key.get_secret_value(), transport=transport)
-    _append(writer, emit, "safebrowsing", {**sb, "excluded_pii": sum(1 for c in cands[:10] if _has_pii(c["url"]))})
+    # 시작·경유 주소도 같다: 연관 후보가 새 사건이 되면 페이지가 정한 주소가 시작 주소가 된다(Codex 지적)
+    own = [u for u in dict.fromkeys([url, *result.nav_chain[-10:]]) if u]
+    own_ok = [u for u in own if not _has_pii(u)]
+    sb = lookup([*own_ok, *cand_urls], s.safebrowsing_api_key.get_secret_value(), transport=transport)
+    _append(writer, emit, "safebrowsing", {**sb, "excluded_pii": sum(1 for c in cands[:10] if _has_pii(c["url"]))
+                                           + len(own) - len(own_ok)})
     matched = sb.get("status") == "match"
     hits = {m.get("url") for m in sb.get("matches", [])} if matched else set()
     first_checked = set(cand_urls) if sb.get("status") in ("match", "no_match") else set()
@@ -178,9 +182,19 @@ def _investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], Non
     # 연관 후보 하위 조사(1단계). 후보 목록·선택 이유를 먼저 남기고, 결과를 모아 다시 남긴다
     followup = _needs_followup(status, result.threat, matched)
     chosen = cands[:s.candidate_max] if followup else []
+    # main: 원래 조사의 결과 상태. 원래 결과 이벤트의 상태·사유는 API 가 이 서명 기록에서 꺼낸다(이벤트 값을 믿지 않는다)
     _append(writer, emit, "candidates", {
         "found": [{**c, "reputation_match": c["url"] in hits} for c in cands], "followup": followup,
-        "investigated": len(chosen)})
+        "investigated": len(chosen), "main": {"status": status, "reason": reason}})
+    if chosen and isinstance(result.threat, dict):
+        # 원래 결과 먼저(related-sites PR 3): 하위 조사 전에 원래 사건의 결과를 보낸다. 담당자는 이때부터 판정할 수 있고,
+        # 연관 사이트 조사는 뒤에서 계속한다. 종료 상태는 이 원래 결과와 같다(하위 조사는 판정을 바꾸지 않는다)
+        # main_head: 원래 조사의 마지막 기록(바로 앞의 candidates). API 가 그 앞부분을 서명까지 검증해 판정에 묶는다
+        emit({"type": "status", "status": "RUNNING", "phase": "related", "main": {"status": status, "reason": reason},
+              "main_head": writer.head.seq,
+              "threat": result.threat, "final_url": result.final_url, "safebrowsing": sb,
+              "candidates": [{**c, "reputation_match": c["url"] in hits,
+                              "reputation_unchecked": c["url"] not in first_checked} for c in cands]})
     results = _investigate_candidates(chosen, s, decider, writer, emit, resolver, sink) if chosen else []
     if results:
         _check_candidate_reputation(results, hits, first_checked, s, transport, writer, emit)

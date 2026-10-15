@@ -19,7 +19,7 @@ from pathlib import Path
 from PIL import Image as PILImage
 
 from . import preview as _preview  # noqa: F401  Image.MAX_IMAGE_PIXELS 제한을 함께 쓴다
-from .evidence import _SAFE_NAME, sha256_bytes
+from .evidence import _SAFE_NAME, read_evidence, sha256_bytes
 from .package import clean_records
 
 try:  # 그리는 중 배치 실패(지나치게 긴 표 칸 등)는 보고서 오류로 다룬다
@@ -268,10 +268,13 @@ def _t(s: object) -> str:
     return html.escape("" if s is None else str(s), quote=False)
 
 
-def _shot(path: Path, sha: str, width_px: int = 800, max_h_px: int = 560) -> io.BytesIO | None:
-    """체인의 sha256 과 같은 원본만 쓴다. 너비를 줄이고 위쪽만 잘라 JPEG 로."""
+_SHOT_MAX_BYTES = 64 << 20  # 페이지 전체 캡처(1280×6000 PNG)보다 넉넉히
+
+
+def _shot(evidence_dir: Path, cid: str, name: str, sha: str, width_px: int = 800, max_h_px: int = 560) -> io.BytesIO | None:
+    """체인의 sha256 과 같은 원본만 쓴다. 너비를 줄이고 위쪽만 잘라 JPEG 로. 링크·특수 파일은 열지 않는다."""
     try:
-        data = path.read_bytes()
+        data = read_evidence(evidence_dir, cid, "files", name, max_bytes=_SHOT_MAX_BYTES)
         if sha256_bytes(data) != sha:
             return None
         with PILImage.open(io.BytesIO(data)) as im:
@@ -391,12 +394,10 @@ def render_pdf(rep: dict, evidence_dir: Path) -> bytes:
     if screens:
         head = [P("4. 주요 화면", h2),
                 P("화면 위쪽 일부를 줄여 넣었다. 원본은 검토 패키지 files/ 에 있고 sha256 은 증거 체인 기록과 같다.", small)]
-        files_dir = (evidence_dir / cid / "files").resolve()
         col = (width - 6 * mm) / 2
         cells = []
         for sc in screens:
-            p = (files_dir / sc["file"]).resolve()
-            img = _shot(p, sc["sha256"]) if _SAFE_NAME.match(sc["file"]) and p.parent == files_dir else None
+            img = _shot(evidence_dir, cid, sc["file"], sc["sha256"]) if _SAFE_NAME.match(sc["file"]) else None
             cell = [P(_t(f"{sc['step']}단계 · {sc.get('title') or '제목 없음'}"), key), P(_t(sc.get("url")), small)]
             if img is None:
                 cell.append(P("원본 해시가 체인 기록과 달라 넣지 않음", small))

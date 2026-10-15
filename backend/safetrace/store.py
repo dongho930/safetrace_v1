@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import (JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine,
-                        select)
+                        delete, select)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
@@ -50,6 +50,52 @@ class CaseEvent(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), index=True)
     payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CasePhase(Base):
+    """원래 결과가 나온 뒤 연관 사이트를 조사하는 중인 사건(related-sites PR 3). cases 표에 열을 보태지 않는다
+    (Store 는 create_all 만 써서 기존 DB 에 반영되지 않는다). 원래 결과의 상태는 종료 상태가 이와 같아야 한다."""
+
+    __tablename__ = "case_main_result"  # PR 3 첫 판(case_phase)과 열이 달라 이름을 바꿨다(create_all 은 열을 보태지 않는다)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), primary_key=True)
+    phase: Mapped[str] = mapped_column(String(16))  # related
+    main_status: Mapped[str] = mapped_column(String(24))  # 원래 결과의 상태(종료 상태 중 하나)
+    main_reason: Mapped[str | None] = mapped_column(String(64))
+    # 원래 조사의 증거 끝(API 가 체인 앞부분을 서명까지 검증한 값). 조사 중 판정은 이 끝에 묶는다
+    main_head_seq: Mapped[int] = mapped_column(Integer)
+    main_head_hash: Mapped[str] = mapped_column(String(64))
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CaseLink(Base):
+    """연관 후보로 만든 사건(자식)과 그 후보가 나온 사건(부모)의 연결(related-sites PR 4). 같은 부모의 같은 후보로는
+    한 번만 만든다. target_host·auto 는 자동 생성(PR 4b)의 중복 확인·표시에 쓴다."""
+
+    __tablename__ = "case_links"
+    __table_args__ = (UniqueConstraint("parent_id", "candidate_url"),)
+    child_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), primary_key=True)
+    parent_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), index=True)
+    candidate_url: Mapped[str] = mapped_column(String(2048))
+    target_host: Mapped[str] = mapped_column(String(253), index=True)  # 하위 조사가 도착한 호스트(없으면 후보 호스트)
+    auto: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_by: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CaseSite(Base):
+    """끝난 사건에서 나온 호스트(시작·최종·경유·링크·후보의 도착). 같은 site 가 나온 사건끼리 잇는다(related-sites PR 5).
+    site 는 이을 열쇠: 보통 등록 도메인, 공용 호스팅(generic)은 호스트 그대로. 단축 서비스·공식·흔한 대형 사이트는 쓰지 않는다."""
+
+    __tablename__ = "case_sites"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), index=True)
+    host: Mapped[str] = mapped_column(String(253), index=True)
+    site: Mapped[str] = mapped_column(String(253), index=True)
+    role: Mapped[str] = mapped_column(String(16))  # start | final | via | link | candidate_final
+    threat: Mapped[str | None] = mapped_column(String(32))
+    blocked: Mapped[bool] = mapped_column(Boolean, default=False)
+    generic: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -124,12 +170,34 @@ class Store:
         return self.Session()
 
     def add_event(self, case_id: str, payload: dict) -> bool:
-        """이벤트를 남긴다. 상태 이벤트가 허용된 전이가 아니면(끝난 사건, 모르는 상태) 남기지 않고 False."""
+        """이벤트를 남긴다. 상태 이벤트가 허용된 전이가 아니면(끝난 사건, 모르는 상태) 남기지 않고 False.
+
+        원래 결과 이벤트(phase=related)는 조사 중(RUNNING)이고 위협 판단·원래 결과의 종료 상태·검증한 증거 끝이 있을 때
+        **한 번만** 받는다. 그 뒤에는 원래 결과(상태·사유·위협·최종 주소·평판)가 바뀌지 않는다: 담당자가 그 결과를 보고
+        판정할 수 있으므로, 종료 이벤트는 연관 후보의 결과만 반영하고 상태는 원래 결과로 맞춘다(Codex 지적)."""
         with self.session() as s, s.begin():
             if payload.get("type") == "status":
                 c = s.get(Case, case_id, with_for_update=True)
                 if c is None or payload.get("status") not in _NEXT_STATUS.get(c.status, ()):
                     return False
+                ph = s.get(CasePhase, case_id)
+                if "phase" in payload:
+                    main = payload.get("main") if isinstance(payload.get("main"), dict) else {}
+                    reason = main.get("reason")
+                    mh = payload.get("main_head") if isinstance(payload.get("main_head"), dict) else {}
+                    if (ph is not None or payload["phase"] != "related" or payload["status"] != "RUNNING"
+                            or not isinstance(payload.get("threat"), dict) or main.get("status") not in TERMINAL
+                            or not (reason is None or isinstance(reason, str))
+                            or type(mh.get("seq")) is not int or not isinstance(mh.get("hash"), str)):
+                        return False
+                    s.add(CasePhase(case_id=case_id, phase="related", main_status=main["status"],
+                                    main_reason=reason[:64] if reason else None, main_head_seq=mh["seq"],
+                                    main_head_hash=mh["hash"][:64], at=now()))
+                elif ph is not None:
+                    # 원래 결과 뒤의 상태 이벤트: 원래 결과는 그대로 두고 연관 후보 결과(candidates)·체인 끝만 반영한다
+                    payload = {k: v for k, v in payload.items() if k not in ("threat", "final_url", "safebrowsing")}
+                    if payload["status"] in TERMINAL:
+                        payload = {**payload, "status": ph.main_status, "reason": ph.main_reason}
                 c.status = payload["status"]
                 c.finish_reason = payload.get("reason")
                 if payload.get("threat") is not None:
@@ -142,6 +210,41 @@ class Store:
                         setattr(c, k, payload[k])
             s.add(CaseEvent(case_id=case_id, payload=payload))
         return True
+
+    def phases_for(self, case_ids: list[str]) -> dict[str, CasePhase]:
+        """사건 여러 개의 원래 결과 표시를 한 번에 가져온다(목록용)."""
+        if not case_ids:
+            return {}
+        with self.session() as s:
+            return {p.case_id: p for p in s.scalars(select(CasePhase).where(CasePhase.case_id.in_(case_ids)))}
+
+    def parents_for(self, case_ids: list[str]) -> dict[str, tuple[CaseLink, str]]:
+        """자식 사건 id → (연결, 부모 사건의 신고 URL). 목록용."""
+        if not case_ids:
+            return {}
+        with self.session() as s:
+            rows = s.execute(select(CaseLink, Case.url).join(Case, Case.id == CaseLink.parent_id)
+                             .where(CaseLink.child_id.in_(case_ids)))
+            return {link.child_id: (link, url) for link, url in rows}
+
+    def children_of(self, parent_id: str, limit: int = 50) -> list[tuple[CaseLink, Case]]:
+        with self.session() as s:
+            rows = s.execute(select(CaseLink, Case).join(Case, Case.id == CaseLink.child_id)
+                             .where(CaseLink.parent_id == parent_id).order_by(CaseLink.created_at).limit(limit))
+            return [(link, c) for link, c in rows]
+
+    def write_sites(self, case_id: str) -> int:
+        """끝난 사건의 연결 호스트를 다시 쓴다(지우고 넣기라 여러 번 불러도 같다). 반환: 쓴 줄 수."""
+        from .related import case_sites  # related 는 이 모듈을 쓰지 않는다(순환 없음)
+
+        with self.session() as s, s.begin():
+            c = s.get(Case, case_id)
+            if c is None or c.status not in TERMINAL:
+                return 0
+            rows = case_sites(c.url, c.final_url, c.threat, c.candidates)
+            s.execute(delete(CaseSite).where(CaseSite.case_id == case_id))
+            s.add_all(CaseSite(case_id=case_id, **r) for r in rows)
+        return len(rows)
 
     def set_head(self, case_id: str, seq: int, hash_: str) -> None:
         """head 가 비어 있는 사건에 서명 서비스의 head 를 채운다(닫기에 실패했다가 나중에 다시 닫아 받은 값)."""

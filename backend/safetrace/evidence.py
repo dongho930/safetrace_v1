@@ -18,11 +18,15 @@ head(마지막 seq·hash)와 비교해 탐지한다.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import hmac
 import json
+import os
 import re
+import stat
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +34,8 @@ from typing import Protocol
 
 GENESIS = "0" * 64
 _SAFE_NAME = re.compile(r"^[a-z0-9_\-]{1,64}\.(png|webm|json|txt)$")
+CHAIN_MAX_BYTES = 64 << 20  # 체인 원문(기록 수천 건도 수 MB)
+FILE_MAX_BYTES = 512 << 20  # 증거 파일 하나(녹화가 가장 크다)
 
 
 def canonical(obj) -> bytes:
@@ -45,6 +51,73 @@ def sha256_file(path: Path) -> str:
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1 << 16), b""):
             h.update(chunk)
+    return h.hexdigest()
+
+
+# ── 증거 볼륨 읽기(API·검증 쪽) ─────────────────────────────
+# 증거 볼륨은 에이전트(조사 대상 페이지를 다루므로 침해될 수 있다)가 쓴다. 읽는 쪽이 링크를 따라가면 API 컨테이너의
+# 다른 파일(/proc/self/environ 등)이 패키지·파일 응답으로 나가고, FIFO 를 열면 쓰는 쪽이 올 때까지 기다리며 이벤트
+# 처리가 멈춘다(Codex 지적). 그래서 API 는 증거 파일을 아래 함수로만 연다.
+class UnsafeEvidence(OSError):
+    """링크·특수 파일·너무 큰 파일, 또는 사건 폴더가 다른 곳을 가리킴."""
+
+
+def open_evidence(root: Path, case_id: str, *parts: str) -> tuple[int, os.stat_result]:
+    """증거 파일을 열어 (fd, fstat) 를 돌려준다. 사건 폴더·files 폴더가 링크면 거절하고, 마지막 이름은 링크를 따라가지
+    않으며(O_NOFOLLOW), 특수 파일에서 기다리지 않고(O_NONBLOCK) 연 뒤 일반 파일인지 fstat 으로 확인한다.
+    없으면 FileNotFoundError, 안전하지 않으면 UnsafeEvidence. fd 는 호출한 쪽이 닫는다."""
+    base = Path(os.path.realpath(root))
+    path = base.joinpath(case_id, *parts)
+    if Path(os.path.realpath(path.parent)) != path.parent:
+        raise UnsafeEvidence("evidence_dir_redirected")
+    if not hasattr(os, "O_NOFOLLOW") and path.is_symlink():  # Windows(개발·시험)에는 O_NOFOLLOW 가 없다
+        raise UnsafeEvidence("symlink")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise UnsafeEvidence("symlink") from None
+        raise
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise UnsafeEvidence("not_regular_file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, st
+
+
+def read_evidence(root: Path, case_id: str, *parts: str, max_bytes: int) -> bytes:
+    """open_evidence 로 열어 max_bytes 까지 읽는다. 넘으면 UnsafeEvidence."""
+    fd, st = open_evidence(root, case_id, *parts)
+    with os.fdopen(fd, "rb") as f:
+        if st.st_size > max_bytes:
+            raise UnsafeEvidence("too_large")
+        data = f.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise UnsafeEvidence("too_large")
+    return data
+
+
+def iter_evidence(fd: int, size: int, chunk: int = 1 << 16) -> Iterator[bytes]:
+    """open_evidence 로 연 fd 에서 연 시점의 크기만큼만 읽어 내보낸다(그 뒤 덧붙은 내용은 내보내지 않는다)."""
+    with os.fdopen(fd, "rb") as f:
+        left = size
+        while left > 0:
+            b = f.read(min(chunk, left))
+            if not b:
+                return
+            left -= len(b)
+            yield b
+
+
+def sha256_evidence(root: Path, case_id: str, *parts: str) -> str:
+    fd, st = open_evidence(root, case_id, *parts)
+    h = hashlib.sha256()
+    for b in iter_evidence(fd, st.st_size):
+        h.update(b)
     return h.hexdigest()
 
 
@@ -148,14 +221,19 @@ class VerifyResult:
 def verify_case(root: Path, case_id: str, signer: Signer, expected_head: Head | None,
                 text: str | None = None) -> VerifyResult:
     """text: 이미 읽은 체인 내용. 검증한 내용과 쓰는 내용이 같아야 할 때(패키지·보고서) 같은 스냅숏을 넘긴다."""
-    d = root / case_id
-    chain = d / "chain.jsonl"
     errors: list[str] = []
-    if text is None and not chain.exists():
-        return VerifyResult(False, 0, ["chain_missing"])
+    if text is None:
+        try:
+            text = read_evidence(root, case_id, "chain.jsonl", max_bytes=CHAIN_MAX_BYTES).decode("utf-8", "replace")
+        except FileNotFoundError:
+            return VerifyResult(False, 0, ["chain_missing"])
+        except UnsafeEvidence as e:
+            return VerifyResult(False, 0, [f"chain_unsafe {e}"])
+        except OSError:
+            return VerifyResult(False, 0, ["chain_unreadable"])
     prev = GENESIS
     seq = -1
-    lines = (chain.read_text(encoding="utf-8") if text is None else text).splitlines()
+    lines = text.splitlines()
     for i, line in enumerate(lines):
         try:
             rec = json.loads(line)
@@ -174,11 +252,14 @@ def verify_case(root: Path, case_id: str, signer: Signer, expected_head: Head | 
             errors.append(f"seq {rec['seq']}: bad_signature")
         for name, h in body["files"].items():
             try:
-                p = d / "files" / name
-                if not _SAFE_NAME.match(name) or not p.exists():
+                if not _SAFE_NAME.match(name):
                     errors.append(f"seq {rec['seq']}: file_missing {name}")
-                elif sha256_file(p) != h:
+                elif sha256_evidence(root, case_id, "files", name) != h:
                     errors.append(f"seq {rec['seq']}: file_modified {name}")
+            except FileNotFoundError:
+                errors.append(f"seq {rec['seq']}: file_missing {name}")
+            except UnsafeEvidence:
+                errors.append(f"seq {rec['seq']}: file_unsafe {name}")
             except OSError:
                 errors.append(f"seq {rec['seq']}: file_unreadable {name}")
         prev = rec.get("hash", "")

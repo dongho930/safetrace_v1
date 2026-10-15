@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import hashlib
+import io
 import hmac
 import ipaddress
 import json
@@ -17,19 +19,22 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from PIL import Image
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from .. import accounts, package, report, verdicts
+from .. import accounts, package, related, report, verdicts
 from ..accounts import ROLES, AccountError
 from ..config import get_settings
-from ..evidence import Head, Signer, VerifyResult, verify_case
+from ..evidence import Head, Signer, VerifyResult, iter_evidence, open_evidence, verify_case
 from ..live import CHANNEL as LIVE_CHANNEL
 from ..live import END as LIVE_END
 from ..live import WATCH_KEY as LIVE_WATCH_KEY
@@ -40,13 +45,15 @@ from ..netguard import BlockedURL, parse_url
 from ..preview import preview_image
 from ..ratelimit import FailureLimiter
 from ..signer.client import ChainAdmin, SignerError
-from ..store import TERMINAL, AuditLog, Case, Store, Verdict
+from ..store import TERMINAL, AuditLog, Case, CaseLink, CasePhase, CaseSite, Store, Verdict
+from ..store import now as now_utc
 
 log = logging.getLogger("safetrace.api")
 settings = get_settings()
 store = Store(settings.database_url)
 
 _FILE_NAME = re.compile(r"^[a-z0-9_\-]{1,64}\.(png|webm)$")
+PREVIEW_MAX_BYTES = 64 << 20  # 미리보기로 줄일 원본 PNG 상한(페이지 전체 캡처보다 넉넉히)
 _CASE_ID = re.compile(r"^[a-f0-9\-]{36}$")
 
 
@@ -168,6 +175,21 @@ def record_event(case_id: str, payload: dict) -> None:
     """
     if payload.get("type") == "status" and "candidates" in payload:
         payload = {**payload, "candidates": _clean_candidates(payload["candidates"])}
+    if payload.get("type") == "status" and "phase" in payload:
+        # 원래 결과: 워커가 말한 '원래 조사의 마지막 기록'을 믿지 않고 체인 앞부분을 서명까지 검증한 끝으로 바꾼다
+        mh = _verify_main_head(case_id, payload.get("main_head"))
+        payload = {k: v for k, v in payload.items() if k not in ("main_head", "threat", "final_url", "main", "safebrowsing")}
+        if mh is None:
+            store.audit("system", "event.rejected", case_id, "main_head_unverified")
+            return
+        # 판정 대상이 되는 원래 결과(상태·사유·위협 판단·최종 주소·평판)는 이벤트가 아니라 검증한 서명 기록에서 가져온다
+        payload.update(main_head={"seq": mh["seq"], "hash": mh["hash"]}, threat=mh["threat"], final_url=mh["final_url"],
+                       main=mh["main"], safebrowsing=mh["safebrowsing"])
+    elif payload.get("type") == "status" and payload.get("status") in TERMINAL:
+        ph = store.phases_for([case_id]).get(case_id)
+        if ph is not None and (payload.get("status"), payload.get("reason")) != (ph.main_status, ph.main_reason):
+            store.audit("system", "event.main_result_kept", case_id,
+                        f"main={ph.main_status} sent={str(payload.get('status'))[:24]}")
     if _chains is not None and payload.get("type") == "status":
         reported = payload.get("head")
         payload = {k: v for k, v in payload.items() if k != "head"}
@@ -180,6 +202,100 @@ def record_event(case_id: str, payload: dict) -> None:
                                 f"agent={str(reported.get('seq'))[:12]} signer={h['seq']}")
     if not store.add_event(case_id, payload):
         store.audit("system", "event.rejected", case_id, f"status={str(payload.get('status'))[:24]}")
+    elif payload.get("type") == "status" and payload.get("status") in TERMINAL:
+        try:
+            store.write_sites(case_id)  # 사건 간 연결(PR 5). 실패해도 원 사건 처리는 계속
+        except Exception as e:
+            log.exception("write sites failed")
+            store.audit("system", "case.sites_failed", case_id, type(e).__name__)
+        _auto_related(case_id)
+
+
+def _auto_limit(s, parent_id: str, host: str) -> str | None:
+    """선별 조건 7~9(시점에 따라 바뀌는 중복·한도). 어긋난 조건 이름, 모두 맞으면 None. _intake_lock 안에서 부른다."""
+    since = now_utc() - timedelta(days=settings.related_auto_dedup_days)
+    if s.scalar(select(func.count()).select_from(CaseLink)
+                .where(CaseLink.target_host == host, CaseLink.created_at >= since)):
+        return "duplicate"  # 7 여러 신고에서 같은 사이트가 반복될 때
+    if s.scalar(select(func.count()).select_from(CaseLink)
+                .where(CaseLink.parent_id == parent_id, CaseLink.auto.is_(True))) >= settings.related_auto_per_case:
+        return "per_case"  # 8 신고 1건이 불어나지 않게
+    if s.scalar(select(func.count()).select_from(Case)
+                .where(Case.created_by == related.AUTO_ACTOR, Case.status.in_(PENDING))) >= settings.related_auto_max_pending:
+        return "max_pending"  # 9 사람 신고의 대기 시간 보호
+    return None
+
+
+def _signed_candidates(c: Case) -> list[dict] | None:
+    """자동 연관 사건의 선별 근거(Codex 지적): 워커가 종료 이벤트로 보고한 후보 목록이 아니라, 닫고 검증한 체인의 원래
+    조사 후보 기록(candidates)과 하위 조사 결과 기록(candidate_results)을 runner 와 같은 방식으로 합친 것.
+    체인을 검증하지 못하면 None(만들지 않는다). 워커는 조사 중인 사건에 거짓 기록을 서명받을 수 있으므로 이것으로 거짓
+    선별을 모두 막지는 못하지만, 자동 사건을 만든 근거가 원 사건의 서명된 증거에 그대로 남고(감사·패키지) 이벤트와 증거가
+    다를 때 증거를 따른다. 남는 위험은 부모당 3·대기 10·깊이 1 한도로 묶는다(docs/threat-model.md)."""
+    text = package.read_chain_text(settings.evidence_dir, c.id)
+    if text is None or not _verify_case(c, _signer(), text).ok:
+        return None
+    recs = package.parse_chain(text)
+
+    def last(kind: str) -> dict:
+        for r in reversed(recs):
+            d = r.get("data")
+            if r.get("kind") == kind and isinstance(d, dict) and "sub" not in d:
+                return d
+        return {}
+
+    found, results = last("candidates").get("found"), last("candidate_results").get("results")
+    by_url = {r["url"]: r for r in results if isinstance(r, dict) and isinstance(r.get("url"), str)}         if isinstance(results, list) else {}
+    out = []
+    for f in found if isinstance(found, list) else []:
+        if not isinstance(f, dict) or not isinstance(f.get("url"), str):
+            continue
+        r = by_url.get(f["url"], {})
+        out.append({**f, **{k: v for k, v in r.items() if k != "reputation_match"},
+                    "reputation_match": f.get("reputation_match") is True or r.get("reputation_match") is True})
+    return _clean_candidates(out)
+
+
+def _auto_related(case_id: str) -> None:
+    """원 사건이 끝나면(체인을 닫고 반영한 뒤) 선별 조건을 모두 통과한 연관 후보로 새 사건을 만든다(PR 4b).
+    격리망 안의 워커가 아니라 API 가 만든다. 후보는 이벤트가 아니라 검증한 체인에서 고른다(_signed_candidates).
+    실패해도 원 사건 처리와 이벤트 소비는 멈추지 않는다."""
+    try:
+        with store.session() as s:
+            c = s.get(Case, case_id)
+            if c is None or c.status not in TERMINAL or not settings.related_auto or c.source == "related":
+                return
+            signed = _signed_candidates(c)  # 체인 검증은 접수 잠금 밖에서
+        if signed is None:
+            store.audit(related.AUTO_ACTOR, "case.create_related_auto_skipped", case_id, "chain_unverified")
+            return
+        with _intake_lock, store.session() as s:  # 동시에 끝난 두 사건이 같은 호스트로 두 사건을 만들지 않게
+            parent = s.get(Case, case_id)
+            if parent is None or parent.status not in TERMINAL:
+                return
+            targets = related.auto_targets(parent.source, signed, enabled=settings.related_auto,
+                                           threat_min_prob=settings.threat_min_prob)
+            for cand, why in targets:
+                host = related.target_host(cand)
+                dup = s.scalar(select(CaseLink).where(CaseLink.parent_id == parent.id, CaseLink.candidate_url == cand["url"]))
+                if dup is not None:
+                    continue  # 같은 종료 이벤트를 다시 받았거나 담당자가 이미 버튼으로 만든 후보
+                skip = _auto_limit(s, parent.id, host)
+                if skip:
+                    store.audit(related.AUTO_ACTOR, "case.create_related_auto_skipped", parent.id,
+                                f"{skip} host={host} url={cand['url'][:200]}")
+                    continue
+                prob = cand.get("probability")
+                note = f" host={host} why={why} threat={cand.get('threat') or '-'}" + (
+                    f" p={prob:.2f}" if isinstance(prob, (int, float)) else "")
+                try:
+                    create_related_case(s, parent, cand, related.AUTO_ACTOR, auto=True, principal=None, note=note)
+                except BlockedURL as e:
+                    store.audit(related.AUTO_ACTOR, "case.create_related_auto_skipped", parent.id,
+                                f"url_rejected:{e.reason} url={cand['url'][:200]}")
+    except Exception as e:  # 자동 생성 실패가 이벤트 소비를 멈추지 않게(원 사건 상태·체인 닫기는 이미 끝났다)
+        log.exception("auto related case failed")
+        store.audit(related.AUTO_ACTOR, "case.create_related_auto_failed", case_id, type(e).__name__)
 
 
 def enqueue(case_id: str, url: str):
@@ -283,6 +399,17 @@ class VerdictIn(BaseModel):
     note: str | None = Field(default=None, max_length=verdicts.NOTE_MAX * 2)
 
 
+class ChildOut(BaseModel):
+    """연관 후보로 만든 사건(부모 사건 상세에 붙는 요약)."""
+    id: str
+    url: str
+    candidate_url: str
+    status: str
+    threat: str | None
+    verdict: str | None  # 담당자의 현재 판정(threat | benign | hold)
+    auto: bool
+
+
 class CaseOut(BaseModel):
     id: str
     url: str
@@ -296,12 +423,28 @@ class CaseOut(BaseModel):
     head_seq: int | None
     created_at: str
     verdict: VerdictOut | None = None  # 담당자의 현재 판정
+    # 원래 결과가 나온 뒤 연관 사이트를 조사하는 중이면 "related"(조사 중일 때만). main_status: 원래 결과의 상태
+    phase: str | None = None
+    main_status: str | None = None
+    main_head_seq: int | None = None  # 원래 조사의 증거 끝(조사 중 판정은 여기에 묶는다)
+    # 연관 사건(source=related)이면 그 후보가 나온 부모 사건. children: 이 사건의 후보로 만든 사건(상세에만)
+    parent_id: str | None = None
+    parent_url: str | None = None
+    auto: bool | None = None
+    children: list[ChildOut] | None = None
+    # 하위 조사했지만 자동 사건이 없는 후보와 이유(disabled|depth|not_threat|blocked|shortener|limit_or_duplicate, 상세에만)
+    auto_skipped: list[dict] | None = None
 
     @classmethod
-    def of(cls, c: Case, v: Verdict | None = None) -> CaseOut:
+    def of(cls, c: Case, v: Verdict | None = None, ph: CasePhase | None = None,
+           parent: tuple[CaseLink, str] | None = None, children: list[ChildOut] | None = None) -> CaseOut:
         return cls(id=c.id, url=c.url, source=c.source, status=c.status, finish_reason=c.finish_reason,
                    final_url=c.final_url, threat=c.threat, safebrowsing=c.safebrowsing, candidates=c.candidates,
-                   head_seq=c.head_seq, created_at=c.created_at.isoformat(), verdict=VerdictOut.of(v) if v else None)
+                   head_seq=c.head_seq, created_at=c.created_at.isoformat(), verdict=VerdictOut.of(v) if v else None,
+                   phase=ph.phase if ph and c.status == "RUNNING" else None,
+                   main_status=ph.main_status if ph else None, main_head_seq=ph.main_head_seq if ph else None,
+                   parent_id=parent[0].parent_id if parent else None, parent_url=parent[1] if parent else None,
+                   auto=parent[0].auto if parent else None, children=children)
 
 
 class LoginIn(BaseModel):
@@ -506,7 +649,8 @@ def _check_intake_limits(s, p: Principal) -> None:
         store.audit(p.name, "case.rejected", detail=f"limit=principal pending={mine}")
         raise HTTPException(429, "끝나지 않은 사건이 너무 많습니다. 조사가 끝난 뒤 다시 접수하세요",
                             headers={"Retry-After": "60"})
-    total = s.scalar(select(func.count()).select_from(Case).where(pending))
+    # 자동 연관 사건(system:related)은 자기 전용 한도(related_auto_max_pending)만 받는다: 사람 신고를 막지 않게
+    total = s.scalar(select(func.count()).select_from(Case).where(pending, Case.created_by != related.AUTO_ACTOR))
     if total >= settings.case_max_pending_total:
         store.audit(p.name, "case.rejected", detail=f"limit=total pending={total}")
         raise HTTPException(503, "대기열이 가득 찼습니다. 잠시 뒤 다시 접수하세요", headers={"Retry-After": "60"})
@@ -544,14 +688,231 @@ def create_case(body: CaseCreate, p: Annotated[Principal, Depends(need("investig
 def list_cases(p: Annotated[Principal, Depends(need("viewer"))], limit: int = Query(50, ge=1, le=200)):
     with store.session() as s:
         rows = s.scalars(select(Case).order_by(Case.created_at.desc()).limit(limit)).all()
-    latest = verdicts.latest_for(store, [c.id for c in rows])
-    return [CaseOut.of(c, latest.get(c.id)) for c in rows]
+    ids = [c.id for c in rows]
+    latest, phases, parents = verdicts.latest_for(store, ids), store.phases_for(ids), store.parents_for(ids)
+    return [CaseOut.of(c, latest.get(c.id), phases.get(c.id), parents.get(c.id)) for c in rows]
 
 
 @app.get("/api/cases/{case_id}", response_model=CaseOut)
 def get_case(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]):
     c = _get_case(case_id)
-    return CaseOut.of(c, verdicts.latest_for(store, [c.id]).get(c.id))
+    return _case_detail(c)
+
+
+def _case_detail(c: Case) -> CaseOut:
+    kids = store.children_of(c.id)
+    kv = verdicts.latest_for(store, [k.id for _, k in kids])
+    children = [ChildOut(id=k.id, url=k.url, candidate_url=link.candidate_url, status=k.status,
+                         threat=(k.threat or {}).get("threat") if isinstance(k.threat, dict) else None,
+                         verdict=kv[k.id].decision if k.id in kv else None, auto=link.auto) for link, k in kids]
+    out = CaseOut.of(c, verdicts.latest_for(store, [c.id]).get(c.id), store.phases_for([c.id]).get(c.id),
+                     store.parents_for([c.id]).get(c.id), children)
+    if c.status in TERMINAL:  # 자동 생성은 원 사건이 끝난 뒤에 한다
+        made = {k.candidate_url for k in children}
+        out.auto_skipped = [
+            {"url": x["url"][:2048], "reason": related.skip_reason(c.source, x, enabled=settings.related_auto,
+                                                                   threat_min_prob=settings.threat_min_prob)
+             or "limit_or_duplicate"}
+            for x in (c.candidates or []) if isinstance(x, dict) and isinstance(x.get("url"), str)
+            and x.get("sub") and x["url"] not in made][:20]
+    return out
+
+
+# ── 연관 사이트를 새 사건으로(related-sites PR 4) ─────────────────────────
+class RelatedIn(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
+
+
+def create_related_case(s, parent: Case, cand: dict, actor: str, *, auto: bool,
+                        principal: Principal | None, note: str = "") -> tuple[Case, bool]:
+    """연관 후보로 새 사건을 만든다(담당자 버튼과 자동 생성이 같이 쓴다): 형식 검사·접수 한도·사건·연결·감사·대기열.
+    같은 부모의 같은 후보는 한 번만 만들고, 이미 있으면 그 사건을 돌려준다. 반환: (자식 사건, 새로 만들었는지).
+    호출하는 쪽이 _intake_lock 안에서 부른다(세기와 넣기 사이에 다른 접수가 끼지 않게).
+    cand 는 부모 사건에 저장된 후보(API 가 _clean_candidates 로 받은 값)여야 한다."""
+    url = cand["url"]
+    q = select(Case).join(CaseLink, CaseLink.child_id == Case.id).where(CaseLink.parent_id == parent.id,
+                                                                         CaseLink.candidate_url == url)
+    existing = s.scalar(q)
+    if existing:
+        return existing, False
+    parse_url(url, settings.allowed_ports)  # 형식 검사(BlockedURL). IP 검사는 에이전트가 접속 시점에 한다
+    if principal is not None:
+        _check_intake_limits(s, principal)  # 담당자가 만든 연관 사건은 그 담당자의 한도에 든다
+    final = cand.get("final_url") if isinstance(cand.get("final_url"), str) else ""
+    target = (urlsplit(final).hostname or (cand.get("host") if isinstance(cand.get("host"), str) else "")
+              or urlsplit(url).hostname or "")
+    c = Case(url=url, source="related", created_by=actor)
+    s.add(c)
+    s.flush()
+    s.add(CaseLink(child_id=c.id, parent_id=parent.id, candidate_url=url, target_host=target.lower()[:253],
+                   auto=auto, created_by=actor))
+    try:
+        s.commit()
+    except IntegrityError:  # 같은 후보로 동시에 만든 다른 요청이 먼저 들어갔다
+        s.rollback()
+        existing = s.scalar(q)
+        if existing:
+            return existing, False
+        raise
+    store.audit(actor, "case.create_related_auto" if auto else "case.create_related", c.id,
+                f"parent={parent.id} url={url[:200]}{note}")
+    enqueue(c.id, c.url)
+    return c, True
+
+
+@app.post("/api/cases/{case_id}/related", response_model=CaseOut, status_code=201)
+def create_related(case_id: str, body: RelatedIn, response: Response,
+                   p: Annotated[Principal, Depends(need("investigator"))]):
+    """사건의 연관 후보 하나를 새 사건으로 접수한다(전체 조사). 후보 목록에 정확히 있는 주소만 받는다(출처가 분명한
+    연결만 만든다). 이미 만든 후보면 그 사건을 돌려준다(200)."""
+    with _intake_lock, store.session() as s:
+        parent = s.get(Case, case_id)
+        if parent is None:
+            raise HTTPException(404, "not found")
+        cand = next((x for x in (parent.candidates or []) if isinstance(x, dict) and x.get("url") == body.url), None)
+        if cand is None:
+            raise HTTPException(422, "이 사건의 연관 후보가 아닌 주소입니다")
+        try:
+            child, created = create_related_case(s, parent, cand, p.name, auto=False, principal=p)
+        except BlockedURL as e:
+            raise HTTPException(422, f"url rejected: {e.reason}") from None
+    if not created:
+        response.status_code = 200
+    return _case_detail(child)
+
+
+# ── 사건 간 연결(related-sites PR 5) ─────────────────────────
+LINKS_MAX = 50
+GROUP_CASES_MAX, GROUP_SITES_MAX = 500, 5000  # 묶음 계산 범위(최근 종료 사건)·호스트 줄 상한
+_GROUP_KEY = re.compile(r"^[0-9a-f]{16}$")
+
+
+def _briefs(ids: list[str]) -> dict[str, dict]:
+    """사건 요약(id·신고 URL·상태·AI 위협 유형·담당자 판정). 연결 목록·묶음에 쓴다."""
+    if not ids:
+        return {}
+    with store.session() as s:
+        cases = list(s.scalars(select(Case).where(Case.id.in_(ids))))
+    latest = verdicts.latest_for(store, ids)
+    return {c.id: {"id": c.id, "url": c.url, "status": c.status,
+                   "threat": c.threat.get("threat") if isinstance(c.threat, dict) else None,
+                   "verdict": latest[c.id].decision if c.id in latest else None} for c in cases}
+
+
+@app.get("/api/cases/{case_id}/links")
+def case_links(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]):
+    """연결된 사건: 부모·자식(연관 후보로 만든 사건)과, 같은 사이트가 나온 다른 사건(사이트별, 최대 50건)."""
+    c = _get_case(case_id)
+    parent = store.parents_for([c.id]).get(c.id)
+    kids = store.children_of(c.id, limit=LINKS_MAX)
+    with store.session() as s:
+        keys = set(s.scalars(select(CaseSite.site).where(CaseSite.case_id == c.id)))
+        rows = s.execute(select(CaseSite).join(Case, Case.id == CaseSite.case_id)
+                         .where(CaseSite.site.in_(keys), CaseSite.case_id != c.id)
+                         .order_by(Case.created_at.desc()).limit(GROUP_SITES_MAX)).scalars().all() if keys else []
+    shared: dict[str, dict] = {}
+    others: list[str] = []
+    for r in rows:
+        if r.case_id not in others:
+            if len(others) >= LINKS_MAX:
+                continue
+            others.append(r.case_id)
+        g = shared.setdefault(r.site, {"site": r.site, "hosts": set(), "roles": set(), "cases": []})
+        g["hosts"].add(r.host)
+        g["roles"].add(r.role)
+        if r.case_id not in g["cases"]:
+            g["cases"].append(r.case_id)
+    info = _briefs([*others, *([parent[0].parent_id] if parent else []), *(k.id for _, k in kids)])
+    return {
+        "parent": info.get(parent[0].parent_id) if parent else None,
+        "children": [{**info[k.id], "auto": link.auto} for link, k in kids if k.id in info],
+        "shared": [{"site": g["site"], "hosts": sorted(g["hosts"])[:10], "roles": sorted(g["roles"]),
+                    "cases": [info[x] for x in g["cases"] if x in info]} for g in shared.values()],
+    }
+
+
+def _related_groups(min_cases: int) -> tuple[list[dict], bool]:
+    """최근 종료 사건(최대 500)에서 같은 사이트로 이어지는 사건 묶음. 반환: (묶음, 계산 범위를 잘랐는지)."""
+    with store.session() as s:
+        recent = list(s.scalars(select(Case.id).where(Case.status.in_(TERMINAL))
+                                .order_by(Case.created_at.desc()).limit(GROUP_CASES_MAX + 1)))
+        truncated = len(recent) > GROUP_CASES_MAX
+        recent = recent[:GROUP_CASES_MAX]
+        rows = list(s.scalars(select(CaseSite).where(CaseSite.case_id.in_(recent)).order_by(CaseSite.id)
+                              .limit(GROUP_SITES_MAX + 1))) if recent else []
+    if len(rows) > GROUP_SITES_MAX:
+        truncated, rows = True, rows[:GROUP_SITES_MAX]
+    found = related.groups([(r.case_id, r.site, r.generic) for r in rows], min_cases)
+    by_case: dict[str, list[CaseSite]] = {}
+    for r in rows:
+        by_case.setdefault(r.case_id, []).append(r)
+    info = _briefs([cid for g in found for cid in g])
+    out = []
+    for g in found:
+        sites: dict[str, dict] = {}
+        for cid in g:
+            for r in by_case.get(cid, []):
+                x = sites.setdefault(r.site, {"site": r.site, "hosts": set(), "threat": None, "blocked": False,
+                                              "cases": set(), "candidate": None})
+                x["hosts"].add(r.host)
+                x["cases"].add(cid)
+                if r.threat and r.threat not in ("benign", "unknown"):
+                    x["threat"] = r.threat
+                x["blocked"] = x["blocked"] or r.blocked
+                if r.role in ("via", "link") and x["candidate"] is None:
+                    x["candidate"] = {"case_id": cid, "host": r.host}
+        key = hashlib.sha256("|".join(sorted(sites)).encode()).hexdigest()[:16]
+        listed = sorted(sites.values(), key=lambda x: (-len(x["cases"]), x["site"]))
+        out.append({
+            "key": key,
+            "cases": [info[c] for c in sorted(g) if c in info],
+            "sites": [{"site": x["site"], "hosts": sorted(x["hosts"])[:10], "threat": x["threat"],
+                       "blocked": x["blocked"], "cases": len(x["cases"]), "candidate": x["candidate"]} for x in listed],
+            "threat_sites": sum(1 for x in listed if x["threat"]),
+            # 회선 차단은 조사 대상 서버가 흉내 낼 수 있는 추정이라 위협 집계에서 빼지 않고 따로 센다(Codex 지적)
+            "blocked_estimate_sites": sum(1 for x in listed if x["blocked"]),
+        })
+    out.sort(key=lambda g: (-len(g["cases"]), g["key"]))
+    return out, truncated
+
+
+@app.get("/api/related-groups")
+def related_groups(p: Annotated[Principal, Depends(need("viewer"))], min: int = Query(2, ge=2, le=50),  # noqa: A002
+                   limit: int = Query(50, ge=1, le=50)):
+    """연관 묶음: 같은 사이트로 이어지는 사건들(단축 서비스·공식·흔한 대형 사이트로는 잇지 않고, 공용 호스팅은 호스트가
+    같을 때만). 계산 범위(최근 종료 사건 500건·호스트 5,000줄)를 넘으면 잘라서 truncated."""
+    t0 = time.monotonic()
+    groups, truncated = _related_groups(min)
+    return {"groups": groups[:limit], "truncated": truncated, "ms": round((time.monotonic() - t0) * 1000)}
+
+
+def _csv_cell(v: object) -> str:
+    """CSV 칸: 페이지가 정한 글자가 표 계산 프로그램에서 수식으로 읽히지 않게 수식 시작 문자 앞에 ' 를 붙인다(CWE-1236)."""
+    s = "" if v is None else str(v)
+    return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
+
+
+@app.get("/api/related-groups/{group_key}.csv")
+def related_group_csv(group_key: str, p: Annotated[Principal, Depends(need("investigator"))]):
+    """연관 묶음 하나의 사이트·사건 표(조사관 이상, 감사로그). 묶음이 바뀌었으면 404(목록을 새로 받는다)."""
+    if not _GROUP_KEY.match(group_key):
+        raise HTTPException(404, "not found")
+    groups, _ = _related_groups(2)
+    g = next((x for x in groups if x["key"] == group_key), None)
+    if g is None:
+        raise HTTPException(404, "묶음이 바뀌었습니다. 연관 묶음 목록을 다시 불러오세요")
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["구분", "사이트", "호스트", "AI 판단", "회선 차단 추정", "사건 수", "사건 id", "신고 URL", "사건 상태", "담당자 판정"])
+    for x in g["sites"]:
+        w.writerow([_csv_cell(v) for v in ("사이트", x["site"], " ".join(x["hosts"]), x["threat"], x["blocked"], x["cases"],
+                                           "", "", "", "")])
+    for c in g["cases"]:
+        w.writerow([_csv_cell(v) for v in ("사건", "", "", c["threat"], "", "", c["id"], c["url"], c["status"], c["verdict"])])
+    store.audit(p.name, "related.export", None, f"group={group_key} cases={len(g['cases'])} sites={len(g['sites'])}")
+    name = f"safetrace-related-{now_utc().strftime('%Y%m%d')}-{group_key[:8]}.csv"
+    return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 # ── 담당자 판정 ─────────────────────────────────────────
@@ -613,17 +974,27 @@ def case_file(case_id: str, name: str, p: Annotated[Principal, Depends(need("vie
     _get_case(case_id)
     if not _FILE_NAME.match(name):
         raise HTTPException(404, "not found")
-    path = settings.evidence_dir / case_id / "files" / name
-    if not path.is_file():
-        raise HTTPException(404, "not found")
+    # 증거 볼륨은 에이전트가 쓴다: 링크를 따라가거나 FIFO 에서 기다리지 않게 안전하게 연 fd 로만 내보낸다(Codex 지적)
+    try:
+        fd, st = open_evidence(settings.evidence_dir, case_id, "files", name)
+    except FileNotFoundError:
+        raise HTTPException(404, "not found") from None
+    except OSError as e:
+        store.audit("system", "evidence.unsafe_file", case_id, f"{name} {type(e).__name__}: {str(e)[:60]}")
+        raise HTTPException(404, "not found") from None
     # 증거 파일은 한 번 쓰이면 바뀌지 않는다(바뀌면 검증 실패) → 브라우저가 캐시해도 된다(인증 필요하므로 private)
     headers = {"Content-Security-Policy": "sandbox; default-src 'none'", "Cache-Control": "private, max-age=3600"}
     if preview and name.endswith(".png"):
         # 화면 표시용 JPEG(증거 아님). 원본은 preview 없이 요청
-        data, media = preview_image(path)
+        try:
+            raw = b"".join(iter_evidence(fd, min(st.st_size, PREVIEW_MAX_BYTES)))
+            data, media = preview_image(raw, (case_id, name, st.st_mtime_ns, st.st_size))
+        except (OSError, ValueError, Image.DecompressionBombError):
+            raise HTTPException(404, "not found") from None
         return Response(data, media_type=media, headers=headers)
     media = "image/png" if name.endswith(".png") else "video/webm"
-    return FileResponse(path, media_type=media, headers=headers)
+    return StreamingResponse(iter_evidence(fd, st.st_size), media_type=media,
+                             headers={**headers, "Content-Length": str(st.st_size)})
 
 
 @app.websocket("/api/cases/{case_id}/live")
@@ -733,6 +1104,56 @@ def _evidence_head(c: Case) -> Head | None:
     store.audit("system", "evidence.head_recovered", c.id, f"seq={h['seq']}")
     c.head_seq, c.head_hash = h["seq"], h["hash"]
     return Head(h["seq"], h["hash"])
+
+
+def _verify_main_head(case_id: str, seq: object) -> dict | None:
+    """원래 조사의 증거 끝과 그 결과. 반환 {seq, hash, threat, final_url} 또는 None.
+
+    - 0..seq 번 기록을 해시·HMAC 서명·파일까지 검증하고, seq 번이 원래 조사의 연관 후보 기록(candidates)이며 그 앞에
+      하위 조사 기록(data.sub)이 없어야 한다
+    - 운영(서명 서비스)에서는 파일의 체인이 **이 사건의** 서명 서비스 head 까지 그대로 이어져야 한다. 서명에는 사건 id 가
+      없어서, 다른 사건의 서명된 기록을 이 사건 폴더에 복사해 넣는 것을 이것으로 막는다(Codex 지적)
+    - 판정 대상이 되는 원래 결과는 이 검증한 기록에서 꺼낸다(이벤트 값을 믿지 않는다): 상태·사유는 마지막 candidates
+      기록의 main(러너가 평판 승격까지 반영한 값), 위협 판단은 threat, 최종 주소는 finish, 평판은 safebrowsing"""
+    if type(seq) is not int or not 0 <= seq < 100_000:
+        return None
+    top, top_hash = seq, None
+    for _ in range(5):  # 서명 직후 파일에 쓰기 전이면 잠깐 기다린다
+        if _chains is not None:
+            try:
+                h = _chains.head(case_id)
+            except SignerError:
+                return None
+            if type(h.get("seq")) is not int or not isinstance(h.get("hash"), str) or h["seq"] < seq:
+                return None
+            top, top_hash = h["seq"], h["hash"]
+        lines = (package.read_chain_text(settings.evidence_dir, case_id) or "").splitlines()
+        if len(lines) > top:
+            break
+        time.sleep(0.2)
+    else:
+        return None
+    prefix = "\n".join(lines[: top + 1])
+    expect = Head(top, top_hash) if top_hash is not None else None
+    if not verify_case(settings.evidence_dir, case_id, _signer(), expect, text=prefix).ok:
+        return None
+    recs = package.parse_chain(prefix)[: seq + 1]
+    if len(recs) != seq + 1 or recs[-1].get("kind") != "candidates" or not isinstance(recs[-1].get("hash"), str):
+        return None
+    if any(not isinstance(r.get("data"), dict) or isinstance(r["data"].get("sub"), int) for r in recs):
+        return None
+    threat = next((r["data"] for r in reversed(recs) if r.get("kind") == "threat"), None)
+    finish = next((r["data"] for r in reversed(recs) if r.get("kind") == "finish"), {})
+    sb = next((r["data"] for r in reversed(recs) if r.get("kind") == "safebrowsing"), None)
+    main = recs[-1]["data"].get("main")
+    if not isinstance(threat, dict) or not isinstance(main, dict):
+        return None
+    if main.get("status") not in TERMINAL or not isinstance(main.get("reason"), str):
+        return None
+    final = finish.get("final_url") if isinstance(finish.get("final_url"), str) else None
+    return {"seq": seq, "hash": recs[-1]["hash"][:64], "threat": threat, "final_url": final,
+            "main": {"status": main["status"], "reason": main["reason"][:64]},
+            "safebrowsing": sb if isinstance(sb, dict) else None}
 
 
 def _verify_case(c: Case, signer: Signer, text: str | None = None) -> VerifyResult:

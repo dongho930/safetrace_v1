@@ -17,7 +17,17 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .evidence import _SAFE_NAME, Signer, VerifyResult, canonical, sha256_bytes
+from .evidence import (
+    _SAFE_NAME,
+    CHAIN_MAX_BYTES,
+    FILE_MAX_BYTES,
+    Signer,
+    UnsafeEvidence,
+    VerifyResult,
+    canonical,
+    read_evidence,
+    sha256_bytes,
+)
 from .store import AuditLog, Case, Verdict
 
 FORMAT = "safetrace.review-package/1"
@@ -26,8 +36,11 @@ _STEP_KINDS = {"observe", "decision", "gate", "action", "action_error", "new_win
 
 
 def read_chain_text(evidence_dir: Path, case_id: str) -> str | None:
-    p = evidence_dir / case_id / "chain.jsonl"
-    return p.read_text(encoding="utf-8") if p.exists() else None
+    """체인 원문. 없거나 링크·특수 파일·너무 큰 파일이면 None(검증이 chain_missing·chain_unsafe 로 실패한다)."""
+    try:
+        return read_evidence(evidence_dir, case_id, "chain.jsonl", max_bytes=CHAIN_MAX_BYTES).decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 def read_chain(evidence_dir: Path, case_id: str) -> list[dict]:
@@ -52,7 +65,7 @@ _SCHEMA: dict[str, dict[str, object]] = {
     "threat": {"threat": _STR, "probability": _PROB, "probabilities": _DICT, "hold": _BOOL, "override": _DICT,
                "provider": _STR, "model": _STR, "evidence_seqs": [_INT]},
     "safebrowsing": {"status": _STR, "matches": [_DICT]},
-    "candidates": {"found": [_DICT], "followup": _BOOL},
+    "candidates": {"found": [_DICT], "followup": _BOOL, "main": _DICT},
     "candidate_results": {"results": [_DICT]},
     "blocked_request": {"navigation": _BOOL},
     "recording": {"t0": _NUM},
@@ -317,38 +330,39 @@ def export_zip(pkg: dict, evidence_dir: Path, case_id: str, signer: Signer,
     """extra: 같이 담을 파생 문서(보고서 초안 report.json·report.pdf).
     chain_text: 패키지를 만들 때 검증한 체인 스냅숏(따로 다시 읽으면 그 사이에 바뀔 수 있다).
     서명은 SHA256SUMS(묶음 안 모든 파일의 해시)와 package.json 에 함께 건다. 보고서만 바꿔도 서명이 맞지 않는다."""
-    d = evidence_dir / case_id
-    # 증거 파일은 한 번 읽은 바이트를 체인의 해시와 대조하고 그 바이트를 담는다(검증 뒤에 바뀐 파일은 빼고 실패로 적음)
+    # 증거 파일은 한 번 읽은 바이트를 체인의 해시와 대조하고 그 바이트를 담는다(검증 뒤에 바뀐 파일은 빼고 실패로 적음).
+    # 링크·특수 파일은 따라가거나 기다리지 않는다(evidence.open_evidence)
     files: list[tuple[str, bytes]] = []
     changed: list[str] = []
-    files_dir = (d / "files").resolve()
     for f in pkg["files"]:
-        p = (files_dir / f["name"]).resolve()
-        if _SAFE_NAME.match(f["name"]) and p.parent == files_dir and p.is_file():
-            data = p.read_bytes()
-            if sha256_bytes(data) == f["sha256"]:
-                files.append((f"files/{f['name']}", data))
-            else:
-                changed.append(f["name"])
+        if not _SAFE_NAME.match(f["name"]):
+            continue
+        try:
+            data = read_evidence(evidence_dir, case_id, "files", f["name"], max_bytes=FILE_MAX_BYTES)
+        except FileNotFoundError:
+            continue
+        except UnsafeEvidence:
+            changed.append(f["name"])
+            continue
+        if sha256_bytes(data) == f["sha256"]:
+            files.append((f"files/{f['name']}", data))
+        else:
+            changed.append(f["name"])
     if changed:
         integ = pkg["integrity"]
         pkg = {**pkg, "integrity": {**integ, "verified": False,
                                     "errors": [*integ["errors"], *(f"file_changed_at_export {n}" for n in changed)]}}
     body = json.dumps(pkg, ensure_ascii=False, indent=2).encode()
-    entries: list[tuple[str, bytes | Path]] = [("package.json", body), *(extra or [])]
-    chain = d / "chain.jsonl"
-    if chain_text is not None:
+    entries: list[tuple[str, bytes]] = [("package.json", body), *(extra or [])]
+    if chain_text is not None:  # 증거 볼륨의 체인 파일을 다시 열지 않는다(검증한 스냅숏만)
         entries.append(("chain.jsonl", chain_text.encode()))
-    elif chain.exists():
-        entries.append(("chain.jsonl", chain))
     entries += files
     entries.append(("README.txt", _README.format(fmt=FORMAT, key_id=signer.key_id).encode()))
 
     buf = io.BytesIO()
     sums = []
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for name, src in entries:
-            data = src.read_bytes() if isinstance(src, Path) else src
+        for name, data in entries:
             # 녹화·PNG 는 이미 압축돼 있으니 그대로 담는다
             z.writestr(name, data, zipfile.ZIP_STORED if name.endswith((".png", ".webm")) else zipfile.ZIP_DEFLATED)
             sums.append(f"{sha256_bytes(data)}  {name}")

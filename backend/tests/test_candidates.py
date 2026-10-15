@@ -227,7 +227,7 @@ def _benign_sub(final, nav=()):
                 threat={"threat": "benign", "probability": 0.99, "hold": False})
 
 
-def _run(settings, monkeypatch, runs, lookup_fn):
+def _run(settings, monkeypatch, runs, lookup_fn, start="https://start.example/"):
     import uuid
 
     from safetrace.agent import runner
@@ -235,7 +235,7 @@ def _run(settings, monkeypatch, runs, lookup_fn):
     _fake_runs(monkeypatch, runs)
     monkeypatch.setattr(runner, "lookup", lookup_fn)
     cid = str(uuid.uuid4())
-    final = runner.investigate(cid, "https://start.example/", settings, lambda e: None, decider=object())
+    final = runner.investigate(cid, start, settings, lambda e: None, decider=object())
     import json
     chain = [json.loads(x) for x in (settings.evidence_dir / cid / "chain.jsonl").read_text(encoding="utf-8").splitlines()]
     return final, chain
@@ -255,6 +255,41 @@ def test_candidate_path_pii_not_sent_to_reputation(settings, monkeypatch):
                                             cands[0]["url"]: _benign_sub(cands[0]["url"])}, lookup)
     assert not any("alice" in u or "1234" in u for u in sent), sent
     assert final["candidates"][0]["reputation_unchecked"] is True
+
+
+def test_start_and_hop_pii_not_sent_to_reputation(settings, monkeypatch):
+    """Codex(PR 3~5) F2: 연관 후보가 새 사건이 되면 페이지가 정한 주소가 시작 주소가 된다. 시작·경유 주소에 개인정보가
+    있어도 평판 조회로 보내지 않고, 뺀 수를 증거에 남긴다."""
+    pii = "https://candidate.example/u/alice%40example.com/010-1234-5678"
+    hop = "https://hop.example/next?tel=010-9876-5432"
+    sent: list[str] = []
+
+    def lookup(urls, key, transport=None):
+        sent.extend(urls)
+        return {"status": "no_match", "matches": []}
+
+    run = dict(status="COMPLETED", finish_reason="agent_finished", final_url="https://end.example/",
+               nav_chain=[pii, hop, "https://end.example/"], threat={"threat": "phishing", "probability": 0.9, "hold": False})
+    _, chain = _run(settings, monkeypatch, {pii: run}, lookup, start=pii)
+    assert "https://end.example/" in sent
+    assert not any("alice" in u or "1234" in u or "9876" in u for u in sent), sent
+    assert next(r for r in chain if r["kind"] == "safebrowsing")["data"]["excluded_pii"] == 2
+
+
+def test_main_status_signed_with_candidates_record(settings, monkeypatch):
+    """원래 조사의 마지막 기록(candidates)에 평판 승격까지 반영한 결과 상태를 남긴다(API 가 원래 결과를 여기서 꺼낸다)."""
+    cands = select("https://start.example/", "https://start.example/", [], ["https://c1.example/"], PORTS)
+    benign = dict(status="COMPLETED", finish_reason="agent_finished", final_url="https://start.example/",
+                  threat={"threat": "benign", "probability": 0.95, "hold": False}, candidates_found=cands)
+
+    def lookup(urls, key, transport=None):
+        hit = [u for u in urls if u == "https://start.example/"]
+        return {"status": "match" if hit else "no_match", "matches": [{"url": u, "threat_type": "MALWARE"} for u in hit]}
+
+    _, chain = _run(settings, monkeypatch, {"https://start.example/": benign,
+                                            cands[0]["url"]: _benign_sub(cands[0]["url"])}, lookup)
+    rec = next(r for r in chain if r["kind"] == "candidates")
+    assert rec["data"]["main"] == {"status": "REVIEW_REQUIRED", "reason": "reputation_match"}
 
 
 def test_first_match_survives_failed_followup_lookup(settings, monkeypatch):
@@ -338,3 +373,58 @@ def test_select_drops_forbidden_links():
                  [{"url": "https://pay.example/x", "text": "카지노 결제하기"}, {"url": "https://app.example/a.apk", "text": "받기"},
                   {"url": "https://ok.example/", "text": "카지노"}], PORTS)
     assert [c["host"] for c in got] == ["ok.example"]
+
+
+# ── related-sites PR 3: 원래 결과 먼저 ─────────────────────────
+def test_main_result_sent_before_subinvestigation(settings, monkeypatch):
+    """하위 조사 전에 원래 결과(phase=related)를 보내고, 종료 상태의 상태·사유·위협은 그것과 같다."""
+    import uuid
+
+    from safetrace.agent import runner
+
+    cands = [{"url": "https://c1.example/", "host": "c1.example", "source": "link", "score": 0, "text": ""}]
+    order: list[str] = []
+
+    class FakeRun:
+        def __init__(self, url, s, decider, writer, emit, resolver=None, live=None, sub=0):
+            self.url, self.sub = url, sub
+
+        async def run(self):
+            from safetrace.agent.loop import RunResult
+
+            order.append(f"run:{self.sub}")
+            if self.sub:
+                return RunResult(**_benign_sub(self.url))
+            return RunResult(**_phish_main(cands))
+
+    monkeypatch.setattr(runner, "AgentRun", FakeRun)
+    monkeypatch.setattr(runner, "lookup", lambda urls, key, transport=None: {"status": "no_match", "matches": []})
+    events: list[dict] = []
+
+    def emit(e):
+        events.append(e)
+        if e.get("type") == "status":
+            order.append(f"status:{e['status']}:{e.get('phase')}")
+
+    final = runner.investigate(str(uuid.uuid4()), "https://start.example/", settings, emit, decider=object())
+    assert order == ["status:RUNNING:None", "run:0", "status:RUNNING:related", "run:1", f"status:{final['status']}:None"]
+    main = next(e for e in events if e.get("phase") == "related")
+    assert (main["main"]["status"], main["main"]["reason"]) == (final["status"], final["reason"])
+    assert main["threat"] == final["threat"] and main["final_url"] == final["final_url"]
+    assert [c["url"] for c in main["candidates"]] == ["https://c1.example/"] and "sub" not in main["candidates"][0]
+
+
+def test_no_main_result_event_without_subinvestigation(settings, monkeypatch):
+    """확신 있는 정상(하위 조사 안 함)은 지금처럼 종료 상태 하나만 보낸다."""
+    import uuid
+
+    from safetrace.agent import runner
+
+    benign = dict(status="COMPLETED", finish_reason="agent_finished", final_url="https://start.example/",
+                  threat={"threat": "benign", "probability": 0.99, "hold": False},
+                  candidates_found=[{"url": "https://c1.example/", "host": "c1.example", "source": "link"}])
+    _fake_runs(monkeypatch, {"https://start.example/": benign})
+    monkeypatch.setattr(runner, "lookup", lambda urls, key, transport=None: {"status": "no_match", "matches": []})
+    events: list[dict] = []
+    runner.investigate(str(uuid.uuid4()), "https://start.example/", settings, events.append, decider=object())
+    assert not any(e.get("phase") for e in events)

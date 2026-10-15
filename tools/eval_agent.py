@@ -11,7 +11,7 @@
 
 정답(expected): phishing·scam·illegal_gambling·malware·benign, 또는 유형을 가리지 않는 malicious.
 연관 사이트 발견(docs/related-sites.md): 하위 조사는 원래 판정을 바꾸지 않으므로 정답률과 따로 잰다
-(하위 조사 비율, 위협 발견 비율, 발견 사이트 수, 아직 안 막힌 비율, 후보 1곳당 시간, 원래 결과까지 시간).
+(하위 조사 비율, 위협 발견 비율, 발견 사이트 수, 회선 차단 추정 아닌 비율, 후보 1곳당 시간, 원래 결과까지 시간).
 조사 증거는 컨테이너의 임시 폴더에 쓴다(콘솔 사건 목록·증거 볼륨을 더럽히지 않음).
 
 평가 목록 관리: KISA 주소는 시간이 지나면 사라진다. 접속 불가(UNREACHABLE)는 채점에서 빼고 따로 세므로,
@@ -114,6 +114,21 @@ def _is_threat(c: dict) -> bool:
     return c.get("threat") not in (None, "benign", "unknown")
 
 
+AUTO_MIN_PROB = 0.6  # 설정 threat_min_prob 기본값(자동 사건의 조건 4 는 원래 사건이 위협으로 보는 기준과 같다)
+
+
+def auto_targets(r: dict) -> list[dict]:
+    """related-sites PR 4b: 자동 사건을 만들 후보(API 와 같은 safetrace.related.auto_targets, 조건 1~6). 중복·한도(7~9)는
+    시점에 따라 바뀌어 빼고 센다. 평가 목록의 원 사건은 연관 사건이 아니다."""
+    try:
+        if str(ROOT / "backend") not in sys.path:
+            sys.path.insert(0, str(ROOT / "backend"))
+        from safetrace.related import auto_targets as pick
+    except ImportError:  # 이전 코드(PR 4b 전) 컨테이너
+        return []
+    return [c for c, _ in pick("report", r.get("related") or [], enabled=True, threat_min_prob=AUTO_MIN_PROB)]
+
+
 def related_summary(recs: list[dict]) -> dict[str, dict]:
     """그룹별(+전체) 연관 사이트 발견 지표. 기록에 related 가 없으면(이전 평가) measured 가 0 이다."""
     groups: dict[str, list[dict]] = {}
@@ -132,16 +147,18 @@ def related_summary(recs: list[dict]) -> dict[str, dict]:
         open_sites = {c["site"] for c in known if not c["blocked"] and c.get("site")}
         n_sub = sum(1 for r in subs for c in r["related"] if c.get("sub"))
         mains = sorted(r.get("seconds_main", r["seconds"]) for r in measured)
+        autos = [c for r in measured for c in auto_targets(r)]
         extra = sum(r["seconds"] - r.get("seconds_main", r["seconds"]) for r in subs)
         out[g] = {"scored": len(scored), "measured": len(measured), "sub_runs": len(subs), "threat_runs": len(hits),
                   "sites": len(sites), "blocked_known": bool(known), "open_sites": len(open_sites),
                   "n_sub": n_sub, "per_candidate": extra / n_sub if n_sub and extra > 0 else None,
-                  "main_median": statistics.median(mains) if mains else None}
+                  "main_median": statistics.median(mains) if mains else None,
+                  "auto": len(autos), "auto_sites": sorted({c["site"] for c in autos if c.get("site")})}
     return out
 
 
-_RELATED_NAMES = ["하위 조사 비율", "위협 발견 비율", "발견 사이트 수", "아직 안 막힌 비율", "후보 1곳당 시간",
-                  "원래 결과까지 시간 중앙값"]
+_RELATED_NAMES = ["하위 조사 비율", "위협 발견 비율", "발견 사이트 수", "회선 차단 추정 아닌 비율", "후보 1곳당 시간",
+                  "원래 결과까지 시간 중앙값", "자동 접수 대상"]
 
 
 def _related_rows(m: dict) -> list[tuple[str, str]]:
@@ -151,10 +168,11 @@ def _related_rows(m: dict) -> list[tuple[str, str]]:
         ("하위 조사 비율", f"{m['sub_runs']}/{m['measured']} ({_pct(m['sub_runs'], m['measured'])})"),
         ("위협 발견 비율", f"{m['threat_runs']}/{m['sub_runs']} ({_pct(m['threat_runs'], m['sub_runs'])})"),
         ("발견 사이트 수", str(m["sites"])),
-        ("아직 안 막힌 비율", f"{m['open_sites']}/{m['sites']} ({_pct(m['open_sites'], m['sites'])})"
+        ("회선 차단 추정 아닌 비율", f"{m['open_sites']}/{m['sites']} ({_pct(m['open_sites'], m['sites'])})"
          if m["blocked_known"] else "측정 안 함"),
         ("후보 1곳당 시간", f"{m['per_candidate']:.1f}s" if m["per_candidate"] is not None else "측정 안 함"),
         ("원래 결과까지 시간 중앙값", f"{m['main_median']:.1f}s" if m["main_median"] is not None else "-"),
+        ("자동 접수 대상", f"{m['auto']}곳 · 사이트 {len(m['auto_sites'])}"),
     ]
 
 
@@ -192,6 +210,9 @@ def report(recs: list[dict], meta: dict | None = None) -> str:
     rrows = {g: _related_rows(rel[g]) for g in groups}
     for i, name in enumerate(_RELATED_NAMES):
         lines.append(f"| {name} | " + " | ".join(rrows[g][i][1] for g in groups) + " |")
+    autos = {g: rel[g]["auto_sites"] for g in groups if g != "전체" and rel[g]["measured"] and rel[g]["auto_sites"]}
+    if autos:  # 자동 접수 대상(PR 4b 조건 1~6). 정상 사이트 그룹에 나오면 오탐이다
+        lines += ["", "자동 접수 대상 사이트: " + " · ".join(f"{g} {', '.join(s)}" for g, s in autos.items())]
     lines += ["", "## URL별", "", "| 그룹 | 정답 | URL | 판정(반복) | 채점 |", "|---|---|---|---|---|"]
     by_url: dict[str, list[dict]] = {}
     for r in recs:
@@ -245,7 +266,7 @@ def _cell(v: object) -> str:
 
 
 RELATED_COLUMNS = ["사이트", "후보 주소", "도착 주소", "원 신고 URL", "그룹", "회차", "출처", "하위 조사 상태",
-                   "AI 판단", "확률", "보류", "평판 위험", "이미 차단됨"]
+                   "AI 판단", "확률", "보류", "평판 위험", "회선 차단 추정"]
 
 
 def related_rows(recs: list[dict]) -> list[list[str]]:

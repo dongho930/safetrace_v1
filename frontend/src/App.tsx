@@ -2,6 +2,7 @@ import { Component, memo, useCallback, useEffect, useMemo, useRef, useState } fr
 import {
   type AgentEvent,
   ApiError,
+  type Candidate,
   type CaseOut,
   type Decision,
   type EvidenceEvent,
@@ -14,7 +15,13 @@ import {
   clickables,
   clearToken,
   createCase,
+  createRelated,
   createUser,
+  downloadGroupCsv,
+  getLinks,
+  listGroups,
+  type CaseLinks,
+  type RelatedGroup,
   dict,
   downloadExport,
   fileUrl,
@@ -122,17 +129,23 @@ const pct = (v: number) => (typeof v === "number" && Number.isFinite(v) ? v.toFi
 
 // ── 분류 폴더: 목록 필터이자 현황 숫자(예전 지표 카드를 대신한다) ─────────────
 const isSuspect = (c: CaseOut) => !!c.threat && !["benign", "unknown"].includes(c.threat.threat);
+// 원래 결과가 나왔고 연관 사이트를 조사하는 중인 사건은 원래 결과의 상태로 분류한다(조사 중 폴더에 넣지 않는다)
+const relatedRunning = (c: CaseOut) => c.phase === "related" && c.status === "RUNNING" && !!c.main_status;
+const asMain = (c: CaseOut): CaseOut => (relatedRunning(c) ? { ...c, status: c.main_status as string } : c);
 type FolderId = "review" | "running" | "suspect" | "decided" | "unreachable" | "all";
 const FOLDERS: { id: FolderId; label: string; color: string; test: (c: CaseOut) => boolean }[] = [
-  { id: "review", label: "검토 필요", color: "var(--review)", test: needsReview },
-  { id: "running", label: "조사 중", color: "var(--primary)", test: (c) => c.status === "RUNNING" || c.status === "QUEUED" },
-  { id: "suspect", label: "위협 의심 · 판정 전", color: "var(--threat)", test: (c) => c.status === "COMPLETED" && isSuspect(c) && !c.verdict },
+  { id: "review", label: "검토 필요", color: "var(--review)", test: (c) => needsReview(asMain(c)) },
+  { id: "running", label: "조사 중", color: "var(--primary)", test: (c) => (c.status === "RUNNING" || c.status === "QUEUED") && !relatedRunning(c) },
+  { id: "suspect", label: "위협 의심 · 판정 전", color: "var(--threat)", test: (c) => asMain(c).status === "COMPLETED" && isSuspect(c) && !c.verdict },
   { id: "decided", label: "판정 완료", color: "var(--safe)", test: (c) => c.verdict?.decision === "threat" || c.verdict?.decision === "benign" },
-  { id: "unreachable", label: "접속 불가 · 차단", color: "var(--idle-line)", test: (c) => ["UNREACHABLE", "BLOCKED", "FAILED"].includes(c.status) },
+  { id: "unreachable", label: "접속 불가 · 차단", color: "var(--idle-line)", test: (c) => ["UNREACHABLE", "BLOCKED", "FAILED"].includes(asMain(c).status) },
   { id: "all", label: "전체", color: "var(--header)", test: () => true },
 ];
 // 담당자가 확인할 사건(검토 필요, 위협 의심인데 판정 전)은 목록에 파란 점
-const unread = (c: CaseOut) => needsReview(c) || (c.status === "COMPLETED" && isSuspect(c) && !c.verdict);
+const unread = (raw: CaseOut) => {
+  const c = asMain(raw);
+  return needsReview(c) || (c.status === "COMPLETED" && isSuspect(c) && !c.verdict);
+};
 
 // ── 앱 ─────────────────────────────────────────────
 export default function App() {
@@ -141,7 +154,9 @@ export default function App() {
   const [cases, setCases] = useState<CaseOut[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [folder, setFolder] = useState<FolderId>("all");
+  const [groupsView, setGroupsView] = useState(false); // 분류 폴더 '연관 묶음'(사건 대신 묶음 목록)
   const [query, setQuery] = useState("");
+  const [source, setSource] = useState("");
   const [error, setError] = useState("");
   const [dialog, setDialog] = useState<"" | "users" | "password">("");
   const fit = useFitZoom();
@@ -183,7 +198,10 @@ export default function App() {
   // 지금 폴더·검색에 맞는 목록. 이전·다음 사건과 '저장하고 다음 사건'도 이 순서를 따른다
   const current = FOLDERS.find((f) => f.id === folder) ?? FOLDERS[FOLDERS.length - 1];
   const q = query.trim().toLowerCase();
-  const shown = useMemo(() => cases.filter((c) => current.test(c) && (!q || c.url.toLowerCase().includes(q))), [cases, current, q]);
+  const shown = useMemo(
+    () => cases.filter((c) => current.test(c) && (!source || c.source === source) && (!q || c.url.toLowerCase().includes(q))),
+    [cases, current, q, source],
+  );
   const at = selected ? shown.findIndex((c) => c.id === selected) : -1;
   const prevId = at > 0 ? shown[at - 1].id : null;
   const nextId = at >= 0 ? (shown[at + 1]?.id ?? null) : (shown[0]?.id ?? null);
@@ -230,14 +248,30 @@ export default function App() {
       <div className="workspace">
         <FolderNav
           cases={cases}
-          folder={folder}
-          onFolder={setFolder}
+          folder={groupsView ? null : folder}
+          onFolder={(f) => {
+            setGroupsView(false);
+            setFolder(f);
+          }}
+          groupsOn={groupsView}
+          onGroups={() => setGroupsView(true)}
           canCreate={ROLE_RANK[user.role] >= ROLE_RANK.investigator}
           onCreated={(c) => {
             setSelected(c.id);
             refresh();
           }}
         />
+        {groupsView ? (
+          <GroupsPane
+            canExport={ROLE_RANK[user.role] >= ROLE_RANK.investigator}
+            onOpenCase={(id) => {
+              setGroupsView(false);
+              setFolder("all");
+              setSelected(id);
+            }}
+          />
+        ) : (
+          <>
         <CaseList
           title={current.label}
           cases={shown}
@@ -245,6 +279,8 @@ export default function App() {
           error={error}
           query={query}
           onQuery={setQuery}
+          source={source}
+          onSource={setSource}
           onSelect={setSelected}
           monitor={<LiveMonitor cases={cases} onOpen={setSelected} onEnded={refresh} />}
         />
@@ -257,6 +293,7 @@ export default function App() {
               canDecide={user.kind === "user" && ROLE_RANK[user.role] >= ROLE_RANK.reviewer}
               canExport={ROLE_RANK[user.role] >= ROLE_RANK.investigator}
               onDecided={refresh}
+              onOpen={setSelected}
               onPrev={prevId ? () => setSelected(prevId) : null}
               onNext={nextId ? () => setSelected(nextId) : null}
             />
@@ -265,6 +302,8 @@ export default function App() {
             <EmptyWorkspace />
           )}
         </section>
+          </>
+        )}
       </div>
     </div>
   );
@@ -508,12 +547,16 @@ function FolderNav({
   cases,
   folder,
   onFolder,
+  groupsOn,
+  onGroups,
   canCreate,
   onCreated,
 }: {
   cases: CaseOut[];
-  folder: FolderId;
+  folder: FolderId | null;
   onFolder: (f: FolderId) => void;
+  groupsOn: boolean;
+  onGroups: () => void;
   canCreate: boolean;
   onCreated: (c: CaseOut) => void;
 }) {
@@ -540,6 +583,11 @@ function FolderNav({
           <span className="folder-n">{cases.filter(f.test).length}</span>
         </button>
       ))}
+      <button type="button" className="folder" aria-current={groupsOn} onClick={onGroups}>
+        <span className="folder-mark" style={{ background: "var(--review)" }} />
+        <span className="folder-label">연관 묶음</span>
+        <span className="folder-n" />
+      </button>
       <p className="folder-note">
         AI 판단은 참고 의견입니다.
         <br />
@@ -557,6 +605,8 @@ function CaseList({
   error,
   query,
   onQuery,
+  source,
+  onSource,
   onSelect,
   monitor,
 }: {
@@ -566,6 +616,8 @@ function CaseList({
   error: string;
   query: string;
   onQuery: (q: string) => void;
+  source: string;
+  onSource: (s: string) => void;
   onSelect: (id: string) => void;
   monitor: React.ReactNode;
 }) {
@@ -579,6 +631,16 @@ function CaseList({
         <label className="sr" htmlFor="case-search">
           URL 검색
         </label>
+        <label className="sr" htmlFor="case-source">
+          출처
+        </label>
+        <select id="case-source" className="field source-filter" value={source} onChange={(e) => onSource(e.target.value)}>
+          <option value="">모든 출처</option>
+          <option value="report">신고</option>
+          <option value="kisa">KISA</option>
+          <option value="related">연관</option>
+          <option value="test">시험</option>
+        </select>
         <input id="case-search" className="field search" type="search" placeholder="URL 검색" value={query} maxLength={200} onChange={(e) => onQuery(e.target.value)} />
       </div>
       {error && (
@@ -596,7 +658,10 @@ function CaseList({
                 {clip(hostPath(c.url), 60)}
               </span>
               <span className="row-time">{fmtTime(c.created_at)}</span>
-              <span className="row-sub">{caseSummary(c)}</span>
+              <span className="row-sub">
+                {c.source === "related" && <span className="row-badge">{c.auto ? "연관·자동" : "연관"}</span>}
+                {caseSummary(c)}
+              </span>
               <StatusChip c={c} />
             </button>
           </li>
@@ -609,7 +674,7 @@ function CaseList({
 
 // ── 실시간 화면(목록 칸 맨 위, 항상 표시): 에이전트는 한 번에 한 건을 조사한다 ─────────────
 function LiveMonitor({ cases, onOpen, onEnded }: { cases: CaseOut[]; onOpen: (id: string) => void; onEnded: () => void }) {
-  const running = cases.find((c) => c.status === "RUNNING");
+  const running = cases.find((c) => c.status === "RUNNING" && !c.auto) ?? cases.find((c) => c.status === "RUNNING");
   // 목록은 최신순이므로 가장 오래된 대기 사건(다음 차례)은 뒤에서 찾는다
   const queued = running ? undefined : [...cases].reverse().find((c) => c.status === "QUEUED");
   return (
@@ -638,9 +703,18 @@ function LiveMonitor({ cases, onOpen, onEnded }: { cases: CaseOut[]; onOpen: (id
 
 // 실행 중인 사건 하나: 자기 /events 를 따로 구독한다(사건이 바뀌면 key 로 다시 만들어 이전 연결을 끊는다).
 // 기록 전체를 쌓지 않고 화면에 필요한 요약(관찰 수·마지막 화면·마지막 선택)만 갱신한다(믿지 않는 기록이 몰려와도 메모리가 늘지 않게)
-type MonitorView = { maxSeq: number; steps: number; shot: string | null; cands: Map<string, string>; act: Act | null };
+type MonitorView = {
+  maxSeq: number;
+  steps: number;
+  shot: string | null;
+  cands: Map<string, string>;
+  act: Act | null;
+  sub: number; // 연관 후보 하위 조사 번호(0 = 원래 주소)
+  subTotal: number;
+  subHost: string;
+};
 type Act = { what: string; prob: number; running: boolean };
-const EMPTY_VIEW: MonitorView = { maxSeq: -1, steps: 0, shot: null, cands: new Map(), act: null };
+const EMPTY_VIEW: MonitorView = { maxSeq: -1, steps: 0, shot: null, cands: new Map(), act: null, sub: 0, subTotal: 0, subHost: "" };
 
 function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) => void; onEnded: () => void }) {
   const [view, setView] = useState<MonitorView>(EMPTY_VIEW);
@@ -678,9 +752,9 @@ function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) 
           <span className="dot" />
           LIVE
         </span>
-        <h2 className="monitor-title">{ended ? "조사 끝남" : "지금 조사 중"}</h2>
-        <span className="monitor-host" title={c.url}>
-          {clip(hostPath(c.url), 40)}
+        <h2 className="monitor-title">{ended ? "조사 끝남" : view.sub ? `연관 사이트 ${view.sub}/${view.subTotal || view.sub}` : "지금 조사 중"}</h2>
+        <span className="monitor-host" title={view.sub ? view.subHost : c.url}>
+          {clip(view.sub && view.subHost ? view.subHost : hostPath(c.url), 40)}
         </span>
         <button type="button" className="btn btn-ghost btn-sm" aria-label="조사 중인 사건 상세 보기" onClick={() => onOpen(c.id)}>
           상세 보기
@@ -718,6 +792,11 @@ function step(v: MonitorView, e: EvidenceEvent): MonitorView {
   const next = { ...v, maxSeq: e.seq };
   const png = e.files.find((f) => f.endsWith(".png"));
   if ((e.kind === "observe" || e.kind === "finish") && png) next.shot = png;
+  if (e.kind === "candidates") next.subTotal = Math.max(0, Math.min(10, Math.trunc(num(d.investigated)) || 0));
+  if (e.kind === "start" && typeof d.sub === "number" && Number.isInteger(d.sub) && d.sub > 0 && d.sub <= 10) {
+    next.sub = d.sub;
+    next.subHost = clip(hostOf(text(d.url, 2000)), 60);
+  }
   if (e.kind === "observe") {
     if (typeof d.sub !== "number") next.steps = v.steps + 1;
     next.cands = new Map(clickables(d.candidates).map((x) => [x.id, x.text]));
@@ -732,6 +811,14 @@ function step(v: MonitorView, e: EvidenceEvent): MonitorView {
 }
 
 function StatusChip({ c }: { c: CaseOut }) {
+  if (relatedRunning(c)) {
+    return (
+      <>
+        <StatusChip c={asMain(c)} />
+        <span className="chip st-RUNNING">연관 사이트 조사 중</span>
+      </>
+    );
+  }
   // 담당자가 확정한 사건은 판정을 먼저 보여 준다
   const v = c.verdict;
   if (v?.decision === "threat") return <span className="chip st-threat">■ {THREAT_LABEL[v.threat ?? ""] ?? v.threat} 확정</span>;
@@ -751,7 +838,8 @@ function StatusChip({ c }: { c: CaseOut }) {
   );
 }
 
-function caseSummary(c: CaseOut): string {
+function caseSummary(raw: CaseOut): string {
+  const c = asMain(raw);
   if (c.status === "RUNNING" || c.status === "QUEUED") return "에이전트가 조사하는 중";
   const parts: string[] = [];
   if (c.verdict?.decision === "hold") parts.push("담당자 보류");
@@ -822,6 +910,7 @@ const Workspace = memo(function Workspace({
   canDecide,
   canExport,
   onDecided,
+  onOpen,
   onPrev,
   onNext,
 }: {
@@ -829,6 +918,7 @@ const Workspace = memo(function Workspace({
   canDecide: boolean;
   canExport: boolean;
   onDecided: () => void;
+  onOpen: (id: string) => void;
   onPrev: (() => void) | null;
   onNext: (() => void) | null;
 }) {
@@ -852,7 +942,7 @@ const Workspace = memo(function Workspace({
         }
         if (e.type === "status") {
           setStatus(e.status);
-          if (TERMINAL.has(e.status)) getCase(id).then(setC).catch(() => undefined);
+          if (TERMINAL.has(e.status) || e.phase === "related") getCase(id).then(setC).catch(() => undefined);
         }
       },
       ac.signal,
@@ -867,8 +957,12 @@ const Workspace = memo(function Workspace({
   // 끝난 사건은 사건 자체의 상태를 쓴다(SSE 는 지난 '조사 중' 상태부터 다시 보내 준다)
   const st = c && TERMINAL.has(c.status) ? c.status : c ? status || c.status : "";
   // 상태를 아직 모르면(사건·기록을 받는 중) 조사 중으로 치지 않는다: 끝난 사건을 열 때 실시간 연결을 열었다 닫지 않게
-  const running = st === "RUNNING" || st === "QUEUED";
+  // 원래 결과가 나오면(연관 사이트 조사 중) 요약·근거·판정은 원래 결과로 보여 주고, 내려받기·검증만 끝날 때까지 막는다
+  const related = !!c && c.phase === "related" && st === "RUNNING";
+  const running = (st === "RUNNING" || st === "QUEUED") && !related;
   const steps = sorted.filter((e) => e.kind === "observe" && typeof e.data.sub !== "number").length;
+  const relatedTotal = num([...sorted].reverse().find((e) => e.kind === "candidates")?.data.investigated);
+  const relatedSeen = new Set(sorted.filter((e) => typeof e.data.sub === "number").map((e) => e.data.sub)).size;
   const reasons = useMemo(() => (c && !running ? buildReasons(sorted, c) : []), [sorted, c, running]);
   const screens = useMemo(() => buildScreens(reasons, sorted), [reasons, sorted]);
   const [tab, setTab] = useState<TabId>("screens");
@@ -878,11 +972,11 @@ const Workspace = memo(function Workspace({
   const opened = useRef(false);
   useEffect(() => {
     // 기록을 다 받은 뒤(SSE 가 끝 상태를 보낸 뒤)에 정한다. 그 전에는 화면 목록이 비어 보일 수 있다
-    if (opened.current || !c || !TERMINAL.has(status)) return;
+    if (opened.current || !c || !(TERMINAL.has(status) || related)) return;
     opened.current = true;
     if (screens.length === 0) setTab("log");
     else setPick(screens[0].file);
-  }, [status, c, screens]);
+  }, [status, c, screens, related]);
   const openScreen = (r: Reason) => {
     if (!r.shot) return;
     setTab("screens");
@@ -892,9 +986,18 @@ const Workspace = memo(function Workspace({
     <>
       <div className="detail-body">
         <div className="statusline">
-          <span className={`chip st-${st}`}>
-            {STATUS_GLYPH[st] ?? "●"} {STATUS_LABEL[st] ?? (st || "불러오는 중")}
-          </span>
+          {related && c ? (
+            <StatusChip c={c} />
+          ) : (
+            <span className={`chip st-${st}`}>
+              {STATUS_GLYPH[st] ?? "●"} {STATUS_LABEL[st] ?? (st || "불러오는 중")}
+            </span>
+          )}
+          {related && Number.isFinite(relatedTotal) && (
+            <span className="muted small">
+              연관 사이트 {Math.min(relatedSeen, relatedTotal)}/{relatedTotal}
+            </span>
+          )}
           {c && (
             <span className="muted">
               {fmtDateTime(c.created_at)} 접수 · {steps}단계 관찰
@@ -913,6 +1016,15 @@ const Workspace = memo(function Workspace({
             기록이 {MAX_EVENTS}건을 넘어 그 뒤는 화면에 표시하지 않았습니다. 전체 기록은 검토 패키지로 확인하세요.
           </p>
         )}
+        {c?.parent_id && (
+          <p className="parent-link">
+            <span className="chip st-RUNNING">{c.auto ? "연관·자동" : "연관"}</span> 연관 사이트 ·{" "}
+            <button type="button" className="linkish" onClick={() => onOpen(c.parent_id as string)}>
+              {clip(hostPath(c.parent_url ?? ""), 60)}
+            </button>{" "}
+            사건에서 {c.auto ? "자동 발견" : "발견"}
+          </p>
+        )}
         <Summary c={c} running={running} reasons={reasons} picked={tab === "screens" ? pick : null} onPick={openScreen} />
         {!st ? (
           <p className="muted">{live ? "사건을 불러오는 중…" : "사건을 불러오지 못했습니다"}</p>
@@ -920,8 +1032,21 @@ const Workspace = memo(function Workspace({
           <Investigation c={c} events={sorted} status={st} running={running} id={id} />
         ) : (
           <section className="panel progress-panel" aria-label="조사 경과">
-            <CaseTabs id={id} c={c} events={sorted} screens={screens} tab={tab} onTab={setTab} pick={pick} onPick={setPick} />
-            <CaseFooterBar c={c} id={id} running={running} canExport={canExport} verify={verify} onVerify={setVerify} />
+            <CaseTabs
+              id={id}
+              c={c}
+              events={sorted}
+              screens={screens}
+              tab={tab}
+              onTab={setTab}
+              pick={pick}
+              onPick={setPick}
+              related={related}
+              canCreate={canExport}
+              onOpen={onOpen}
+              onChanged={() => getCase(id).then(setC).catch(() => undefined)}
+            />
+            <CaseFooterBar c={c} id={id} running={running || related} related={related} canExport={canExport} verify={verify} onVerify={setVerify} />
           </section>
         )}
       </div>
@@ -1409,7 +1534,7 @@ function Summary({ c, running, reasons, picked, onPick }: { c: CaseOut | null; r
 const CIRCLED = [..."①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"];
 
 // ── 조사 경과 탭: 근거 화면(기본) · 경로 지도 · 조사 녹화 · 행동 기록 ─────────────
-type TabId = "screens" | "path" | "rec" | "log";
+type TabId = "screens" | "path" | "related" | "links" | "rec" | "log";
 type VerifyState = { ok: boolean; records: number; errors: string[] } | null;
 
 function CaseTabs({
@@ -1421,6 +1546,10 @@ function CaseTabs({
   onTab,
   pick,
   onPick,
+  related,
+  canCreate,
+  onOpen,
+  onChanged,
 }: {
   id: string;
   c: CaseOut | null;
@@ -1430,7 +1559,12 @@ function CaseTabs({
   onTab: (t: TabId) => void;
   pick: string | null;
   onPick: (f: string) => void;
+  related: boolean;
+  canCreate: boolean;
+  onOpen: (id: string) => void;
+  onChanged: () => void;
 }) {
+  const nCands = (c?.candidates ?? []).filter((x) => typeof x !== "string").length;
   // 녹화: 원래 주소와 연관 후보 하위 조사마다 하나씩(고른 것은 사건이 바뀌면 원래 주소로)
   const recs = useMemo(() => recordings(events), [events]);
   const [recPick, setRecPick] = useState({ id, sub: 0 });
@@ -1439,6 +1573,8 @@ function CaseTabs({
   const tabs: [TabId, string][] = [
     ["screens", `근거 화면 ${screens.length}`],
     ["path", "경로 지도"],
+    ["related", `연관 사이트 ${nCands}`],
+    ["links", "연결된 사건"],
     ["rec", recs.length > 1 ? `조사 녹화 ${recs.length}` : "조사 녹화"],
     ["log", `행동 기록 ${events.length}`],
   ];
@@ -1485,6 +1621,8 @@ function CaseTabs({
       <div className="tab-panel" role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
         {tab === "screens" && <ScreensTab id={id} c={c} events={events} screens={screens} pick={pick} onPick={onPick} />}
         {tab === "path" && c && <PathTab c={c} events={events} />}
+        {tab === "links" && <LinksTab id={id} onOpen={onOpen} />}
+        {tab === "related" && c && <RelatedTab id={id} c={c} events={events} related={related} canCreate={canCreate} onOpen={onOpen} onChanged={onChanged} />}
         {tab === "rec" && (
           <div className="floor">
             {recs.length > 1 && (
@@ -1508,6 +1646,336 @@ function CaseTabs({
         )}
       </div>
     </>
+  );
+}
+
+// 사건 요약 한 줄(연결된 사건·연관 묶음 공통)
+function BriefRow({ b, onOpen, note }: { b: { id: string; url: string; status: string; threat: string | null; verdict: string | null }; onOpen: (id: string) => void; note?: string }) {
+  const verdict = b.verdict === "threat" ? "위협 확정" : b.verdict === "benign" ? "정상 확정" : b.verdict === "hold" ? "보류" : "";
+  return (
+    <li className="rel-row">
+      <span className="rel-site">
+        <span className="mono">{clip(hostPath(b.url), 60)}</span>
+        <span className="muted small">
+          {note ? `${note} · ` : ""}
+          {STATUS_LABEL[b.status] ?? b.status}
+          {b.threat ? ` · AI ${THREAT_LABEL[b.threat] ?? b.threat}` : ""}
+          {verdict ? ` · ${verdict}` : ""}
+        </span>
+      </span>
+      <span />
+      <button type="button" className="btn btn-ghost btn-sm" onClick={() => onOpen(b.id)}>
+        사건 보기
+      </button>
+    </li>
+  );
+}
+
+// 연결된 사건: 부모·자식(연관 후보로 만든 사건)과 같은 사이트가 나온 다른 사건(사이트별)
+function LinksTab({ id, onOpen }: { id: string; onOpen: (id: string) => void }) {
+  const [links, setLinks] = useState<CaseLinks | null>(null);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    let live = true;
+    getLinks(id)
+      .then((v) => live && setLinks(v))
+      .catch((e) => live && setErr(e instanceof Error ? e.message : "불러오지 못했습니다"));
+    return () => {
+      live = false;
+    };
+  }, [id]);
+  if (err) return <div className="floor"><p className="err">{err}</p></div>;
+  if (!links) return <div className="floor"><p className="muted">불러오는 중…</p></div>;
+  const none = !links.parent && links.children.length === 0 && links.shared.length === 0;
+  return (
+    <div className="floor">
+      {none && <p className="muted">연결된 사건 없음</p>}
+      {links.parent && (
+        <>
+          <h3 className="sub-h">이 사이트를 찾은 사건</h3>
+          <ul className="rel-list">
+            <BriefRow b={links.parent} onOpen={onOpen} />
+          </ul>
+        </>
+      )}
+      {links.children.length > 0 && (
+        <>
+          <h3 className="sub-h">이 사건에서 찾아 접수한 사건</h3>
+          <ul className="rel-list">
+            {links.children.map((k) => (
+              <BriefRow key={k.id} b={k} onOpen={onOpen} note={k.auto ? "자동" : "담당자"} />
+            ))}
+          </ul>
+        </>
+      )}
+      {links.shared.map((g) => (
+        <section key={g.site}>
+          <h3 className="sub-h">
+            같은 사이트 <span className="mono">{clip(g.site, 60)}</span> · {g.cases.length}건
+          </h3>
+          <ul className="rel-list">
+            {g.cases.map((b) => (
+              <BriefRow key={b.id} b={b} onOpen={onOpen} />
+            ))}
+          </ul>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+// 분류 폴더 '연관 묶음': 같은 사이트로 이어지는 사건 묶음. 묶음을 고르면 사이트·사건 표, CSV(조사관 이상),
+// 위협 사이트는 [새 사건으로 접수](그 사이트를 후보로 가진 사건에서, 회선 차단 추정이어도 버튼을 둔다)
+function GroupsPane({ canExport, onOpenCase }: { canExport: boolean; onOpenCase: (id: string) => void }) {
+  const [data, setData] = useState<{ groups: RelatedGroup[]; truncated: boolean; ms: number } | null>(null);
+  const [err, setErr] = useState("");
+  const [pick, setPick] = useState<string | null>(null);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState("");
+  const load = useCallback(() => {
+    listGroups()
+      .then(setData)
+      .catch((e) => setErr(e instanceof Error ? e.message : "불러오지 못했습니다"));
+  }, []);
+  useEffect(load, [load]);
+  const g = data?.groups.find((x) => x.key === pick) ?? data?.groups[0] ?? null;
+  return (
+    <>
+      <section className="caselist" aria-label="연관 묶음 목록">
+        <div className="caselist-head">
+          <h2>연관 묶음</h2>
+          <span className="muted small">{data ? `${data.groups.length}묶음${data.truncated ? " · 최근 사건만 계산" : ""}` : ""}</span>
+          <div className="spacer" />
+          <button type="button" className="btn btn-ghost btn-sm" onClick={load}>
+            다시 계산
+          </button>
+        </div>
+        {err && <p className="err" style={{ padding: "8px 16px" }}>{err}</p>}
+        <ul className="rows scroll">
+          {(data?.groups ?? []).map((x) => (
+            <li key={x.key}>
+              <button type="button" className="row" aria-current={g?.key === x.key} onClick={() => setPick(x.key)}>
+                <span className="row-dot" />
+                <span className="row-host">{clip(x.sites[0]?.site ?? x.key, 50)}</span>
+                <span className="row-time">{x.cases.length}건</span>
+                <span className="row-sub">
+                  위협 사이트 {x.threat_sites} · 회선 차단 추정 {x.blocked_estimate_sites} · 사이트 {x.sites.length}
+                </span>
+              </button>
+            </li>
+          ))}
+          {data && data.groups.length === 0 && <li className="muted" style={{ padding: 16 }}>같은 사이트로 이어진 사건이 아직 없습니다</li>}
+        </ul>
+      </section>
+      <section className="detail scroll" aria-label="연관 묶음 상세">
+        {!g ? (
+          <div className="empty">
+            <h2>연관 묶음</h2>
+            <p>같은 사이트(단축 서비스·공식·흔한 대형 사이트 제외, 공용 호스팅은 호스트가 같을 때만)가 나온 사건끼리 묶습니다.</p>
+          </div>
+        ) : (
+          <div className="detail-body">
+            <div className="statusline">
+              <span className="chip st-REVIEW_REQUIRED">사건 {g.cases.length}건</span>
+              <span className="muted">위협 사이트 {g.threat_sites} · 회선 차단 추정 {g.blocked_estimate_sites}</span>
+              <div className="spacer" />
+              {canExport ? (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  disabled={busy !== ""}
+                  onClick={async () => {
+                    setBusy("csv");
+                    setMsg("");
+                    try {
+                      await downloadGroupCsv(g.key);
+                    } catch (e) {
+                      setMsg(e instanceof Error ? e.message : "내려받기 실패");
+                    } finally {
+                      setBusy("");
+                    }
+                  }}
+                >
+                  CSV 내려받기
+                </button>
+              ) : (
+                <span className="muted small">CSV 는 조사관 이상만</span>
+              )}
+            </div>
+            {msg && <p className="err" role="alert">{msg}</p>}
+            <h3 className="sub-h">사이트</h3>
+            <ul className="rel-list">
+              {g.sites.map((s) => (
+                <li key={s.site} className="rel-row">
+                  <span className="rel-site">
+                    <span className="mono">{clip(s.site, 60)}</span>
+                    <span className="muted small">
+                      사건 {s.cases}건 · {s.hosts.slice(0, 3).map((x) => clip(x, 40)).join(", ")}
+                    </span>
+                  </span>
+                  <span className={`chip ${s.threat ? "st-threat" : ""}`}>
+                    {s.threat ? `위협 의심 · ${THREAT_LABEL[s.threat] ?? s.threat}` : "판단 없음"}
+                    {s.blocked ? " · 회선 차단 추정" : ""}
+                  </span>
+                  {canExport && s.threat && s.candidate ? (
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      disabled={busy !== ""}
+                      onClick={async () => {
+                        const cand = s.candidate;
+                        if (!cand) return;
+                        setBusy(s.site);
+                        setMsg("");
+                        try {
+                          const parent = await getCase(cand.case_id);
+                          const url = (parent.candidates ?? []).find((x): x is Candidate => typeof x !== "string" && (x.host ?? "") === cand.host)?.url;
+                          if (!url) throw new Error("이 사이트를 후보로 가진 사건을 찾지 못했습니다");
+                          const child = await createRelated(cand.case_id, url);
+                          onOpenCase(child.id);
+                        } catch (e) {
+                          setMsg(e instanceof Error ? e.message : "접수하지 못했습니다");
+                        } finally {
+                          setBusy("");
+                        }
+                      }}
+                    >
+                      {busy === s.site ? "접수 중" : "새 사건으로 접수"}
+                    </button>
+                  ) : (
+                    <span />
+                  )}
+                </li>
+              ))}
+            </ul>
+            <h3 className="sub-h">사건</h3>
+            <ul className="rel-list">
+              {g.cases.map((b) => (
+                <BriefRow key={b.id} b={b} onOpen={onOpenCase} />
+              ))}
+            </ul>
+            {data && <p className="muted small">묶음 계산 {data.ms}ms</p>}
+          </div>
+        )}
+      </section>
+    </>
+  );
+}
+
+// 자동 사건을 만들지 않은 이유(API auto_skipped)
+const AUTO_SKIP_LABEL: Record<string, string> = dict({
+  disabled: "자동 접수 꺼짐",
+  depth: "연관 사건의 후보",
+  not_threat: "위협으로 보지 않음",
+  shortener: "단축 주소",
+  limit_or_duplicate: "자동 한도·중복",
+});
+
+// 연관 후보 상태(근거 카드·경로 지도와 같은 기준). pending: 지금 하위 조사 중인 후보
+function candState(x: Candidate, pending: boolean): { label: string; tone: string } {
+  const base = candStateBase(x, pending);
+  // 회선 차단은 조사 대상 서버가 흉내 낼 수 있는 추정이라 위협 표시를 가리지 않고 덧붙인다
+  return x.blocked && !pending ? { ...base, label: `${base.label} · 회선 차단 추정` } : base;
+}
+function candStateBase(x: Candidate, pending: boolean): { label: string; tone: string } {
+  if (pending) return { label: "조사 중", tone: "st-RUNNING" };
+  if (x.reputation_match) return { label: "평판 위험", tone: "st-threat" };
+  if (!x.sub) return { label: "기록만", tone: "" };
+  const th = x.threat ?? "";
+  if (th && th !== "benign" && th !== "unknown") {
+    return { label: `${x.hold ? "보류" : "위협 의심"} · ${THREAT_LABEL[th] ?? th}${x.probability != null ? ` ${pct(x.probability)}` : ""}`, tone: x.hold ? "st-REVIEW_REQUIRED" : "st-threat" };
+  }
+  if (x.hold) return { label: "보류", tone: "st-REVIEW_REQUIRED" };
+  return th === "benign" ? { label: "정상", tone: "st-COMPLETED" } : { label: "판단 없음", tone: "" };
+}
+
+// 연관 사이트: 이 신고에서 찾은 다른 사이트(같은 조직이 운영할 수 있는 곳). 하위 조사는 원래 판정을 바꾸지 않는다.
+// 후보마다 [새 사건으로 접수](조사관 이상) → 전체 조사. 이미 만든 후보는 그 사건으로 간다
+function RelatedTab({
+  id,
+  c,
+  events,
+  related,
+  canCreate,
+  onOpen,
+  onChanged,
+}: {
+  id: string;
+  c: CaseOut;
+  events: EvidenceEvent[];
+  related: boolean;
+  canCreate: boolean;
+  onOpen: (id: string) => void;
+  onChanged: () => void;
+}) {
+  const cands = (c.candidates ?? []).filter((x): x is Candidate => typeof x !== "string");
+  const kids = new Map((c.children ?? []).map((k) => [k.candidate_url, k]));
+  const skipped = new Map((c.auto_skipped ?? []).map((x) => [x.url, x.reason]));
+  const planned = num([...events].reverse().find((e) => e.kind === "candidates")?.data.investigated);
+  const [busy, setBusy] = useState("");
+  const [msg, setMsg] = useState("");
+  if (cands.length === 0) {
+    return (
+      <div className="floor">
+        <p className="muted">연관 후보 없음</p>
+      </div>
+    );
+  }
+  return (
+    <div className="floor">
+      <p className="muted small">같은 조직이 운영할 수 있는 다른 사이트입니다. 하위 조사는 원래 사건의 판정을 바꾸지 않습니다.</p>
+      <ul className="rel-list">
+        {cands.map((x, i) => {
+          const kid = kids.get(x.url);
+          const st = candState(x, related && !x.sub && Number.isFinite(planned) && i < planned);
+          return (
+            <li key={x.url} className="rel-row">
+              <span className="rel-site">
+                <span className="mono">{clip(x.host ?? hostPath(x.url), 48)}</span>
+                <span className="muted small">
+                  {x.source === "via" ? "경유" : "링크"}
+                  {x.text ? ` · “${clip(x.text, 40)}”` : ""}
+                  {!kid && skipped.has(x.url) ? ` · 자동 접수 안 함(${AUTO_SKIP_LABEL[skipped.get(x.url) ?? ""] ?? "기타"})` : ""}
+                </span>
+              </span>
+              <span className={`chip ${st.tone}`}>{st.label}</span>
+              {kid ? (
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => onOpen(kid.id)}>
+                  {kid.auto ? "자동 접수됨 · " : ""}사건 보기 · {kid.verdict === "threat" ? "위협 확정" : kid.verdict === "benign" ? "정상 확정" : (STATUS_LABEL[kid.status] ?? kid.status)}
+                </button>
+              ) : canCreate ? (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  disabled={busy !== ""}
+                  onClick={async () => {
+                    setBusy(x.url);
+                    setMsg("");
+                    try {
+                      await createRelated(id, x.url);
+                      onChanged();
+                    } catch (e) {
+                      setMsg(e instanceof Error ? e.message : "접수하지 못했습니다");
+                    } finally {
+                      setBusy("");
+                    }
+                  }}
+                >
+                  {busy === x.url ? "접수 중" : "새 사건으로 접수"}
+                </button>
+              ) : (
+                <span />
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {msg && (
+        <p className="err" role="alert">
+          {msg}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -1709,6 +2177,7 @@ function CaseFooterBar({
   c,
   id,
   running,
+  related = false,
   canExport,
   verify,
   onVerify,
@@ -1716,6 +2185,7 @@ function CaseFooterBar({
   c: CaseOut | null;
   id: string;
   running: boolean;
+  related?: boolean;
   canExport: boolean;
   verify: VerifyState;
   onVerify: (v: VerifyState) => void;
@@ -1795,6 +2265,7 @@ function CaseFooterBar({
       ) : (
         <span className="muted small">보고서·패키지 내려받기는 조사관 이상만 할 수 있습니다</span>
       )}
+      {related && canExport && <span className="muted small">연관 사이트 조사가 끝나면 내려받을 수 있습니다</span>}
       {pkgMsg && (
         <p className="err" role="alert" style={{ flexBasis: "100%" }}>
           {pkgMsg}

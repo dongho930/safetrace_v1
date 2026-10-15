@@ -9,8 +9,6 @@ from __future__ import annotations
 import io
 import threading
 from collections import OrderedDict
-from pathlib import Path
-
 from PIL import Image
 
 Image.MAX_IMAGE_PIXELS = 20_000_000  # 에이전트 캡처 최대(1280×6000)보다 넉넉히, 그 이상은 거부
@@ -18,29 +16,28 @@ MAX_WIDTH = 1280
 QUALITY = 72
 _CACHE_ITEMS = 64
 
-_cache: OrderedDict[tuple[str, int, int], tuple[bytes, str]] = OrderedDict()
+_cache: OrderedDict[tuple, tuple[bytes, str]] = OrderedDict()
 _lock = threading.Lock()
 
 
-def preview_image(path: Path) -> tuple[bytes, str]:
-    """(내용, media type). 단순한 화면은 PNG 가 더 작으므로, JPEG 가 원본보다 크면 원본을 그대로 준다."""
-    st = path.stat()
-    key = (str(path), st.st_mtime_ns, st.st_size)
+def preview_image(data: bytes, key: tuple) -> tuple[bytes, str]:
+    """(내용, media type). data: 원본 PNG 바이트(호출한 쪽이 증거 볼륨에서 안전하게 읽은 것), key: 캐시 열쇠(경로·수정
+    시각·크기). 단순한 화면은 PNG 가 더 작으므로, JPEG 가 원본보다 크면 원본을 그대로 준다."""
     with _lock:
         if key in _cache:
             _cache.move_to_end(key)
             return _cache[key]
-    with Image.open(path) as im:
+    with Image.open(io.BytesIO(data)) as im:
         rgb = im.convert("RGB")
     if rgb.width > MAX_WIDTH:
         rgb = rgb.resize((MAX_WIDTH, round(rgb.height * MAX_WIDTH / rgb.width)), Image.Resampling.LANCZOS)
     buf = io.BytesIO()
     rgb.save(buf, "JPEG", quality=QUALITY, optimize=True, progressive=True)
-    data = (buf.getvalue(), "image/jpeg")
-    if len(data[0]) >= st.st_size:
-        data = (path.read_bytes(), "image/png")
+    out = (buf.getvalue(), "image/jpeg")
+    if len(out[0]) >= len(data):
+        out = (data, "image/png")
     with _lock:
-        _cache[key] = data
+        _cache[key] = out
         while len(_cache) > _CACHE_ITEMS:
             _cache.popitem(last=False)
-    return data
+    return out

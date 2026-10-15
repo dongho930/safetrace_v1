@@ -139,3 +139,19 @@ def test_related_csv_samples_are_formula_safe(tmp_path):
     rows = list(_csv.reader(out.open(encoding="utf-8-sig")))
     assert rows[1][0] == "'=cmd.example" and rows[1][2] == "'+evil" and rows[1][8] == "scam"  # 위협 먼저
     assert rows[2][8] == "benign"
+
+
+def test_related_summary_counts_auto_targets():
+    """related-sites PR 4b: 평가 기록에서 자동 사건을 만들 후보(조건 1~6)를 API 와 같은 함수로 센다."""
+    from eval_agent import related_summary
+
+    good = {"url": "https://g.example/", "host": "g.example", "site": "g.example", "sub": 1, "status": "COMPLETED",
+            "threat": "illegal_gambling", "probability": 0.9, "hold": False, "reputation_match": False, "blocked": None}
+    held = {**good, "url": "https://h.example/", "site": "h.example", "probability": 0.42, "hold": True}
+    recs = [{"group": "kisa", "expected": "malicious", "url": "u", "status": "COMPLETED", "threat": "phishing",
+             "seconds": 9.0, "related": [good, held]},
+            {"group": "normal", "expected": "benign", "url": "n", "status": "COMPLETED", "threat": "benign",
+             "seconds": 5.0, "related": []}]
+    m = related_summary(recs)
+    assert (m["kisa"]["auto"], m["kisa"]["auto_sites"]) == (1, ["g.example"])
+    assert m["normal"]["auto"] == 0

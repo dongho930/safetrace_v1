@@ -86,6 +86,11 @@ class Settings(BaseSettings):
     # 접수 한도: 끝나지 않은(대기·조사 중) 사건 수. 주체(계정·자동화 토큰)별, 전체
     case_max_pending_per_principal: int = Field(20, ge=1)
     case_max_pending_total: int = Field(200, ge=1)
+    # 연관 후보 자동 사건(related.py 선별 조건 통과만): 켜기, 부모당 개수, 끝나지 않은 자동 사건 전체, 같은 도착 호스트 중복 기간
+    related_auto: bool = True
+    related_auto_per_case: int = Field(3, ge=0, le=3)
+    related_auto_max_pending: int = Field(10, ge=0, le=50)
+    related_auto_dedup_days: int = Field(7, ge=1, le=30)
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
 
 

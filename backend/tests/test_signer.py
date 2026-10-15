@@ -223,6 +223,51 @@ def test_close_failure_does_not_verify(api_svc, monkeypatch):
     assert _case(api_svc).head_seq == 2
 
 
+# ── Codex(related-sites PR 3~5) F1: 다른 사건의 서명 기록으로 원래 결과의 끝을 고정 ─────
+_BENIGN = {"threat": "benign", "probability": 0.99, "hold": False}
+
+
+def _main_chain(api_svc, cid):
+    """runner 와 같은 순서로 끝나는 원래 조사(마지막이 연관 후보 기록)."""
+    w = EvidenceWriter(api_svc["root"], cid, api_svc["agent"])
+    w.append("start", {"url": "http://example.test/"})
+    w.append("finish", {"reason": "agent_finished", "final_url": "http://example.test/"})
+    w.append("threat", dict(_BENIGN))
+    w.append("candidates", {"found": [], "followup": True, "investigated": 1,
+                            "main": {"status": "COMPLETED", "reason": "agent_finished"}})
+    return w
+
+
+def _main_event(seq):
+    return {"type": "status", "status": "RUNNING", "phase": "related", "main_head": seq,
+            "main": {"status": "COMPLETED", "reason": "agent_finished"}, "threat": dict(_BENIGN)}
+
+
+@pytest.mark.parametrize("b_records", [1, 4])
+def test_main_head_rejects_other_case_chain(api_svc, b_records):
+    """서명에는 사건 id 가 없어서, 다른 사건(A)의 서명된 원래 조사 기록을 이 사건(B) 폴더에 복사해 넣으면 체인 앞부분
+    검증만으로는 통과했다. 이 사건의 서명 서비스 head 까지 이어지는지 대조해 거절한다(B 의 기록이 더 짧을 때·같은 길이일 때)."""
+    import shutil
+
+    from safetrace.store import Case
+
+    main, b = api_svc["main"], api_svc["case_id"]
+    with main.store.session() as s, s.begin():
+        a = Case(url="http://example.test/", source="manual", created_by="test", status="RUNNING")
+        s.add(a)
+    api_svc["admin"].open(a.id)
+    wa = _main_chain(api_svc, a.id)
+    main.record_event(b, {"type": "status", "status": "RUNNING"})
+    wb = EvidenceWriter(api_svc["root"], b, api_svc["agent"])
+    for i in range(b_records):
+        wb.append("observe", {"step": i}, [])
+    shutil.copyfile(wa.chain_path, wb.chain_path)  # 뚫린 워커가 A 의 체인을 B 에 넣음
+    main.record_event(b, _main_event(wa.head.seq))
+    assert main.store.phases_for([b]) == {}
+    main.record_event(a.id, _main_event(wa.head.seq))  # 자기 사건의 체인이면 받는다
+    assert main.store.phases_for([a.id])[a.id].main_head_seq == wa.head.seq
+
+
 def test_oversized_body_rejected_while_streaming(svc):
     """F3: 1MiB 를 넘는 본문은 다 받기 전에 413 으로 끊는다."""
     import asyncio

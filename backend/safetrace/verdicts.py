@@ -13,7 +13,7 @@ import re
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from .store import Case, Store, Verdict
+from .store import Case, CasePhase, Store, Verdict
 
 DECISIONS = ("threat", "benign", "hold")  # 위협 확정 | 정상 | 보류
 THREATS = ("phishing", "scam", "illegal_gambling", "malware")
@@ -58,21 +58,29 @@ def _latest(s, case_id: str) -> Verdict | None:
 
 def save(store: Store, case_id: str, *, expected_rev: int, decision: str, threat: str | None, note: str | None,
          reviewer: str, user_id: int) -> Verdict:
-    """expected_rev: 담당자가 보고 있던 판 번호(판정이 없었으면 0). 저장한 새 판을 돌려준다."""
+    """expected_rev: 담당자가 보고 있던 판 번호(판정이 없었으면 0). 저장한 새 판을 돌려준다.
+
+    원래 결과가 나온 뒤 연관 사이트를 조사하는 중인 사건(case_phase=related)은 조사 중이어도 판정을 받는다. 판정에 묶는
+    증거 끝은 원래 조사의 끝(API 가 서명까지 검증해 원래 결과와 함께 고정한 값)이다: 저장하는 순간의 최신 끝을 쓰면
+    담당자가 보지 않은 하위 조사 기록까지 '확인한 범위'에 들어간다(Codex 지적)."""
     check(decision, threat)
     note = clean_note(note)
     with store.session() as s:
         c = s.get(Case, case_id)
         if c is None:
             raise LookupError(case_id)
+        head = (c.head_seq, c.head_hash)
         if c.status in _UNFINISHED:
-            raise VerdictError("조사가 끝난 뒤에 판정할 수 있습니다")
+            ph = s.get(CasePhase, case_id)
+            if c.status != "RUNNING" or ph is None or ph.phase != "related":
+                raise VerdictError("조사가 끝난 뒤에 판정할 수 있습니다")
+            head = (ph.main_head_seq, ph.main_head_hash)
         cur = _latest(s, case_id)
         if (cur.rev if cur else 0) != expected_rev:
             raise VerdictConflict(cur)
         v = Verdict(case_id=case_id, rev=expected_rev + 1, decision=decision, threat=threat, note=note,
                     reviewer=reviewer, user_id=user_id, ai_threat=(c.threat or {}).get("threat"),
-                    head_seq=c.head_seq, head_hash=c.head_hash)
+                    head_seq=head[0], head_hash=head[1])
         s.add(v)
         try:
             s.commit()

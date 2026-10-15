@@ -47,7 +47,17 @@ export type CaseOut = {
   head_seq: number | null;
   created_at: string;
   verdict: Verdict | null; // 담당자의 현재 판정(없으면 null)
+  phase: "related" | null; // 원래 결과가 나왔고 연관 사이트를 조사하는 중
+  main_status: string | null; // 원래 결과의 상태(phase 가 related 일 때 폴더·판정에 쓴다)
+  parent_id: string | null; // 연관 사건이면 그 후보가 나온 부모 사건
+  parent_url: string | null;
+  auto: boolean | null; // 자동으로 만든 연관 사건인지(PR 4b)
+  children: ChildCase[] | null; // 이 사건의 후보로 만든 사건(상세에만)
+  auto_skipped: { url: string; reason: string }[] | null; // 하위 조사했지만 자동 사건이 없는 후보와 이유(상세에만)
 };
+
+// 연관 후보로 만든 사건(부모 사건 상세의 요약)
+export type ChildCase = { id: string; url: string; candidate_url: string; status: string; threat: string | null; verdict: string | null; auto: boolean };
 
 // 담당자 판정. 덮어쓰지 않고 판(rev)을 쌓는다. 저장할 때 보고 있던 판 번호를 보내 동시 수정을 막는다(409)
 export type Decision = "threat" | "benign" | "hold";
@@ -70,7 +80,8 @@ export type EvidenceEvent = {
   files: string[];
   hash: string;
 };
-export type StatusEvent = { type: "status"; status: string; reason: string | null; threat?: Threat | null };
+// phase="related": 원래 결과가 나왔고 연관 사이트를 조사하는 중(related-sites PR 3)
+export type StatusEvent = { type: "status"; status: string; reason: string | null; threat?: Threat | null; phase?: "related" };
 export type StepEvent = { type: "step"; step: number; url: string };
 export type AgentEvent = EvidenceEvent | StatusEvent | StepEvent;
 
@@ -162,6 +173,74 @@ export const createCase = (url: string, source: string) =>
     body: JSON.stringify({ url, source }),
     headers: { "Idempotency-Key": crypto.randomUUID() },
   });
+// 사건 간 연결(related-sites PR 5). 값은 조사 대상 페이지에서 온 글자라 정해진 모양만 남긴다
+export type CaseBrief = { id: string; url: string; status: string; threat: string | null; verdict: string | null };
+export type CaseLinks = { parent: CaseBrief | null; children: (CaseBrief & { auto: boolean })[]; shared: { site: string; hosts: string[]; roles: string[]; cases: CaseBrief[] }[] };
+export type GroupSite = { site: string; hosts: string[]; threat: string | null; blocked: boolean; cases: number; candidate: { case_id: string; host: string } | null };
+export type RelatedGroup = { key: string; cases: CaseBrief[]; sites: GroupSite[]; threat_sites: number; blocked_estimate_sites: number };
+const brief = (x: unknown): CaseBrief[] =>
+  isObj(x) && typeof x.id === "string" && typeof x.url === "string" && typeof x.status === "string"
+    ? [{ id: x.id.slice(0, 36), url: x.url.slice(0, 2000), status: x.status.slice(0, 24), threat: strOr(x.threat)?.slice(0, 32) ?? null, verdict: strOr(x.verdict)?.slice(0, 16) ?? null }]
+    : [];
+export const getLinks = async (id: string): Promise<CaseLinks> => {
+  const v = await req<unknown>(`/api/cases/${encodeURIComponent(id)}/links`);
+  const o = isObj(v) ? v : {};
+  return {
+    parent: brief(o.parent)[0] ?? null,
+    children: list(o.children).slice(0, 50).flatMap((x) => brief(x).map((b) => ({ ...b, auto: isObj(x) && x.auto === true }))),
+    shared: list(o.shared)
+      .slice(0, 50)
+      .flatMap((g) => (isObj(g) && typeof g.site === "string" ? [{ site: g.site.slice(0, 253), hosts: strs(g.hosts).slice(0, 10), roles: strs(g.roles).slice(0, 5), cases: list(g.cases).slice(0, 50).flatMap(brief) }] : [])),
+  };
+};
+export const listGroups = async (): Promise<{ groups: RelatedGroup[]; truncated: boolean; ms: number }> => {
+  const v = await req<unknown>("/api/related-groups?min=2&limit=50");
+  const o = isObj(v) ? v : {};
+  const groups = list(o.groups)
+    .slice(0, 50)
+    .flatMap((g): RelatedGroup[] =>
+      isObj(g) && typeof g.key === "string" && /^[0-9a-f]{16}$/.test(g.key)
+        ? [{
+            key: g.key,
+            cases: list(g.cases).slice(0, 200).flatMap(brief),
+            sites: list(g.sites)
+              .slice(0, 300)
+              .flatMap((x): GroupSite[] =>
+                isObj(x) && typeof x.site === "string"
+                  ? [{
+                      site: x.site.slice(0, 253),
+                      hosts: strs(x.hosts).slice(0, 10),
+                      threat: strOr(x.threat)?.slice(0, 32) ?? null,
+                      blocked: x.blocked === true,
+                      cases: typeof x.cases === "number" ? x.cases : 0,
+                      candidate: isObj(x.candidate) && typeof x.candidate.case_id === "string" && typeof x.candidate.host === "string" ? { case_id: x.candidate.case_id.slice(0, 36), host: x.candidate.host.slice(0, 253) } : null,
+                    }]
+                  : [],
+              ),
+            threat_sites: typeof g.threat_sites === "number" ? g.threat_sites : 0,
+            blocked_estimate_sites: typeof g.blocked_estimate_sites === "number" ? g.blocked_estimate_sites : 0,
+          }]
+        : [],
+    );
+  return { groups, truncated: o.truncated === true, ms: typeof o.ms === "number" ? o.ms : 0 };
+};
+export async function downloadGroupCsv(key: string): Promise<void> {
+  const r = await send(`/api/related-groups/${encodeURIComponent(key)}.csv`, {});
+  const name = /filename="([^"]+)"/.exec(r.headers.get("Content-Disposition") ?? "")?.[1] ?? `safetrace-related-${key.slice(0, 8)}.csv`;
+  const url = URL.createObjectURL(await r.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+// 연관 후보 하나를 새 사건으로 접수(조사관 이상). 이미 만든 후보면 그 사건을 돌려준다
+export const createRelated = async (id: string, url: string) => {
+  const c = cleanCase(await req<unknown>(`/api/cases/${encodeURIComponent(id)}/related`, { method: "POST", body: JSON.stringify({ url }) }));
+  if (!c) throw new ApiError(500, "사건 형식 오류");
+  return c;
+};
 export const verifyCase = (id: string) =>
   req<{ ok: boolean; records: number; errors: string[] }>(`/api/cases/${encodeURIComponent(id)}/verify`, {
     method: "POST",
@@ -247,7 +326,12 @@ export function cleanEvent(raw: unknown): AgentEvent | null {
   }
   if (raw.type === "status") {
     if (typeof raw.status !== "string") return null;
-    return { type: "status", status: raw.status.slice(0, 24), reason: typeof raw.reason === "string" ? raw.reason : null };
+    return {
+      type: "status",
+      status: raw.status.slice(0, 24),
+      reason: typeof raw.reason === "string" ? raw.reason : null,
+      ...(raw.phase === "related" ? { phase: "related" as const } : {}),
+    };
   }
   if (raw.type === "step") {
     if (typeof raw.step !== "number" || typeof raw.url !== "string") return null;
@@ -320,6 +404,18 @@ function cleanCandidate(x: unknown): Candidate[] {
     text: strOr(x.text)?.slice(0, 80) ?? undefined,
   }];
 }
+function cleanChild(x: unknown): ChildCase[] {
+  if (!isObj(x) || typeof x.id !== "string" || typeof x.url !== "string" || typeof x.status !== "string") return [];
+  return [{
+    id: x.id.slice(0, 36),
+    url: x.url.slice(0, 2000),
+    candidate_url: strOr(x.candidate_url)?.slice(0, 2000) ?? x.url.slice(0, 2000),
+    status: x.status.slice(0, 24),
+    threat: strOr(x.threat)?.slice(0, 32) ?? null,
+    verdict: strOr(x.verdict)?.slice(0, 16) ?? null,
+    auto: x.auto === true,
+  }];
+}
 export function cleanCase(v: unknown): CaseOut | null {
   if (!isObj(v) || typeof v.id !== "string" || typeof v.url !== "string" || typeof v.status !== "string" || typeof v.created_at !== "string") return null;
   const sb = isObj(v.safebrowsing) && typeof v.safebrowsing.status === "string"
@@ -339,5 +435,16 @@ export function cleanCase(v: unknown): CaseOut | null {
     head_seq: typeof v.head_seq === "number" ? v.head_seq : null,
     created_at: v.created_at,
     verdict: ver,
+    phase: v.phase === "related" ? "related" : null,
+    main_status: strOr(v.main_status)?.slice(0, 24) ?? null,
+    parent_id: strOr(v.parent_id)?.slice(0, 36) ?? null,
+    parent_url: strOr(v.parent_url)?.slice(0, 2000) ?? null,
+    auto: typeof v.auto === "boolean" ? v.auto : null,
+    children: Array.isArray(v.children) ? list(v.children).slice(0, 50).flatMap(cleanChild) : null,
+    auto_skipped: Array.isArray(v.auto_skipped)
+      ? list(v.auto_skipped)
+          .slice(0, 20)
+          .flatMap((x) => (isObj(x) && typeof x.url === "string" && typeof x.reason === "string" ? [{ url: x.url.slice(0, 2000), reason: x.reason.slice(0, 32) }] : []))
+      : null,
   };
 }
