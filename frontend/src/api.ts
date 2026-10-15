@@ -177,7 +177,7 @@ export const createCase = (url: string, source: string) =>
 export type CaseBrief = { id: string; url: string; status: string; threat: string | null; verdict: string | null };
 export type CaseLinks = { parent: CaseBrief | null; children: (CaseBrief & { auto: boolean })[]; shared: { site: string; hosts: string[]; roles: string[]; cases: CaseBrief[] }[] };
 export type GroupSite = { site: string; hosts: string[]; threat: string | null; blocked: boolean; cases: number; candidate: { case_id: string; host: string } | null };
-export type RelatedGroup = { key: string; cases: CaseBrief[]; sites: GroupSite[]; threat_sites: number; open_threat_sites: number };
+export type RelatedGroup = { key: string; cases: CaseBrief[]; sites: GroupSite[]; threat_sites: number; blocked_estimate_sites: number };
 const brief = (x: unknown): CaseBrief[] =>
   isObj(x) && typeof x.id === "string" && typeof x.url === "string" && typeof x.status === "string"
     ? [{ id: x.id.slice(0, 36), url: x.url.slice(0, 2000), status: x.status.slice(0, 24), threat: strOr(x.threat)?.slice(0, 32) ?? null, verdict: strOr(x.verdict)?.slice(0, 16) ?? null }]
@@ -218,7 +218,7 @@ export const listGroups = async (): Promise<{ groups: RelatedGroup[]; truncated:
                   : [],
               ),
             threat_sites: typeof g.threat_sites === "number" ? g.threat_sites : 0,
-            open_threat_sites: typeof g.open_threat_sites === "number" ? g.open_threat_sites : 0,
+            blocked_estimate_sites: typeof g.blocked_estimate_sites === "number" ? g.blocked_estimate_sites : 0,
           }]
         : [],
     );

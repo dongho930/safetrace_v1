@@ -1725,7 +1725,7 @@ function LinksTab({ id, onOpen }: { id: string; onOpen: (id: string) => void }) 
 }
 
 // 분류 폴더 '연관 묶음': 같은 사이트로 이어지는 사건 묶음. 묶음을 고르면 사이트·사건 표, CSV(조사관 이상),
-// 아직 안 막힌 위협 사이트는 [새 사건으로 접수](그 사이트를 후보로 가진 사건에서)
+// 위협 사이트는 [새 사건으로 접수](그 사이트를 후보로 가진 사건에서, 회선 차단 추정이어도 버튼을 둔다)
 function GroupsPane({ canExport, onOpenCase }: { canExport: boolean; onOpenCase: (id: string) => void }) {
   const [data, setData] = useState<{ groups: RelatedGroup[]; truncated: boolean; ms: number } | null>(null);
   const [err, setErr] = useState("");
@@ -1759,7 +1759,7 @@ function GroupsPane({ canExport, onOpenCase }: { canExport: boolean; onOpenCase:
                 <span className="row-host">{clip(x.sites[0]?.site ?? x.key, 50)}</span>
                 <span className="row-time">{x.cases.length}건</span>
                 <span className="row-sub">
-                  위협 사이트 {x.threat_sites} · 아직 안 막힘 {x.open_threat_sites} · 사이트 {x.sites.length}
+                  위협 사이트 {x.threat_sites} · 회선 차단 추정 {x.blocked_estimate_sites} · 사이트 {x.sites.length}
                 </span>
               </button>
             </li>
@@ -1777,7 +1777,7 @@ function GroupsPane({ canExport, onOpenCase }: { canExport: boolean; onOpenCase:
           <div className="detail-body">
             <div className="statusline">
               <span className="chip st-REVIEW_REQUIRED">사건 {g.cases.length}건</span>
-              <span className="muted">위협 사이트 {g.threat_sites} · 아직 안 막힘 {g.open_threat_sites}</span>
+              <span className="muted">위협 사이트 {g.threat_sites} · 회선 차단 추정 {g.blocked_estimate_sites}</span>
               <div className="spacer" />
               {canExport ? (
                 <button
@@ -1813,10 +1813,11 @@ function GroupsPane({ canExport, onOpenCase }: { canExport: boolean; onOpenCase:
                       사건 {s.cases}건 · {s.hosts.slice(0, 3).map((x) => clip(x, 40)).join(", ")}
                     </span>
                   </span>
-                  <span className={`chip ${s.blocked ? "st-BLOCKED" : s.threat ? "st-threat" : ""}`}>
-                    {s.blocked ? "이미 차단됨" : s.threat ? `위협 의심 · ${THREAT_LABEL[s.threat] ?? s.threat}` : "판단 없음"}
+                  <span className={`chip ${s.threat ? "st-threat" : ""}`}>
+                    {s.threat ? `위협 의심 · ${THREAT_LABEL[s.threat] ?? s.threat}` : "판단 없음"}
+                    {s.blocked ? " · 회선 차단 추정" : ""}
                   </span>
-                  {canExport && s.threat && !s.blocked && s.candidate ? (
+                  {canExport && s.threat && s.candidate ? (
                     <button
                       type="button"
                       className="btn btn-ghost btn-sm"
@@ -1872,9 +1873,13 @@ const AUTO_SKIP_LABEL: Record<string, string> = dict({
 
 // 연관 후보 상태(근거 카드·경로 지도와 같은 기준). pending: 지금 하위 조사 중인 후보
 function candState(x: Candidate, pending: boolean): { label: string; tone: string } {
+  const base = candStateBase(x, pending);
+  // 회선 차단은 조사 대상 서버가 흉내 낼 수 있는 추정이라 위협 표시를 가리지 않고 덧붙인다
+  return x.blocked && !pending ? { ...base, label: `${base.label} · 회선 차단 추정` } : base;
+}
+function candStateBase(x: Candidate, pending: boolean): { label: string; tone: string } {
   if (pending) return { label: "조사 중", tone: "st-RUNNING" };
   if (x.reputation_match) return { label: "평판 위험", tone: "st-threat" };
-  if (x.blocked) return { label: "이미 차단됨", tone: "st-BLOCKED" };
   if (!x.sub) return { label: "기록만", tone: "" };
   const th = x.threat ?? "";
   if (th && th !== "benign" && th !== "unknown") {

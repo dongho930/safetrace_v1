@@ -176,11 +176,12 @@ def record_event(case_id: str, payload: dict) -> None:
     if payload.get("type") == "status" and "phase" in payload:
         # 원래 결과: 워커가 말한 '원래 조사의 마지막 기록'을 믿지 않고 체인 앞부분을 서명까지 검증한 끝으로 바꾼다
         mh = _verify_main_head(case_id, payload.get("main_head"))
-        payload = {k: v for k, v in payload.items() if k != "main_head"}
+        payload = {k: v for k, v in payload.items() if k not in ("main_head", "threat", "final_url")}
         if mh is None:
             store.audit("system", "event.rejected", case_id, "main_head_unverified")
             return
-        payload["main_head"] = {"seq": mh[0], "hash": mh[1]}
+        # 판정 대상이 되는 위협 판단·최종 주소는 이벤트가 아니라 검증한 서명 기록에서 가져온다
+        payload.update(main_head={"seq": mh["seq"], "hash": mh["hash"]}, threat=mh["threat"], final_url=mh["final_url"])
     elif payload.get("type") == "status" and payload.get("status") in TERMINAL:
         ph = store.phases_for([case_id]).get(case_id)
         if ph is not None and (payload.get("status"), payload.get("reason")) != (ph.main_status, ph.main_reason):
@@ -826,7 +827,8 @@ def _related_groups(min_cases: int) -> tuple[list[dict], bool]:
             "sites": [{"site": x["site"], "hosts": sorted(x["hosts"])[:10], "threat": x["threat"],
                        "blocked": x["blocked"], "cases": len(x["cases"]), "candidate": x["candidate"]} for x in listed],
             "threat_sites": sum(1 for x in listed if x["threat"]),
-            "open_threat_sites": sum(1 for x in listed if x["threat"] and not x["blocked"]),
+            # 회선 차단은 조사 대상 서버가 흉내 낼 수 있는 추정이라 위협 집계에서 빼지 않고 따로 센다(Codex 지적)
+            "blocked_estimate_sites": sum(1 for x in listed if x["blocked"]),
         })
     out.sort(key=lambda g: (-len(g["cases"]), g["key"]))
     return out, truncated
@@ -859,7 +861,7 @@ def related_group_csv(group_key: str, p: Annotated[Principal, Depends(need("inve
         raise HTTPException(404, "묶음이 바뀌었습니다. 연관 묶음 목록을 다시 불러오세요")
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["구분", "사이트", "호스트", "AI 판단", "이미 차단됨", "사건 수", "사건 id", "신고 URL", "사건 상태", "담당자 판정"])
+    w.writerow(["구분", "사이트", "호스트", "AI 판단", "회선 차단 추정", "사건 수", "사건 id", "신고 URL", "사건 상태", "담당자 판정"])
     for x in g["sites"]:
         w.writerow([_csv_cell(v) for v in ("사이트", x["site"], " ".join(x["hosts"]), x["threat"], x["blocked"], x["cases"],
                                            "", "", "", "")])
@@ -1052,25 +1054,47 @@ def _evidence_head(c: Case) -> Head | None:
     return Head(h["seq"], h["hash"])
 
 
-def _verify_main_head(case_id: str, seq: object) -> tuple[int, str] | None:
-    """원래 조사의 증거 끝: 체인의 0..seq 번 기록을 해시·HMAC 서명·파일까지 검증하고, 그 마지막 기록이 원래 조사의
-    연관 후보 기록(candidates)이며 그 앞에 하위 조사 기록(data.sub)이 없을 때만 (seq, hash). 아니면 None.
-    서명은 서명 서비스만 하므로 워커가 이 앞부분을 지어낼 수 없다. 담당자가 본 원래 결과의 범위를 이 끝으로 고정한다."""
+def _verify_main_head(case_id: str, seq: object) -> dict | None:
+    """원래 조사의 증거 끝과 그 결과. 반환 {seq, hash, threat, final_url} 또는 None.
+
+    - 0..seq 번 기록을 해시·HMAC 서명·파일까지 검증하고, seq 번이 원래 조사의 연관 후보 기록(candidates)이며 그 앞에
+      하위 조사 기록(data.sub)이 없어야 한다
+    - 운영(서명 서비스)에서는 파일의 체인이 **이 사건의** 서명 서비스 head 까지 그대로 이어져야 한다. 서명에는 사건 id 가
+      없어서, 다른 사건의 서명된 기록을 이 사건 폴더에 복사해 넣는 것을 이것으로 막는다(Codex 지적)
+    - 판정 대상이 되는 위협 판단·최종 주소는 이 검증한 기록(threat·finish)에서 꺼낸다(이벤트 값을 믿지 않는다)"""
     if type(seq) is not int or not 0 <= seq < 100_000:
         return None
-    text = package.read_chain_text(settings.evidence_dir, case_id) or ""
-    lines = text.splitlines()[: seq + 1]
-    if len(lines) != seq + 1:
+    top, top_hash = seq, None
+    for _ in range(5):  # 서명 직후 파일에 쓰기 전이면 잠깐 기다린다
+        if _chains is not None:
+            try:
+                h = _chains.head(case_id)
+            except SignerError:
+                return None
+            if type(h.get("seq")) is not int or not isinstance(h.get("hash"), str) or h["seq"] < seq:
+                return None
+            top, top_hash = h["seq"], h["hash"]
+        lines = (package.read_chain_text(settings.evidence_dir, case_id) or "").splitlines()
+        if len(lines) > top:
+            break
+        time.sleep(0.2)
+    else:
         return None
-    if not verify_case(settings.evidence_dir, case_id, _signer(), None, text="\n".join(lines)).ok:
+    prefix = "\n".join(lines[: top + 1])
+    expect = Head(top, top_hash) if top_hash is not None else None
+    if not verify_case(settings.evidence_dir, case_id, _signer(), expect, text=prefix).ok:
         return None
-    recs = package.parse_chain("\n".join(lines))
-    last = recs[-1] if len(recs) == seq + 1 else None
-    if not last or last.get("kind") != "candidates" or not isinstance(last.get("hash"), str):
+    recs = package.parse_chain(prefix)[: seq + 1]
+    if len(recs) != seq + 1 or recs[-1].get("kind") != "candidates" or not isinstance(recs[-1].get("hash"), str):
         return None
-    if any(isinstance(r.get("data"), dict) and isinstance(r["data"].get("sub"), int) for r in recs):
+    if any(not isinstance(r.get("data"), dict) or isinstance(r["data"].get("sub"), int) for r in recs):
         return None
-    return seq, last["hash"][:64]
+    threat = next((r["data"] for r in reversed(recs) if r.get("kind") == "threat"), None)
+    finish = next((r["data"] for r in reversed(recs) if r.get("kind") == "finish"), {})
+    if not isinstance(threat, dict):
+        return None
+    final = finish.get("final_url") if isinstance(finish.get("final_url"), str) else None
+    return {"seq": seq, "hash": recs[-1]["hash"][:64], "threat": threat, "final_url": final}
 
 
 def _verify_case(c: Case, signer: Signer, text: str | None = None) -> VerifyResult:

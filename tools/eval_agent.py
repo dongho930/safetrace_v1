@@ -11,7 +11,7 @@
 
 정답(expected): phishing·scam·illegal_gambling·malware·benign, 또는 유형을 가리지 않는 malicious.
 연관 사이트 발견(docs/related-sites.md): 하위 조사는 원래 판정을 바꾸지 않으므로 정답률과 따로 잰다
-(하위 조사 비율, 위협 발견 비율, 발견 사이트 수, 아직 안 막힌 비율, 후보 1곳당 시간, 원래 결과까지 시간).
+(하위 조사 비율, 위협 발견 비율, 발견 사이트 수, 회선 차단 추정 아닌 비율, 후보 1곳당 시간, 원래 결과까지 시간).
 조사 증거는 컨테이너의 임시 폴더에 쓴다(콘솔 사건 목록·증거 볼륨을 더럽히지 않음).
 
 평가 목록 관리: KISA 주소는 시간이 지나면 사라진다. 접속 불가(UNREACHABLE)는 채점에서 빼고 따로 세므로,
@@ -157,7 +157,7 @@ def related_summary(recs: list[dict]) -> dict[str, dict]:
     return out
 
 
-_RELATED_NAMES = ["하위 조사 비율", "위협 발견 비율", "발견 사이트 수", "아직 안 막힌 비율", "후보 1곳당 시간",
+_RELATED_NAMES = ["하위 조사 비율", "위협 발견 비율", "발견 사이트 수", "회선 차단 추정 아닌 비율", "후보 1곳당 시간",
                   "원래 결과까지 시간 중앙값", "자동 접수 대상"]
 
 
@@ -168,7 +168,7 @@ def _related_rows(m: dict) -> list[tuple[str, str]]:
         ("하위 조사 비율", f"{m['sub_runs']}/{m['measured']} ({_pct(m['sub_runs'], m['measured'])})"),
         ("위협 발견 비율", f"{m['threat_runs']}/{m['sub_runs']} ({_pct(m['threat_runs'], m['sub_runs'])})"),
         ("발견 사이트 수", str(m["sites"])),
-        ("아직 안 막힌 비율", f"{m['open_sites']}/{m['sites']} ({_pct(m['open_sites'], m['sites'])})"
+        ("회선 차단 추정 아닌 비율", f"{m['open_sites']}/{m['sites']} ({_pct(m['open_sites'], m['sites'])})"
          if m["blocked_known"] else "측정 안 함"),
         ("후보 1곳당 시간", f"{m['per_candidate']:.1f}s" if m["per_candidate"] is not None else "측정 안 함"),
         ("원래 결과까지 시간 중앙값", f"{m['main_median']:.1f}s" if m["main_median"] is not None else "-"),
@@ -266,7 +266,7 @@ def _cell(v: object) -> str:
 
 
 RELATED_COLUMNS = ["사이트", "후보 주소", "도착 주소", "원 신고 URL", "그룹", "회차", "출처", "하위 조사 상태",
-                   "AI 판단", "확률", "보류", "평판 위험", "이미 차단됨"]
+                   "AI 판단", "확률", "보류", "평판 위험", "회선 차단 추정"]
 
 
 def related_rows(recs: list[dict]) -> list[list[str]]:

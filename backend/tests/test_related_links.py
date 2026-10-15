@@ -104,6 +104,23 @@ def test_linking_rules(client, store):
     assert isinstance(groups["ms"], int) and groups["truncated"] in (True, False)
 
 
+def test_blocked_estimate_does_not_hide_threat(client, store):
+    """Codex(PR 3~5) F3: 회선 차단 감지는 조사 대상 서버가 흉내 낼 수 있는 추정이다. 같은 사이트를 다른 사건이 위협으로
+    봤는데 한 사건에서 차단된 척했다고 묶음이 '이미 차단됨'이 되어 위협 집계에서 빠지면 안 된다. 따로 센다."""
+    k = uniq()
+    site = f"gamble-{k}.example"
+    a = finished(store, f"http://a-{k}.example/", [{"url": f"https://{site}/", "host": site, "source": "link", "sub": 1,
+                                                    "threat": "illegal_gambling"}])
+    finished(store, f"http://b-{k}.example/", [{"url": f"https://{site}/", "host": site, "source": "link", "sub": 1,
+                                                 "status": "UNREACHABLE", "blocked": True}])
+    groups = client.get("/api/related-groups?min=2&limit=50", headers=h(VIEWER)).json()["groups"]
+    g = next(g for g in groups if a in {x["id"] for x in g["cases"]})
+    s = next(x for x in g["sites"] if x["site"] == site)
+    assert (s["threat"], s["blocked"], s["candidate"] is not None) == ("illegal_gambling", True, True)
+    # 위협 사이트 3 = 두 신고 주소 + 차단된 척한 도박 사이트(빠지지 않음), 차단 추정은 따로 1
+    assert (g["threat_sites"], g["blocked_estimate_sites"]) == (3, 1) and "open_threat_sites" not in g
+
+
 def test_parent_and_children_in_links(client, store):
     k = uniq()
     cand = {"url": f"https://child-{k}.example/", "host": f"child-{k}.example", "source": "link"}

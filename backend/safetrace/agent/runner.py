@@ -146,8 +146,12 @@ def _investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], Non
     transport = httpx.HTTPTransport(proxy=s.egress_proxy) if s.egress_proxy else None
     # 후보 주소 가운데 개인정보가 든 것은 외부로 보내지 않는다(페이지가 링크에 넣은 값이다)
     cand_urls = [c["url"] for c in cands[:10] if not _has_pii(c["url"])]
-    sb = lookup([url, *result.nav_chain[-10:], *cand_urls], s.safebrowsing_api_key.get_secret_value(), transport=transport)
-    _append(writer, emit, "safebrowsing", {**sb, "excluded_pii": sum(1 for c in cands[:10] if _has_pii(c["url"]))})
+    # 시작·경유 주소도 같다: 연관 후보가 새 사건이 되면 페이지가 정한 주소가 시작 주소가 된다(Codex 지적)
+    own = [u for u in dict.fromkeys([url, *result.nav_chain[-10:]]) if u]
+    own_ok = [u for u in own if not _has_pii(u)]
+    sb = lookup([*own_ok, *cand_urls], s.safebrowsing_api_key.get_secret_value(), transport=transport)
+    _append(writer, emit, "safebrowsing", {**sb, "excluded_pii": sum(1 for c in cands[:10] if _has_pii(c["url"]))
+                                           + len(own) - len(own_ok)})
     matched = sb.get("status") == "match"
     hits = {m.get("url") for m in sb.get("matches", [])} if matched else set()
     first_checked = set(cand_urls) if sb.get("status") in ("match", "no_match") else set()

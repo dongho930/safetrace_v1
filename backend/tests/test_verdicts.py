@@ -137,9 +137,9 @@ def test_validation(client, store):
 _MAIN_THREAT = {"threat": "phishing", "probability": 0.9, "hold": False}
 
 
-def _running_case_with_chain(store):
+def _running_case_with_chain(store, threat=None):
     """조사 중인 사건과 아직 열린 체인(개발 모드: 같은 프로세스가 쓴 체인). 원래 조사는 연관 후보 기록(candidates)으로
-    끝난다(runner 와 같은 순서)."""
+    끝난다(runner 와 같은 순서). 판정 대상이 되는 위협 판단·최종 주소는 이 체인의 threat·finish 기록이다."""
     from safetrace.agent.runner import make_sealer
     from safetrace.api.main import settings
     from safetrace.evidence import EvidenceWriter
@@ -149,7 +149,8 @@ def _running_case_with_chain(store):
         s.add(c)
     w = EvidenceWriter(settings.evidence_dir, c.id, make_sealer(settings))
     w.append("start", {"url": c.url})
-    w.append("threat", dict(_MAIN_THREAT))
+    w.append("finish", {"reason": "agent_finished", "final_url": c.url})
+    w.append("threat", dict(threat or _MAIN_THREAT))
     w.append("candidates", {"found": [{"url": "https://c1.example/"}], "followup": True, "investigated": 1})
     return c.id, w
 
@@ -200,8 +201,9 @@ def test_main_result_cannot_change_after_verdict(client, store):
     from safetrace.api.main import record_event
 
     _, tok = user_token(client, store, "reviewer")
-    cid, w = _running_case_with_chain(store)
-    _main_result(cid, w.head.seq, threat={"threat": "benign", "probability": 0.95, "hold": False})
+    benign = {"threat": "benign", "probability": 0.95, "hold": False}
+    cid, w = _running_case_with_chain(store, threat=benign)
+    _main_result(cid, w.head.seq, threat=benign)
     assert post(client, tok, cid, rev=0, decision="benign").status_code == 201
     forged = {"main": {"status": "REVIEW_REQUIRED", "reason": "reputation_match"},
               "threat": {"threat": "phishing", "probability": 0.99, "hold": True}}
@@ -217,6 +219,17 @@ def test_main_result_cannot_change_after_verdict(client, store):
     with store.session() as s:
         actions = set(s.scalars(select(AuditLog.action).where(AuditLog.case_id == cid)))
     assert {"event.rejected", "event.main_result_kept"} <= actions
+
+
+def test_main_result_comes_from_signed_records(client, store):
+    """Codex(PR 3~5) F1: 판정 대상이 되는 위협 판단·최종 주소는 이벤트 값이 아니라 검증한 서명 기록(threat·finish)에서
+    가져온다. 체인에는 피싱으로 남기고 이벤트에는 정상·다른 최종 주소를 실어도, 담당자에게는 체인의 결과가 보인다."""
+    cid, w = _running_case_with_chain(store)
+    _main_result(cid, w.head.seq, threat={"threat": "benign", "probability": 0.99, "hold": False},
+                 final_url="https://evil.example/")
+    c = client.get(f"/api/cases/{cid}", headers=h(VIEWER)).json()
+    assert (c["phase"], c["threat"]["threat"], c["threat"]["probability"]) == ("related", "phishing", 0.9)
+    assert c["final_url"] == "https://example.test/related"
 
 
 @pytest.mark.parametrize("bad", ["past_end", "not_candidates", "tampered", "not_int"])

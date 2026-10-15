@@ -227,7 +227,7 @@ def _benign_sub(final, nav=()):
                 threat={"threat": "benign", "probability": 0.99, "hold": False})
 
 
-def _run(settings, monkeypatch, runs, lookup_fn):
+def _run(settings, monkeypatch, runs, lookup_fn, start="https://start.example/"):
     import uuid
 
     from safetrace.agent import runner
@@ -235,7 +235,7 @@ def _run(settings, monkeypatch, runs, lookup_fn):
     _fake_runs(monkeypatch, runs)
     monkeypatch.setattr(runner, "lookup", lookup_fn)
     cid = str(uuid.uuid4())
-    final = runner.investigate(cid, "https://start.example/", settings, lambda e: None, decider=object())
+    final = runner.investigate(cid, start, settings, lambda e: None, decider=object())
     import json
     chain = [json.loads(x) for x in (settings.evidence_dir / cid / "chain.jsonl").read_text(encoding="utf-8").splitlines()]
     return final, chain
@@ -255,6 +255,25 @@ def test_candidate_path_pii_not_sent_to_reputation(settings, monkeypatch):
                                             cands[0]["url"]: _benign_sub(cands[0]["url"])}, lookup)
     assert not any("alice" in u or "1234" in u for u in sent), sent
     assert final["candidates"][0]["reputation_unchecked"] is True
+
+
+def test_start_and_hop_pii_not_sent_to_reputation(settings, monkeypatch):
+    """Codex(PR 3~5) F2: 연관 후보가 새 사건이 되면 페이지가 정한 주소가 시작 주소가 된다. 시작·경유 주소에 개인정보가
+    있어도 평판 조회로 보내지 않고, 뺀 수를 증거에 남긴다."""
+    pii = "https://candidate.example/u/alice%40example.com/010-1234-5678"
+    hop = "https://hop.example/next?tel=010-9876-5432"
+    sent: list[str] = []
+
+    def lookup(urls, key, transport=None):
+        sent.extend(urls)
+        return {"status": "no_match", "matches": []}
+
+    run = dict(status="COMPLETED", finish_reason="agent_finished", final_url="https://end.example/",
+               nav_chain=[pii, hop, "https://end.example/"], threat={"threat": "phishing", "probability": 0.9, "hold": False})
+    _, chain = _run(settings, monkeypatch, {pii: run}, lookup, start=pii)
+    assert "https://end.example/" in sent
+    assert not any("alice" in u or "1234" in u or "9876" in u for u in sent), sent
+    assert next(r for r in chain if r["kind"] == "safebrowsing")["data"]["excluded_pii"] == 2
 
 
 def test_first_match_survives_failed_followup_lookup(settings, monkeypatch):
