@@ -65,6 +65,21 @@ class CasePhase(Base):
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class CaseLink(Base):
+    """연관 후보로 만든 사건(자식)과 그 후보가 나온 사건(부모)의 연결(related-sites PR 4). 같은 부모의 같은 후보로는
+    한 번만 만든다. target_host·auto 는 자동 생성(PR 4b)의 중복 확인·표시에 쓴다."""
+
+    __tablename__ = "case_links"
+    __table_args__ = (UniqueConstraint("parent_id", "candidate_url"),)
+    child_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), primary_key=True)
+    parent_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), index=True)
+    candidate_url: Mapped[str] = mapped_column(String(2048))
+    target_host: Mapped[str] = mapped_column(String(253), index=True)  # 하위 조사가 도착한 호스트(없으면 후보 호스트)
+    auto: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_by: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -174,6 +189,21 @@ class Store:
             return {}
         with self.session() as s:
             return {p.case_id: p for p in s.scalars(select(CasePhase).where(CasePhase.case_id.in_(case_ids)))}
+
+    def parents_for(self, case_ids: list[str]) -> dict[str, tuple[CaseLink, str]]:
+        """자식 사건 id → (연결, 부모 사건의 신고 URL). 목록용."""
+        if not case_ids:
+            return {}
+        with self.session() as s:
+            rows = s.execute(select(CaseLink, Case.url).join(Case, Case.id == CaseLink.parent_id)
+                             .where(CaseLink.child_id.in_(case_ids)))
+            return {link.child_id: (link, url) for link, url in rows}
+
+    def children_of(self, parent_id: str, limit: int = 50) -> list[tuple[CaseLink, Case]]:
+        with self.session() as s:
+            rows = s.execute(select(CaseLink, Case).join(Case, Case.id == CaseLink.child_id)
+                             .where(CaseLink.parent_id == parent_id).order_by(CaseLink.created_at).limit(limit))
+            return [(link, c) for link, c in rows]
 
     def set_head(self, case_id: str, seq: int, hash_: str) -> None:
         """head 가 비어 있는 사건에 서명 서비스의 head 를 채운다(닫기에 실패했다가 나중에 다시 닫아 받은 값)."""

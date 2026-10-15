@@ -2,6 +2,7 @@ import { Component, memo, useCallback, useEffect, useMemo, useRef, useState } fr
 import {
   type AgentEvent,
   ApiError,
+  type Candidate,
   type CaseOut,
   type Decision,
   type EvidenceEvent,
@@ -14,6 +15,7 @@ import {
   clickables,
   clearToken,
   createCase,
+  createRelated,
   createUser,
   dict,
   downloadExport,
@@ -263,6 +265,7 @@ export default function App() {
               canDecide={user.kind === "user" && ROLE_RANK[user.role] >= ROLE_RANK.reviewer}
               canExport={ROLE_RANK[user.role] >= ROLE_RANK.investigator}
               onDecided={refresh}
+              onOpen={setSelected}
               onPrev={prevId ? () => setSelected(prevId) : null}
               onNext={nextId ? () => setSelected(nextId) : null}
             />
@@ -602,7 +605,10 @@ function CaseList({
                 {clip(hostPath(c.url), 60)}
               </span>
               <span className="row-time">{fmtTime(c.created_at)}</span>
-              <span className="row-sub">{caseSummary(c)}</span>
+              <span className="row-sub">
+                {c.source === "related" && <span className="row-badge">{c.auto ? "연관·자동" : "연관"}</span>}
+                {caseSummary(c)}
+              </span>
               <StatusChip c={c} />
             </button>
           </li>
@@ -851,6 +857,7 @@ const Workspace = memo(function Workspace({
   canDecide,
   canExport,
   onDecided,
+  onOpen,
   onPrev,
   onNext,
 }: {
@@ -858,6 +865,7 @@ const Workspace = memo(function Workspace({
   canDecide: boolean;
   canExport: boolean;
   onDecided: () => void;
+  onOpen: (id: string) => void;
   onPrev: (() => void) | null;
   onNext: (() => void) | null;
 }) {
@@ -955,6 +963,15 @@ const Workspace = memo(function Workspace({
             기록이 {MAX_EVENTS}건을 넘어 그 뒤는 화면에 표시하지 않았습니다. 전체 기록은 검토 패키지로 확인하세요.
           </p>
         )}
+        {c?.parent_id && (
+          <p className="parent-link">
+            <span className="chip st-RUNNING">{c.auto ? "연관·자동" : "연관"}</span> 연관 사이트 ·{" "}
+            <button type="button" className="linkish" onClick={() => onOpen(c.parent_id as string)}>
+              {clip(hostPath(c.parent_url ?? ""), 60)}
+            </button>{" "}
+            사건에서 {c.auto ? "자동 발견" : "발견"}
+          </p>
+        )}
         <Summary c={c} running={running} reasons={reasons} picked={tab === "screens" ? pick : null} onPick={openScreen} />
         {!st ? (
           <p className="muted">{live ? "사건을 불러오는 중…" : "사건을 불러오지 못했습니다"}</p>
@@ -962,7 +979,20 @@ const Workspace = memo(function Workspace({
           <Investigation c={c} events={sorted} status={st} running={running} id={id} />
         ) : (
           <section className="panel progress-panel" aria-label="조사 경과">
-            <CaseTabs id={id} c={c} events={sorted} screens={screens} tab={tab} onTab={setTab} pick={pick} onPick={setPick} />
+            <CaseTabs
+              id={id}
+              c={c}
+              events={sorted}
+              screens={screens}
+              tab={tab}
+              onTab={setTab}
+              pick={pick}
+              onPick={setPick}
+              related={related}
+              canCreate={canExport}
+              onOpen={onOpen}
+              onChanged={() => getCase(id).then(setC).catch(() => undefined)}
+            />
             <CaseFooterBar c={c} id={id} running={running || related} related={related} canExport={canExport} verify={verify} onVerify={setVerify} />
           </section>
         )}
@@ -1451,7 +1481,7 @@ function Summary({ c, running, reasons, picked, onPick }: { c: CaseOut | null; r
 const CIRCLED = [..."①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"];
 
 // ── 조사 경과 탭: 근거 화면(기본) · 경로 지도 · 조사 녹화 · 행동 기록 ─────────────
-type TabId = "screens" | "path" | "rec" | "log";
+type TabId = "screens" | "path" | "related" | "rec" | "log";
 type VerifyState = { ok: boolean; records: number; errors: string[] } | null;
 
 function CaseTabs({
@@ -1463,6 +1493,10 @@ function CaseTabs({
   onTab,
   pick,
   onPick,
+  related,
+  canCreate,
+  onOpen,
+  onChanged,
 }: {
   id: string;
   c: CaseOut | null;
@@ -1472,7 +1506,12 @@ function CaseTabs({
   onTab: (t: TabId) => void;
   pick: string | null;
   onPick: (f: string) => void;
+  related: boolean;
+  canCreate: boolean;
+  onOpen: (id: string) => void;
+  onChanged: () => void;
 }) {
+  const nCands = (c?.candidates ?? []).filter((x) => typeof x !== "string").length;
   // 녹화: 원래 주소와 연관 후보 하위 조사마다 하나씩(고른 것은 사건이 바뀌면 원래 주소로)
   const recs = useMemo(() => recordings(events), [events]);
   const [recPick, setRecPick] = useState({ id, sub: 0 });
@@ -1481,6 +1520,7 @@ function CaseTabs({
   const tabs: [TabId, string][] = [
     ["screens", `근거 화면 ${screens.length}`],
     ["path", "경로 지도"],
+    ["related", `연관 사이트 ${nCands}`],
     ["rec", recs.length > 1 ? `조사 녹화 ${recs.length}` : "조사 녹화"],
     ["log", `행동 기록 ${events.length}`],
   ];
@@ -1527,6 +1567,7 @@ function CaseTabs({
       <div className="tab-panel" role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
         {tab === "screens" && <ScreensTab id={id} c={c} events={events} screens={screens} pick={pick} onPick={onPick} />}
         {tab === "path" && c && <PathTab c={c} events={events} />}
+        {tab === "related" && c && <RelatedTab id={id} c={c} events={events} related={related} canCreate={canCreate} onOpen={onOpen} onChanged={onChanged} />}
         {tab === "rec" && (
           <div className="floor">
             {recs.length > 1 && (
@@ -1550,6 +1591,108 @@ function CaseTabs({
         )}
       </div>
     </>
+  );
+}
+
+// 연관 후보 상태(근거 카드·경로 지도와 같은 기준). pending: 지금 하위 조사 중인 후보
+function candState(x: Candidate, pending: boolean): { label: string; tone: string } {
+  if (pending) return { label: "조사 중", tone: "st-RUNNING" };
+  if (x.reputation_match) return { label: "평판 위험", tone: "st-threat" };
+  if (x.blocked) return { label: "이미 차단됨", tone: "st-BLOCKED" };
+  if (!x.sub) return { label: "기록만", tone: "" };
+  const th = x.threat ?? "";
+  if (th && th !== "benign" && th !== "unknown") {
+    return { label: `${x.hold ? "보류" : "위협 의심"} · ${THREAT_LABEL[th] ?? th}${x.probability != null ? ` ${pct(x.probability)}` : ""}`, tone: x.hold ? "st-REVIEW_REQUIRED" : "st-threat" };
+  }
+  if (x.hold) return { label: "보류", tone: "st-REVIEW_REQUIRED" };
+  return th === "benign" ? { label: "정상", tone: "st-COMPLETED" } : { label: "판단 없음", tone: "" };
+}
+
+// 연관 사이트: 이 신고에서 찾은 다른 사이트(같은 조직이 운영할 수 있는 곳). 하위 조사는 원래 판정을 바꾸지 않는다.
+// 후보마다 [새 사건으로 접수](조사관 이상) → 전체 조사. 이미 만든 후보는 그 사건으로 간다
+function RelatedTab({
+  id,
+  c,
+  events,
+  related,
+  canCreate,
+  onOpen,
+  onChanged,
+}: {
+  id: string;
+  c: CaseOut;
+  events: EvidenceEvent[];
+  related: boolean;
+  canCreate: boolean;
+  onOpen: (id: string) => void;
+  onChanged: () => void;
+}) {
+  const cands = (c.candidates ?? []).filter((x): x is Candidate => typeof x !== "string");
+  const kids = new Map((c.children ?? []).map((k) => [k.candidate_url, k]));
+  const planned = num([...events].reverse().find((e) => e.kind === "candidates")?.data.investigated);
+  const [busy, setBusy] = useState("");
+  const [msg, setMsg] = useState("");
+  if (cands.length === 0) {
+    return (
+      <div className="floor">
+        <p className="muted">연관 후보 없음</p>
+      </div>
+    );
+  }
+  return (
+    <div className="floor">
+      <p className="muted small">같은 조직이 운영할 수 있는 다른 사이트입니다. 하위 조사는 원래 사건의 판정을 바꾸지 않습니다.</p>
+      <ul className="rel-list">
+        {cands.map((x, i) => {
+          const kid = kids.get(x.url);
+          const st = candState(x, related && !x.sub && Number.isFinite(planned) && i < planned);
+          return (
+            <li key={x.url} className="rel-row">
+              <span className="rel-site">
+                <span className="mono">{clip(x.host ?? hostPath(x.url), 48)}</span>
+                <span className="muted small">
+                  {x.source === "via" ? "경유" : "링크"}
+                  {x.text ? ` · “${clip(x.text, 40)}”` : ""}
+                </span>
+              </span>
+              <span className={`chip ${st.tone}`}>{st.label}</span>
+              {kid ? (
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => onOpen(kid.id)}>
+                  사건 보기 · {kid.verdict === "threat" ? "위협 확정" : kid.verdict === "benign" ? "정상 확정" : (STATUS_LABEL[kid.status] ?? kid.status)}
+                </button>
+              ) : canCreate ? (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  disabled={busy !== ""}
+                  onClick={async () => {
+                    setBusy(x.url);
+                    setMsg("");
+                    try {
+                      await createRelated(id, x.url);
+                      onChanged();
+                    } catch (e) {
+                      setMsg(e instanceof Error ? e.message : "접수하지 못했습니다");
+                    } finally {
+                      setBusy("");
+                    }
+                  }}
+                >
+                  {busy === x.url ? "접수 중" : "새 사건으로 접수"}
+                </button>
+              ) : (
+                <span />
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {msg && (
+        <p className="err" role="alert">
+          {msg}
+        </p>
+      )}
+    </div>
   );
 }
 

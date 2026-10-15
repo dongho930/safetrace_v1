@@ -49,7 +49,14 @@ export type CaseOut = {
   verdict: Verdict | null; // 담당자의 현재 판정(없으면 null)
   phase: "related" | null; // 원래 결과가 나왔고 연관 사이트를 조사하는 중
   main_status: string | null; // 원래 결과의 상태(phase 가 related 일 때 폴더·판정에 쓴다)
+  parent_id: string | null; // 연관 사건이면 그 후보가 나온 부모 사건
+  parent_url: string | null;
+  auto: boolean | null; // 자동으로 만든 연관 사건인지(PR 4b)
+  children: ChildCase[] | null; // 이 사건의 후보로 만든 사건(상세에만)
 };
+
+// 연관 후보로 만든 사건(부모 사건 상세의 요약)
+export type ChildCase = { id: string; url: string; candidate_url: string; status: string; threat: string | null; verdict: string | null; auto: boolean };
 
 // 담당자 판정. 덮어쓰지 않고 판(rev)을 쌓는다. 저장할 때 보고 있던 판 번호를 보내 동시 수정을 막는다(409)
 export type Decision = "threat" | "benign" | "hold";
@@ -165,6 +172,12 @@ export const createCase = (url: string, source: string) =>
     body: JSON.stringify({ url, source }),
     headers: { "Idempotency-Key": crypto.randomUUID() },
   });
+// 연관 후보 하나를 새 사건으로 접수(조사관 이상). 이미 만든 후보면 그 사건을 돌려준다
+export const createRelated = async (id: string, url: string) => {
+  const c = cleanCase(await req<unknown>(`/api/cases/${encodeURIComponent(id)}/related`, { method: "POST", body: JSON.stringify({ url }) }));
+  if (!c) throw new ApiError(500, "사건 형식 오류");
+  return c;
+};
 export const verifyCase = (id: string) =>
   req<{ ok: boolean; records: number; errors: string[] }>(`/api/cases/${encodeURIComponent(id)}/verify`, {
     method: "POST",
@@ -328,6 +341,18 @@ function cleanCandidate(x: unknown): Candidate[] {
     text: strOr(x.text)?.slice(0, 80) ?? undefined,
   }];
 }
+function cleanChild(x: unknown): ChildCase[] {
+  if (!isObj(x) || typeof x.id !== "string" || typeof x.url !== "string" || typeof x.status !== "string") return [];
+  return [{
+    id: x.id.slice(0, 36),
+    url: x.url.slice(0, 2000),
+    candidate_url: strOr(x.candidate_url)?.slice(0, 2000) ?? x.url.slice(0, 2000),
+    status: x.status.slice(0, 24),
+    threat: strOr(x.threat)?.slice(0, 32) ?? null,
+    verdict: strOr(x.verdict)?.slice(0, 16) ?? null,
+    auto: x.auto === true,
+  }];
+}
 export function cleanCase(v: unknown): CaseOut | null {
   if (!isObj(v) || typeof v.id !== "string" || typeof v.url !== "string" || typeof v.status !== "string" || typeof v.created_at !== "string") return null;
   const sb = isObj(v.safebrowsing) && typeof v.safebrowsing.status === "string"
@@ -349,5 +374,9 @@ export function cleanCase(v: unknown): CaseOut | null {
     verdict: ver,
     phase: v.phase === "related" ? "related" : null,
     main_status: strOr(v.main_status)?.slice(0, 24) ?? null,
+    parent_id: strOr(v.parent_id)?.slice(0, 36) ?? null,
+    parent_url: strOr(v.parent_url)?.slice(0, 2000) ?? null,
+    auto: typeof v.auto === "boolean" ? v.auto : null,
+    children: Array.isArray(v.children) ? list(v.children).slice(0, 50).flatMap(cleanChild) : null,
   };
 }

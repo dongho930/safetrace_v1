@@ -18,6 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,7 +41,7 @@ from ..netguard import BlockedURL, parse_url
 from ..preview import preview_image
 from ..ratelimit import FailureLimiter
 from ..signer.client import ChainAdmin, SignerError
-from ..store import TERMINAL, AuditLog, Case, CasePhase, Store, Verdict
+from ..store import TERMINAL, AuditLog, Case, CaseLink, CasePhase, Store, Verdict
 
 log = logging.getLogger("safetrace.api")
 settings = get_settings()
@@ -283,6 +284,17 @@ class VerdictIn(BaseModel):
     note: str | None = Field(default=None, max_length=verdicts.NOTE_MAX * 2)
 
 
+class ChildOut(BaseModel):
+    """연관 후보로 만든 사건(부모 사건 상세에 붙는 요약)."""
+    id: str
+    url: str
+    candidate_url: str
+    status: str
+    threat: str | None
+    verdict: str | None  # 담당자의 현재 판정(threat | benign | hold)
+    auto: bool
+
+
 class CaseOut(BaseModel):
     id: str
     url: str
@@ -299,14 +311,22 @@ class CaseOut(BaseModel):
     # 원래 결과가 나온 뒤 연관 사이트를 조사하는 중이면 "related"(조사 중일 때만). main_status: 원래 결과의 상태
     phase: str | None = None
     main_status: str | None = None
+    # 연관 사건(source=related)이면 그 후보가 나온 부모 사건. children: 이 사건의 후보로 만든 사건(상세에만)
+    parent_id: str | None = None
+    parent_url: str | None = None
+    auto: bool | None = None
+    children: list[ChildOut] | None = None
 
     @classmethod
-    def of(cls, c: Case, v: Verdict | None = None, ph: CasePhase | None = None) -> CaseOut:
+    def of(cls, c: Case, v: Verdict | None = None, ph: CasePhase | None = None,
+           parent: tuple[CaseLink, str] | None = None, children: list[ChildOut] | None = None) -> CaseOut:
         return cls(id=c.id, url=c.url, source=c.source, status=c.status, finish_reason=c.finish_reason,
                    final_url=c.final_url, threat=c.threat, safebrowsing=c.safebrowsing, candidates=c.candidates,
                    head_seq=c.head_seq, created_at=c.created_at.isoformat(), verdict=VerdictOut.of(v) if v else None,
                    phase=ph.phase if ph and c.status == "RUNNING" else None,
-                   main_status=ph.main_status if ph else None)
+                   main_status=ph.main_status if ph else None,
+                   parent_id=parent[0].parent_id if parent else None, parent_url=parent[1] if parent else None,
+                   auto=parent[0].auto if parent else None, children=children)
 
 
 class LoginIn(BaseModel):
@@ -550,14 +570,87 @@ def list_cases(p: Annotated[Principal, Depends(need("viewer"))], limit: int = Qu
     with store.session() as s:
         rows = s.scalars(select(Case).order_by(Case.created_at.desc()).limit(limit)).all()
     ids = [c.id for c in rows]
-    latest, phases = verdicts.latest_for(store, ids), store.phases_for(ids)
-    return [CaseOut.of(c, latest.get(c.id), phases.get(c.id)) for c in rows]
+    latest, phases, parents = verdicts.latest_for(store, ids), store.phases_for(ids), store.parents_for(ids)
+    return [CaseOut.of(c, latest.get(c.id), phases.get(c.id), parents.get(c.id)) for c in rows]
 
 
 @app.get("/api/cases/{case_id}", response_model=CaseOut)
 def get_case(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]):
     c = _get_case(case_id)
-    return CaseOut.of(c, verdicts.latest_for(store, [c.id]).get(c.id), store.phases_for([c.id]).get(c.id))
+    return _case_detail(c)
+
+
+def _case_detail(c: Case) -> CaseOut:
+    kids = store.children_of(c.id)
+    kv = verdicts.latest_for(store, [k.id for _, k in kids])
+    children = [ChildOut(id=k.id, url=k.url, candidate_url=link.candidate_url, status=k.status,
+                         threat=(k.threat or {}).get("threat") if isinstance(k.threat, dict) else None,
+                         verdict=kv[k.id].decision if k.id in kv else None, auto=link.auto) for link, k in kids]
+    return CaseOut.of(c, verdicts.latest_for(store, [c.id]).get(c.id), store.phases_for([c.id]).get(c.id),
+                      store.parents_for([c.id]).get(c.id), children)
+
+
+# ── 연관 사이트를 새 사건으로(related-sites PR 4) ─────────────────────────
+class RelatedIn(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
+
+
+def create_related_case(s, parent: Case, cand: dict, actor: str, *, auto: bool,
+                        principal: Principal | None) -> tuple[Case, bool]:
+    """연관 후보로 새 사건을 만든다(담당자 버튼과 자동 생성이 같이 쓴다): 형식 검사·접수 한도·사건·연결·감사·대기열.
+    같은 부모의 같은 후보는 한 번만 만들고, 이미 있으면 그 사건을 돌려준다. 반환: (자식 사건, 새로 만들었는지).
+    호출하는 쪽이 _intake_lock 안에서 부른다(세기와 넣기 사이에 다른 접수가 끼지 않게).
+    cand 는 부모 사건에 저장된 후보(API 가 _clean_candidates 로 받은 값)여야 한다."""
+    url = cand["url"]
+    q = select(Case).join(CaseLink, CaseLink.child_id == Case.id).where(CaseLink.parent_id == parent.id,
+                                                                         CaseLink.candidate_url == url)
+    existing = s.scalar(q)
+    if existing:
+        return existing, False
+    parse_url(url, settings.allowed_ports)  # 형식 검사(BlockedURL). IP 검사는 에이전트가 접속 시점에 한다
+    if principal is not None:
+        _check_intake_limits(s, principal)  # 담당자가 만든 연관 사건은 그 담당자의 한도에 든다
+    final = cand.get("final_url") if isinstance(cand.get("final_url"), str) else ""
+    target = (urlsplit(final).hostname or (cand.get("host") if isinstance(cand.get("host"), str) else "")
+              or urlsplit(url).hostname or "")
+    c = Case(url=url, source="related", created_by=actor)
+    s.add(c)
+    s.flush()
+    s.add(CaseLink(child_id=c.id, parent_id=parent.id, candidate_url=url, target_host=target.lower()[:253],
+                   auto=auto, created_by=actor))
+    try:
+        s.commit()
+    except IntegrityError:  # 같은 후보로 동시에 만든 다른 요청이 먼저 들어갔다
+        s.rollback()
+        existing = s.scalar(q)
+        if existing:
+            return existing, False
+        raise
+    store.audit(actor, "case.create_related_auto" if auto else "case.create_related", c.id,
+                f"parent={parent.id} url={url[:200]}")
+    enqueue(c.id, c.url)
+    return c, True
+
+
+@app.post("/api/cases/{case_id}/related", response_model=CaseOut, status_code=201)
+def create_related(case_id: str, body: RelatedIn, response: Response,
+                   p: Annotated[Principal, Depends(need("investigator"))]):
+    """사건의 연관 후보 하나를 새 사건으로 접수한다(전체 조사). 후보 목록에 정확히 있는 주소만 받는다(출처가 분명한
+    연결만 만든다). 이미 만든 후보면 그 사건을 돌려준다(200)."""
+    with _intake_lock, store.session() as s:
+        parent = s.get(Case, case_id)
+        if parent is None:
+            raise HTTPException(404, "not found")
+        cand = next((x for x in (parent.candidates or []) if isinstance(x, dict) and x.get("url") == body.url), None)
+        if cand is None:
+            raise HTTPException(422, "이 사건의 연관 후보가 아닌 주소입니다")
+        try:
+            child, created = create_related_case(s, parent, cand, p.name, auto=False, principal=p)
+        except BlockedURL as e:
+            raise HTTPException(422, f"url rejected: {e.reason}") from None
+    if not created:
+        response.status_code = 200
+    return _case_detail(child)
 
 
 # ── 담당자 판정 ─────────────────────────────────────────

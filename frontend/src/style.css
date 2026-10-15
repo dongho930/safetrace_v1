@@ -386,3 +386,12 @@ button.reason:hover { border-color: var(--line-strong); }
 .lg-forbidden::before { border: 2px dashed var(--threat); }
 .lg-blocked::before { border-color: var(--threat); }
 .mark-legend .btn { margin-left: auto; }
+
+/* 연관 사이트 탭(related-sites PR 4) */
+.rel-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.rel-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: var(--r-card); background: var(--surface); }
+.rel-site { display: flex; flex-direction: column; min-width: 0; }
+.rel-site > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.parent-link { margin: 0 0 8px; font-size: 13px; color: var(--ink-2); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.linkish { background: none; border: 0; padding: 0; color: var(--primary); text-decoration: underline; cursor: pointer; font: inherit; }
+.row-badge { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 4px; font-size: 11px; font-weight: 700; color: var(--primary); background: var(--primary-tint); }
