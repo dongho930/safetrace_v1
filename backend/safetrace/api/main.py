@@ -133,7 +133,8 @@ def _close_chain(case_id: str) -> dict | None:
     return None
 
 
-_CAND_STR = {"url": 2048, "final_url": 2048, "host": 253, "source": 8, "status": 24, "reason": 64, "threat": 32}
+_CAND_STR = {"url": 2048, "final_url": 2048, "host": 253, "source": 8, "status": 24, "reason": 64, "threat": 32,
+             "text": 80}
 
 
 def _clean_candidates(v) -> list[dict]:
@@ -143,11 +144,13 @@ def _clean_candidates(v) -> list[dict]:
         if not isinstance(c, dict) or not isinstance(c.get("url"), str):
             continue
         d = {k: c[k][:n] for k, n in _CAND_STR.items() if isinstance(c.get(k), str)}
-        for k in ("reputation_match", "reputation_unchecked", "hold"):
+        for k in ("reputation_match", "reputation_unchecked", "hold", "blocked"):
             if isinstance(c.get(k), bool):
                 d[k] = c[k]
         if isinstance(c.get("sub"), int) and 0 < c["sub"] <= 10:
             d["sub"] = c["sub"]
+        if type(c.get("score")) is int and 0 <= c["score"] <= 3:
+            d["score"] = c["score"]
         if isinstance(c.get("probability"), (int, float)) and 0 <= c["probability"] <= 1:
             d["probability"] = float(c["probability"])
         out.append(d)

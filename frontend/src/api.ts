@@ -29,6 +29,9 @@ export type Candidate = {
   threat?: string | null;
   probability?: number | null;
   hold?: boolean | null;
+  blocked?: boolean; // 하위 조사에서 회선이 도메인 이름을 보고 막음(이미 차단됨)
+  score?: number; // 고른 순서 점수 0~3(경유 3 · 위협 단서 2 · 이름 조각 1)
+  text?: string; // 링크의 앵커 글자(개인정보를 가림)
 };
 
 export type CaseOut = {
@@ -312,6 +315,9 @@ function cleanCandidate(x: unknown): Candidate[] {
     threat: strOr(x.threat)?.slice(0, 32) ?? null,
     probability: typeof x.probability === "number" && Number.isFinite(x.probability) ? x.probability : null,
     hold: x.hold === true,
+    blocked: x.blocked === true,
+    score: typeof x.score === "number" && Number.isInteger(x.score) && x.score >= 0 && x.score <= 3 ? x.score : undefined,
+    text: strOr(x.text)?.slice(0, 80) ?? undefined,
   }];
 }
 export function cleanCase(v: unknown): CaseOut | null {

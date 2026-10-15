@@ -73,9 +73,11 @@ def _investigate_candidates(cands: list[dict], s: Settings, decider: Decider, wr
             continue
         th = r.threat or {}
         urls = list(dict.fromkeys(u for u in [c["url"], *r.nav_chain[-5:], r.final_url] if u))
+        # blocked: 회선이 도메인 이름을 보고 막았다(warning.or.kr 화면·이름 기준 연결 리셋, 원래 조사의 회선 차단 감지와
+        # 같은 값). 이미 차단된 사이트라 담당자가 따로 차단 요청할 필요가 적다
         out.append({**res, "status": r.status, "reason": r.finish_reason, "final_url": r.final_url[:2048],
                     "threat": th.get("threat"), "probability": th.get("probability"), "hold": th.get("hold"),
-                    "_urls": urls})
+                    "blocked": bool(r.network_filtered), "_urls": urls})
     return out
 
 

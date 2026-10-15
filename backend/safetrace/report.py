@@ -178,6 +178,7 @@ def build(pkg: dict, records: list[dict]) -> dict:
                         "hold": bool(r.get("hold") or t.get("hold")),
                         "reputation_match": bool(r.get("reputation_match")),
                         "reputation_unchecked": bool(r.get("reputation_unchecked")),
+                        "blocked": r.get("blocked") is True,
                         "status": r.get("status"), "error": bool(c.get("error"))})
     integ = pkg["integrity"]
     return {
@@ -408,7 +409,8 @@ def render_pdf(rep: dict, evidence_dir: Path) -> bytes:
         data = [[P("주소", key), P("AI 의견", key), P("외부 평판", key)]]
         for r in rel["investigated"]:
             op = ("조사 실패" if r["error"] else
-                  f"{r['threat_ko'] or '-'} ({_pct(r['probability'])})" + (" · 보류" if r["hold"] else ""))
+                  f"{r['threat_ko'] or '-'} ({_pct(r['probability'])})" + (" · 보류" if r["hold"] else "")
+                  + (" · 이미 차단됨" if r.get("blocked") else ""))
             rep_ = "위험 일치" if r["reputation_match"] else "미확인" if r["reputation_unchecked"] else "일치 없음"
             data.append([P(_t(r["url"]) + (f"<br/>→ {_t(r['final_url'])}" if r.get("final_url") and r["final_url"] != r["url"] else ""), base),
                          P(_t(op), base), P(_t(rep_), base)])

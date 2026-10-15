@@ -84,14 +84,16 @@ export function buildReasons(events: EvidenceEvent[], c: CaseOut): Reason[] {
     const why = esc.data.reason === "unreachable_network_filtered" ? "회선의 도메인 차단 감지" : `Safe Browsing ${strs(esc.data.threat_types).join(", ")}`;
     push({ key: "escalation", title: "담당자 검토 전환", text: why, ev: `EV-${esc.seq}`, tone: "review", shot: null, shotSeq: null });
   }
-  // ⑤ 연관 사이트도 의심: Safe Browsing 위험 일치(AI 유형과 무관하게 먼저), 없으면 하위 조사에서 AI 가 위협으로 본 후보
+  // ⑤ 연관 사이트도 의심: Safe Browsing 위험 일치(AI 유형과 무관하게 먼저), 없으면 하위 조사에서 AI 가 위협으로 본 후보.
+  // 아직 차단되지 않은 위협 후보를 먼저 고른다(이미 차단된 곳은 따로 차단 요청할 필요가 적다)
   const cands = (c.candidates ?? []).filter((x): x is Candidate => typeof x !== "string");
   const rep = [...cands].reverse().find((x) => x.reputation_match);
-  const sus = rep ?? [...cands].reverse().find((x) => x.sub && x.threat && x.threat !== "benign");
+  const threats = [...cands].reverse().filter((x) => x.sub && x.threat && x.threat !== "benign");
+  const sus = rep ?? threats.find((x) => !x.blocked) ?? threats[0];
   if (sus) {
     const first = sus.sub ? events.find((e) => e.kind === "observe" && e.data.sub === sus.sub && png(e)?.startsWith(`c${sus.sub}_`)) : undefined;
     const where = sus.source === "via" ? "경유" : "링크";
-    const host = clip(sus.host ?? sus.url, 40);
+    const host = clip(sus.host ?? sus.url, 40) + (sus.blocked ? "(이미 차단됨)" : "");
     const ai = sus.threat ? `${THREAT_LABEL[sus.threat] ?? sus.threat}${sus.probability != null ? ` ${pct(sus.probability)}` : ""}` : "";
     if (rep) {
       const sb = last((e) => e.kind === "candidate_safebrowsing");
@@ -191,7 +193,7 @@ export function buildPath(c: CaseOut, events: EvidenceEvent[]): PathMap {
   for (const x of ordered.slice(0, 3)) {
     const where = x.source === "via" ? "경유" : "링크";
     // 평판은 AI 유형과 따로 표시한다: 위험 일치는 AI 가 정상으로 봐도 빨강, 조회 못 한 주소가 있으면 '평판 미확인'
-    const repNote = x.reputation_match ? " · 평판 위험" : x.reputation_unchecked ? " · 평판 미확인" : "";
+    const repNote = (x.reputation_match ? " · 평판 위험" : x.reputation_unchecked ? " · 평판 미확인" : "") + (x.blocked ? " · 이미 차단됨" : "");
     if (x.sub) {
       const th = x.threat ?? "";
       const tone: Tone = x.reputation_match ? "threat" : !th || th === "benign" ? (x.hold ? "review" : "idle") : x.hold ? "review" : "threat";

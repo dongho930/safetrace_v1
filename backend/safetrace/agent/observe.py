@@ -69,7 +69,19 @@ COLLECT_JS = r"""
     }
   }
   const text = (document.body ? document.body.innerText : '').replace(/\s+/g, ' ').trim().slice(0, 6000);
-  return { items: out, inputs, popup, text, title: document.title.slice(0, 200) };
+  // 연관 후보용 링크: 클릭 후보와 별개로 화면의 모든 a[href] 의 http·https 절대 주소(보이지 않는 링크 포함, 최대 200개).
+  // 판단 모델에는 보내지 않는다(Python 이 다시 검사한다)
+  const links = [];
+  for (const a of document.querySelectorAll('a[href]')) {
+    if (links.length >= 200) break;
+    const href = String(a.href || '');
+    if (href.length > 2048 || !/^https?:\/\//i.test(href)) continue;
+    const r = a.getBoundingClientRect(), cs = getComputedStyle(a);
+    const shown = r.width > 2 && r.height > 2 && cs.visibility !== 'hidden' && cs.display !== 'none';
+    const label = (a.innerText || a.getAttribute('aria-label') || a.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+    links.push({ href, text: label.slice(0, 200), visible: shown });
+  }
+  return { items: out, inputs, popup, text, title: document.title.slice(0, 200), links };
 }
 """
 

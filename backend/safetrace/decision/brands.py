@@ -35,6 +35,15 @@ OFFICIAL_BRAND_DOMAINS: dict[str, tuple[str, ...]] = {
 # 근거로 삼지 않는다(gourl.kr·vo.la 는 사라진 링크를 naver.com·쿠팡 검색으로 넘긴다)
 SHORTENER_HOSTS: tuple[str, ...] = ("bit.ly", "tinyurl.com", "t.ly", "han.gl", "lrl.kr", "goo.su", "c11.kr", "go9.co",
                                     "iii.im", "xzx.kr", "muz.so", "tny.kr", "5du.pl", "gourl.kr", "vo.la")
+# 공용 호스팅(누구나 하위 도메인에 사이트를 올린다): 하위 도메인이 다르면 다른 운영자다. 오늘의 실사이트 세트
+# (OpenPhish 2026-10-14·15)·KISA 2024 자료에서 피싱이 올라와 있던 곳만 둔다
+SHARED_HOSTING: tuple[str, ...] = (
+    "pages.dev", "netlify.app", "vercel.app", "github.io", "webflow.io", "typedream.app", "framer.website",
+    "weebly.com", "jimdofree.com", "blogspot.com", "gitbook.io", "replit.app", "craftum.io", "cleverapps.io",
+    "azurefd.net", "amazonaws.com",  # OpenPhish 2026-10-15
+    "dothome.co.kr",                 # OpenPhish 2026-10-14·15
+    "creatorlink.net",               # KISA 2024
+)
 THIN_TEXT_CHARS = 200  # 조사한 화면 글자를 다 합쳐 이보다 적으면 '내용이 거의 없음'
 _TOKEN = re.compile(r"[.\-_]")
 

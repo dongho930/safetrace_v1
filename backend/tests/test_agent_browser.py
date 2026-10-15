@@ -510,6 +510,24 @@ def test_non_http_schemes_excluded(settings, testpages):
     assert {f.split(":")[1] for f in obs["data"]["forbidden"]} >= {"tel", "intent", "file", "sms"}
 
 
+def test_related_links_collected_apart_from_click_candidates(settings, testpages):
+    """related-sites PR 2: 연관 후보 링크는 클릭 후보와 따로 화면의 모든 a[href] 에서 모은다(관찰당 200개,
+    2048자 넘는 주소·javascript: 는 빼고, 앵커 글자의 개인정보는 가림). 판단 모델에 보내는 클릭 후보는 그대로다."""
+    settings.max_steps = 1
+    _, final, chain, _ = run(f"{BASE}/attack/links.html", settings, testpages)
+    obs = next(r for r in chain if r["kind"] == "observe")
+    assert obs["data"]["links_seen"] == 200
+    assert len(obs["data"]["candidates"]) <= settings.max_candidates
+    found = next(r["data"]["found"] for r in chain if r["kind"] == "candidates")
+    hosts = [c["host"] for c in found]
+    # 위협 단서 링크가 맨 앞: 보이는 것('카지노')과 보이지 않는 것('환전'). 보이지 않는 링크도 모은다
+    assert len(found) == 20 and set(hosts[:2]) == {"casino-camp.example", "hidden-camp.example"}, hosts
+    assert not {"long.example", "www.facebook.com"} & set(hosts)
+    assert not any(c["url"].startswith("javascript") for c in found)
+    blob = json.dumps([r["data"] for r in chain], ensure_ascii=False)
+    assert "1234-5678" not in blob and "alice@example.com" not in blob
+
+
 def test_tampered_evidence_detected_end_to_end(settings, testpages):
     cid, final, chain, _ = run(f"{BASE}/benign/", settings, testpages)
     head = Head(final["head"]["seq"], final["head"]["hash"])

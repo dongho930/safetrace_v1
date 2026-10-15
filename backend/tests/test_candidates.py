@@ -19,8 +19,8 @@ def test_select_via_and_links():
                  ["https://pay-fake.shop/help", "https://other-scam.top/", "https://www.naver.com/",
                   "https://sub.hop.example.net/x", "javascript:alert(1)", "ftp://files.example/"], PORTS)
     assert got == [
-        {"url": "https://hop.example.net/", "host": "hop.example.net", "source": "via"},  # 경유: 사이트 첫 화면
-        {"url": "https://other-scam.top/", "host": "other-scam.top", "source": "link"},
+        {"url": "https://hop.example.net/", "host": "hop.example.net", "source": "via", "score": 3, "text": ""},  # 경유: 첫 화면
+        {"url": "https://other-scam.top/", "host": "other-scam.top", "source": "link", "score": 0, "text": ""},
     ]  # 같은 사이트·공식 도메인(naver)·이미 고른 사이트·다른 스킴은 뺀다
 
 
@@ -39,6 +39,87 @@ def test_select_limit():
     assert len(select("https://start.example/", "", [], links, PORTS)) == MAX_FOUND
 
 
+# ── related-sites PR 2: 후보 고르는 순서 ─────────────────────────
+def test_select_orders_by_score():
+    """경유 3 → 위협 단서 링크 2 → 이름 조각을 나눠 갖는 도메인 1 → 나머지 0. 같은 점수는 나온 순서."""
+    links = [
+        {"url": "https://plain-a.example/", "text": "회사 소개"},
+        {"url": "https://km-telegram.com/", "text": "텔레그램"},             # 'telegram' 조각을 나눠 가짐
+        {"url": "https://plain-b.example/", "text": "공지"},
+        {"url": "https://dgjlc.com/", "text": "카지노 바로가기"},            # 위협 단서(판단 규칙의 단어)
+        {"url": "https://bet.example/%EB%B0%94%EC%B9%B4%EB%9D%BC/", "text": ""},  # 주소의 단서(인코딩된 '바카라')
+    ]
+    got = select("http://kc-telegram.com/", "http://kc-telegram.com/", ["http://kc-telegram.com/", "https://hop.example/"],
+                 links, PORTS)
+    assert [(c["host"], c["score"]) for c in got] == [
+        ("hop.example", 3), ("dgjlc.com", 2), ("bet.example", 2), ("km-telegram.com", 1),
+        ("plain-a.example", 0), ("plain-b.example", 0)]
+    assert got[1]["text"] == "카지노 바로가기"
+
+
+def test_select_excludes_generic_sites_and_keeps_best_link():
+    links = [{"url": "https://www.facebook.com/somepage", "text": "페이스북"},
+             {"url": "https://ethereum.org/en/", "text": "Ethereum"},
+             {"url": "https://www.typedream.com/", "text": "Made with Typedream"},
+             {"url": "https://camp.example/about", "text": "안내"},
+             {"url": "https://camp.example/pay", "text": "충전하기"}]  # 같은 사이트는 점수가 높은 링크를 남긴다
+    got = select("https://start.example/", "", [], links, PORTS)
+    assert [(c["url"], c["score"]) for c in got] == [("https://camp.example/pay", 2)]
+
+
+def test_select_keeps_clue_link_past_limit():
+    """기록 20개도 점수 순으로 채운다: 평범한 링크 50개 뒤의 단서 링크가 빠지지 않는다."""
+    links = [f"https://s{i}.example{i}.com/" for i in range(50)] + [{"url": "https://late.example/", "text": "환전 안내"}]
+    got = select("https://start.example/", "", [], links, PORTS)
+    assert len(got) == MAX_FOUND and got[0]["host"] == "late.example"
+
+
+def test_name_fragments():
+    from safetrace.agent.candidates import name_fragments
+
+    assert name_fragments("kc-telegram.com") == {"telegram"}
+    assert name_fragments("www.kc-telegram.com") == {"telegram"}
+    # 공용 호스팅은 하위 도메인에서만(호스팅 이름 'pages'·'netlify' 는 운영자와 무관)
+    assert name_fragments("sp21ct-ravur-biz-melo-kazi.pages.dev") == {"sp21ct", "ravur", "melo", "kazi"}
+    assert name_fragments("pages.dev") == set()
+    assert name_fragments("netcoins-login-sso-ca.webflow.io") == {"netcoins"}  # 흔한 낱말·짧은 조각은 뺀다
+    assert name_fragments("127.0.0.1") == set()
+
+
+def test_framer_badge_link_is_not_a_fragment_match():
+    """공용 호스팅에 올린 사이트의 '만든 곳' 링크(플랫폼 홈)는 이름 조각이 같다고 앞에 두지 않는다."""
+    got = select("https://3322abc.framer.website/", "", [],
+                 [{"url": "https://other.example/", "text": "x"}, {"url": "https://www.framer.com/", "text": "Made in Framer"}],
+                 PORTS)
+    assert [(c["host"], c["score"]) for c in got] == [("other.example", 0), ("www.framer.com", 0)]
+
+
+def test_page_state_has_no_links():
+    """링크 목록은 판단 모델 입력(PageState)에 넣지 않는다: 원래 사건의 탐색·판단은 그대로여야 한다."""
+    from safetrace.decision.schema import PageState
+
+    assert "links" not in PageState.model_fields
+
+
+def test_page_links_shape():
+    from safetrace.agent.loop import _page_links
+
+    raw = [{"href": "https://a.example/", "text": "문의 010-1234-5678", "visible": True},
+           {"href": "javascript:alert(1)", "text": "x"}, {"href": "https://b.example/" + "a" * 3000},
+           {"href": 5}, "str", {"href": "http://c.example/", "text": None, "visible": "yes"}] + \
+          [{"href": f"https://f{i}.example/"} for i in range(300)]
+    got = _page_links(raw)
+    assert len(got) == 200
+    assert got[0]["url"] == "https://a.example/" and "1234-5678" not in got[0]["text"] and got[0]["visible"] is True
+    assert got[1] == {"url": "http://c.example/", "text": "", "visible": False}
+    assert _page_links("not a list") == []
+
+
+def test_candidate_text_is_cut():
+    got = select("https://start.example/", "", [], [{"url": "https://a.example/", "text": "가" * 300}], PORTS)
+    assert len(got[0]["text"]) == 80
+
+
 def test_needs_followup():
     benign = {"threat": "benign", "hold": False}
     assert not _needs_followup("COMPLETED", benign, False)          # 확신 있는 정상은 하위 조사하지 않음
@@ -55,13 +136,15 @@ def test_api_cleans_candidates():
     from safetrace.api.main import _clean_candidates
 
     raw = [{"url": "https://a.example/", "host": "a.example", "sub": 1, "threat": "phishing", "probability": 0.9,
-            "hold": False, "evil": "<script>", "status": "x" * 500},
-           {"url": 5}, "string", {"url": "https://b.example/", "sub": 99, "probability": 7}]
+            "hold": False, "evil": "<script>", "status": "x" * 500, "score": 2, "text": "t" * 300, "blocked": True},
+           {"url": 5}, "string", {"url": "https://b.example/", "sub": 99, "probability": 7, "score": True, "blocked": "yes"},
+           {"url": "https://c.example/", "score": 9}]
     got = _clean_candidates(raw * 10)
     assert len(got) == 20
     assert got[0] == {"url": "https://a.example/", "host": "a.example", "status": "x" * 24, "threat": "phishing",
-                      "hold": False, "sub": 1, "probability": 0.9}
-    assert got[1] == {"url": "https://b.example/"}  # 범위 밖 sub·확률은 버림
+                      "text": "t" * 80, "hold": False, "blocked": True, "sub": 1, "probability": 0.9, "score": 2}
+    assert got[1] == {"url": "https://b.example/"}  # 범위 밖 sub·확률, 정수가 아닌 점수, 참거짓이 아닌 blocked 는 버림
+    assert got[2] == {"url": "https://c.example/"}
     assert _clean_candidates("not a list") == []
 
 
@@ -181,6 +264,36 @@ def test_first_match_survives_failed_followup_lookup(settings, monkeypatch):
     assert (c["reputation_match"], c["hold"]) == (True, True), c
     res = next(r["data"] for r in chain if r["kind"] == "candidate_results")["results"][0]
     assert res["hold"] is True
+
+
+def test_blocked_candidate_marked(settings, monkeypatch):
+    """related-sites PR 2: 하위 조사에서 회선이 이름을 보고 막은 후보는 '이미 차단됨'(blocked)으로 남는다."""
+    cands = [{"url": f"https://c{i}.example/", "host": f"c{i}.example", "source": "link", "score": 0, "text": ""}
+             for i in (1, 2)]
+    blocked = dict(status="UNREACHABLE", finish_reason="goto_failed", final_url="https://c1.example/",
+                   network_filtered=True)
+    final, chain = _run(settings, monkeypatch, {"https://start.example/": _phish_main(cands),
+                                                "https://c1.example/": blocked,
+                                                "https://c2.example/": _benign_sub("https://c2.example/")},
+                        lambda urls, key, transport=None: {"status": "no_match", "matches": []})
+    assert [c["blocked"] for c in final["candidates"]] == [True, False]
+    res = next(r["data"] for r in chain if r["kind"] == "candidate_results")["results"]
+    assert [r["blocked"] for r in res] == [True, False]
+
+
+def test_package_keeps_new_candidate_fields():
+    from safetrace.package import clean_records
+
+    recs = [{"seq": 1, "kind": "candidates", "ts": "t", "files": {},
+             "data": {"found": [{"url": "https://a.example/", "host": "a.example", "source": "link", "score": 2,
+                                 "text": "충전"}], "followup": True}},
+            {"seq": 2, "kind": "candidate_results", "ts": "t", "files": {},
+             "data": {"results": [{"sub": 1, "url": "https://a.example/", "blocked": True, "score": 2}]}},
+            {"seq": 3, "kind": "observe", "ts": "t", "files": {}, "data": {"links_seen": 200}}]
+    out, bad = clean_records(recs)
+    assert bad == []
+    assert out[0]["data"]["found"][0]["score"] == 2 and out[1]["data"]["results"][0]["blocked"] is True
+    assert out[2]["data"]["links_seen"] == 200
 
 
 def test_every_candidate_destination_checked(settings, monkeypatch):
