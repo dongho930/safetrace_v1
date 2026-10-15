@@ -6,8 +6,12 @@
       에이전트 컨테이너 안에서 조사하고 결과를 var/eval/<시각>_<메모>.jsonl 과 .md 로 받아 온다
   python tools/eval_agent.py report var/eval/A.jsonl
   python tools/eval_agent.py compare var/eval/A.jsonl var/eval/B.jsonl
+  python tools/eval_agent.py related var/eval/A.jsonl
+      연관 후보 하위 조사 결과를 사람이 확인할 표본 목록으로 낸다(var/eval/A_related.csv, git 밖)
 
 정답(expected): phishing·scam·illegal_gambling·malware·benign, 또는 유형을 가리지 않는 malicious.
+연관 사이트 발견(docs/related-sites.md): 하위 조사는 원래 판정을 바꾸지 않으므로 정답률과 따로 잰다
+(하위 조사 비율, 위협 발견 비율, 발견 사이트 수, 아직 안 막힌 비율, 후보 1곳당 시간, 원래 결과까지 시간).
 조사 증거는 컨테이너의 임시 폴더에 쓴다(콘솔 사건 목록·증거 볼륨을 더럽히지 않음).
 
 평가 목록 관리: KISA 주소는 시간이 지나면 사라진다. 접속 불가(UNREACHABLE)는 채점에서 빼고 따로 세므로,
@@ -29,6 +33,7 @@ import uuid
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 MALICIOUS = {"phishing", "scam", "illegal_gambling", "malware"}
@@ -92,6 +97,67 @@ def summarize(recs: list[dict]) -> dict[str, dict]:
     return out
 
 
+# ── 연관 사이트 발견(순수 함수) ─────────────────────────────
+def related_item(c: dict, site_of) -> dict:
+    """최종 상태의 후보 하나를 평가 기록용으로 줄인다. 값은 조사 대상 페이지에서 온 글자다(공격자 값)."""
+    url = str(c.get("url") or "")[:2048]
+    host = str(c.get("host") or urlsplit(url).hostname or "")[:253]
+    return {"url": url, "host": host, "site": site_of(host) if host else None, "source": c.get("source"),
+            "sub": c.get("sub"), "status": c.get("status"), "reason": c.get("reason"),
+            "final_url": str(c.get("final_url") or "")[:2048] or None, "threat": c.get("threat"),
+            "probability": c.get("probability"), "hold": c.get("hold"),
+            "reputation_match": bool(c.get("reputation_match")),
+            "blocked": c.get("blocked") if isinstance(c.get("blocked"), bool) else None}  # PR 2 부터
+
+
+def _is_threat(c: dict) -> bool:
+    return c.get("threat") not in (None, "benign", "unknown")
+
+
+def related_summary(recs: list[dict]) -> dict[str, dict]:
+    """그룹별(+전체) 연관 사이트 발견 지표. 기록에 related 가 없으면(이전 평가) measured 가 0 이다."""
+    groups: dict[str, list[dict]] = {}
+    for r in recs:
+        groups.setdefault(r["group"], []).append(r)
+        groups.setdefault("전체", []).append(r)
+    out = {}
+    for g, rs in groups.items():
+        scored = [r for r in rs if outcome(r["expected"], r) != "skipped"]
+        measured = [r for r in scored if isinstance(r.get("related"), list)]
+        subs = [r for r in measured if any(c.get("sub") for c in r["related"])]
+        hits = [r for r in subs if any(c.get("sub") and _is_threat(c) for c in r["related"])]
+        found = [c for r in subs for c in r["related"] if c.get("sub") and _is_threat(c)]
+        sites = {c["site"] for c in found if c.get("site")}
+        known = [c for c in found if isinstance(c.get("blocked"), bool)]
+        open_sites = {c["site"] for c in known if not c["blocked"] and c.get("site")}
+        n_sub = sum(1 for r in subs for c in r["related"] if c.get("sub"))
+        mains = sorted(r.get("seconds_main", r["seconds"]) for r in measured)
+        extra = sum(r["seconds"] - r.get("seconds_main", r["seconds"]) for r in subs)
+        out[g] = {"scored": len(scored), "measured": len(measured), "sub_runs": len(subs), "threat_runs": len(hits),
+                  "sites": len(sites), "blocked_known": bool(known), "open_sites": len(open_sites),
+                  "n_sub": n_sub, "per_candidate": extra / n_sub if n_sub and extra > 0 else None,
+                  "main_median": statistics.median(mains) if mains else None}
+    return out
+
+
+_RELATED_NAMES = ["하위 조사 비율", "위협 발견 비율", "발견 사이트 수", "아직 안 막힌 비율", "후보 1곳당 시간",
+                  "원래 결과까지 시간 중앙값"]
+
+
+def _related_rows(m: dict) -> list[tuple[str, str]]:
+    if not m["measured"]:
+        return [(name, "측정 안 함") for name in _RELATED_NAMES]
+    return [
+        ("하위 조사 비율", f"{m['sub_runs']}/{m['measured']} ({_pct(m['sub_runs'], m['measured'])})"),
+        ("위협 발견 비율", f"{m['threat_runs']}/{m['sub_runs']} ({_pct(m['threat_runs'], m['sub_runs'])})"),
+        ("발견 사이트 수", str(m["sites"])),
+        ("아직 안 막힌 비율", f"{m['open_sites']}/{m['sites']} ({_pct(m['open_sites'], m['sites'])})"
+         if m["blocked_known"] else "측정 안 함"),
+        ("후보 1곳당 시간", f"{m['per_candidate']:.1f}s" if m["per_candidate"] is not None else "측정 안 함"),
+        ("원래 결과까지 시간 중앙값", f"{m['main_median']:.1f}s" if m["main_median"] is not None else "-"),
+    ]
+
+
 def _metric_rows(m: dict) -> list[tuple[str, str]]:
     n = m["scored"]
     return [
@@ -118,6 +184,14 @@ def report(recs: list[dict], meta: dict | None = None) -> str:
     rows = {g: _metric_rows(summ[g]) for g in groups}
     for i, (name, _) in enumerate(rows[groups[0]]):
         lines.append(f"| {name} | " + " | ".join(rows[g][i][1] for g in groups) + " |")
+    rel = related_summary(recs)
+    lines += ["", "## 연관 사이트 발견", "",
+              "하위 조사는 원래 사건의 판정을 바꾸지 않는다(설계). 위협 발견 = 하위 조사한 후보를 위협 유형으로 본 회차, "
+              "발견 사이트 = 그 후보의 등록 도메인(중복 제외). 표본은 `related` 명령으로 CSV 를 내서 사람이 확인한다.", "",
+              "| 지표 | " + " | ".join(groups) + " |", "|---|" + "---|" * len(groups)]
+    rrows = {g: _related_rows(rel[g]) for g in groups}
+    for i, name in enumerate(_RELATED_NAMES):
+        lines.append(f"| {name} | " + " | ".join(rrows[g][i][1] for g in groups) + " |")
     lines += ["", "## URL별", "", "| 그룹 | 정답 | URL | 판정(반복) | 채점 |", "|---|---|---|---|---|"]
     by_url: dict[str, list[dict]] = {}
     for r in recs:
@@ -133,6 +207,7 @@ def report(recs: list[dict], meta: dict | None = None) -> str:
 
 def compare(a: list[dict], b: list[dict], name_a: str, name_b: str) -> str:
     sa, sb = summarize(a), summarize(b)
+    ra_rel, rb_rel = related_summary(a), related_summary(b)
     lines = [f"# 평가 비교: {name_a} → {name_b}", ""]
     for g in [g for g in sb if g != "전체"] + ["전체"]:
         if g not in sa:
@@ -140,6 +215,8 @@ def compare(a: list[dict], b: list[dict], name_a: str, name_b: str) -> str:
         lines += [f"## {g}", "", "| 지표 | 전 | 후 |", "|---|---|---|"]
         for (name, va), (_, vb) in zip(_metric_rows(sa[g]), _metric_rows(sb[g])):
             lines.append(f"| {name} | {va} | {vb} |")
+        for (name, va), (_, vb) in zip(_related_rows(ra_rel[g]), _related_rows(rb_rel[g])):
+            lines.append(f"| 연관 · {name} | {va} | {vb} |")
         lines.append("")
     # URL별로 정답 비율이 달라진 것
     def rate(recs):
@@ -158,6 +235,39 @@ def compare(a: list[dict], b: list[dict], name_a: str, name_b: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+_FORMULA = ("=", "+", "-", "@", chr(9), chr(13))  # 탭·CR 로 시작해도 수식으로 읽힐 수 있다
+
+
+def _cell(v: object) -> str:
+    """표본 CSV 칸: 페이지가 정한 글자가 엑셀에서 수식으로 읽히지 않게 수식 시작 문자 앞에 ' 를 붙인다(CWE-1236)."""
+    s = "" if v is None else str(v)
+    return "'" + s if s[:1] in _FORMULA else s
+
+
+RELATED_COLUMNS = ["사이트", "후보 주소", "도착 주소", "원 신고 URL", "그룹", "회차", "출처", "하위 조사 상태",
+                   "AI 판단", "확률", "보류", "평판 위험", "이미 차단됨"]
+
+
+def related_rows(recs: list[dict]) -> list[list[str]]:
+    """사람이 판단을 확인할 표본: 하위 조사한 후보 전부(위협으로 본 것 먼저). 살아 있는 위험 주소가 들어 있어
+    git 밖(var/eval)에만 쓴다."""
+    items = [(r, c) for r in recs if isinstance(r.get("related"), list) for c in r["related"] if c.get("sub")]
+    items.sort(key=lambda rc: (not _is_threat(rc[1]), rc[1].get("site") or ""))
+    return [[_cell(x) for x in (c.get("site"), c.get("url"), c.get("final_url"), r["url"], r["group"],
+                                r.get("repeat"), c.get("source"), c.get("status"), c.get("threat"),
+                                c.get("probability"), c.get("hold"), c.get("reputation_match"), c.get("blocked"))]
+            for r, c in items]
+
+
+def write_related_csv(recs: list[dict], path: Path) -> int:
+    rows = related_rows(recs)
+    with path.open("w", encoding="utf-8-sig", newline="") as f:  # 엑셀에서 한글이 깨지지 않게 BOM
+        w = csv.writer(f)
+        w.writerow(RELATED_COLUMNS)
+        w.writerows(rows)
+    return len(rows)
+
+
 # ── 실행 ────────────────────────────────────────────────
 def load_set(path: Path, group: str | None) -> list[dict]:
     rows = list(csv.DictReader(path.open(encoding="utf-8")))
@@ -167,6 +277,7 @@ def load_set(path: Path, group: str | None) -> list[dict]:
 def run_inside(args) -> None:
     """에이전트 컨테이너 안에서 실행: 조사하고 결과를 한 줄씩 쓴다."""
     sys.path.insert(0, "/app")
+    from safetrace.agent.candidates import site_of
     from safetrace.agent.runner import investigate
     from safetrace.config import Settings
 
@@ -180,8 +291,14 @@ def run_inside(args) -> None:
                 cid = str(uuid.uuid4())
                 rec = {"group": row["group"], "expected": row["expected"], "url": row["url"], "repeat": rep}
                 t = time.monotonic()
+                t_main: list[float] = []
+
+                def on_event(e, t_main=t_main):
+                    # 원래 결과가 하위 조사보다 먼저 나오는 경우(related-sites PR 3) 그 시각을 잰다
+                    if isinstance(e, dict) and e.get("type") == "status" and e.get("phase") == "related" and not t_main:
+                        t_main.append(time.monotonic())
                 try:
-                    final = investigate(cid, row["url"], s, emit=lambda e: None)
+                    final = investigate(cid, row["url"], s, emit=on_event)
                     th = final.get("threat") or {}
                     rec.update(status=final["status"], reason=final["reason"], threat=th.get("threat"),
                                probability=th.get("probability"), hold=th.get("hold"),
@@ -194,9 +311,11 @@ def run_inside(args) -> None:
                     cands = final.get("candidates") or []
                     rec["candidates"] = len(cands)
                     rec["candidates_investigated"] = sum(1 for c in cands if isinstance(c, dict) and c.get("sub"))
+                    rec["related"] = [related_item(c, site_of) for c in cands if isinstance(c, dict)][:20]
                 except Exception as e:  # 한 건 실패로 전체를 멈추지 않는다
                     rec["error"] = f"{type(e).__name__}: {str(e)[:200]}"
                 rec["seconds"] = round(time.monotonic() - t, 1)
+                rec["seconds_main"] = round(t_main[0] - t, 1) if t_main else rec["seconds"]
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 f.flush()
                 print(f"[{rep + 1}/{args.repeat}] {rec['seconds']:6.1f}s {rec.get('threat') or rec.get('status')}"
@@ -253,8 +372,9 @@ def run_host(args) -> None:
             tmp.unlink()
             md = report(load_results(local), meta)
             local.with_suffix(".md").write_text(md, encoding="utf-8")
+            n = write_related_csv(load_results(local), local.with_name(local.stem + "_related.csv"))
             print("\n" + md)
-            print(f"결과: {local.relative_to(ROOT)}")
+            print(f"결과: {local.relative_to(ROOT)} (연관 표본 {n}줄: {local.stem}_related.csv)")
 
 
 def load_results(path: Path) -> list[dict]:
@@ -282,6 +402,8 @@ def main() -> None:
     r.add_argument("--out", help=argparse.SUPPRESS)
     p = sub.add_parser("report")
     p.add_argument("results", type=Path)
+    rl = sub.add_parser("related")
+    rl.add_argument("results", type=Path)
     c = sub.add_parser("compare")
     c.add_argument("a", type=Path)
     c.add_argument("b", type=Path)
@@ -290,6 +412,9 @@ def main() -> None:
         (run_inside if args.inside else run_host)(args)
     elif args.cmd == "report":
         print(report(load_results(args.results), load_meta(args.results)))
+    elif args.cmd == "related":
+        out = args.results.with_name(args.results.stem + "_related.csv")
+        print(f"{out}: {write_related_csv(load_results(args.results), out)}줄")
     else:
         print(compare(load_results(args.a), load_results(args.b), args.a.stem, args.b.stem))
 
