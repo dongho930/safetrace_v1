@@ -67,6 +67,16 @@ def test_select_excludes_generic_sites_and_keeps_best_link():
     assert [(c["url"], c["score"]) for c in got] == [("https://camp.example/pay", 2)]
 
 
+def test_service_home_excluded_only_at_root():
+    """Codex(PR 2) F3: 단축 서비스·사이트 빌더의 '홈'만 뺀다. 같은 도메인의 다른 경로(단축 주소·사용자 페이지)는
+    목적지를 확인하기 전이라 후보로 남긴다."""
+    got = select("https://start.example/", "", [],
+                 [{"url": "https://sdu.sk/campaign", "text": "카지노"}, {"url": "https://bitly.com/", "text": "Bitly"},
+                  {"url": "https://www.webflow.com", "text": "Made in Webflow"},
+                  {"url": "https://ethereum.org/en/wallets/", "text": "지갑"}], PORTS)
+    assert [c["url"] for c in got] == ["https://sdu.sk/campaign"]  # 공식 사이트(ethereum.org)는 경로와 관계없이 뺀다
+
+
 def test_select_keeps_clue_link_past_limit():
     """기록 20개도 점수 순으로 채운다: 평범한 링크 50개 뒤의 단서 링크가 빠지지 않는다."""
     links = [f"https://s{i}.example{i}.com/" for i in range(50)] + [{"url": "https://late.example/", "text": "환전 안내"}]
@@ -312,3 +322,11 @@ def test_every_candidate_destination_checked(settings, monkeypatch):
     final, _ = _run(settings, monkeypatch, runs, lookup)
     c3 = next(c for c in final["candidates"] if c["host"] == "c3.example")
     assert (c3["reputation_match"], c3["hold"]) == (True, True), c3
+
+
+def test_blocked_is_shown_as_estimate():
+    """Codex(PR 2) F2: 회선 차단 감지는 조사 대상 서버가 흉내 낼 수 있는 동작이라 '확정'으로 적지 않는다."""
+    from safetrace.report import related_opinion
+
+    got = related_opinion({"threat_ko": "피싱", "probability": 0.9, "hold": False, "blocked": True, "error": False})
+    assert got.endswith("회선 차단 추정") and "이미 차단됨" not in got

@@ -26,14 +26,20 @@ _SECOND_LEVEL = {"co", "or", "go", "ne", "ac", "re", "pe", "com", "net", "org", 
 
 # 흔한 대형 사이트: 위협 사이트가 꾸밈으로 링크하는 정상 서비스. 하위 조사 3곳을 여기에 쓰지 않는다.
 # 연관 후보로 나와 하위 조사 결과가 정상이었던 것만 둔다(평가 기록 var/eval/20261014-2355_related_baseline·
-# 20261015-0028_fresh_20261015 의 related)
+# 20261015-0028_fresh_20261015·20261015-1018_related_discovery 의 related)
 GENERIC_SITES: frozenset[str] = frozenset({
-    "facebook.com", "instagram.com", "x.com",                    # SNS(KISA·실사이트)
-    "bitly.com", "mu-star.net", "sdu.sk",                        # 단축 서비스 홈(정지 안내 화면의 링크, KISA)
-    "rambler.ru",                                                # 포털(KISA)
+    "facebook.com", "instagram.com", "x.com", "linkedin.com",   # SNS(KISA·실사이트)
+    "youtube.com",                                              # 동영상(KISA 크리에이터링크 차단 화면)
+    "rambler.ru", "liveinternet.ru",                            # 포털·방문 집계(KISA goo.su)
+    "freestar.com", "ethyca.com",                               # 광고·개인정보 동의 업체(KISA tinyurl·bit.ly)
+    "ethereum.org", "polkadot.network", "cosmos.network",       # 가짜 지갑 사이트가 꾸밈으로 단 공식 사이트(실사이트)
+    "dhl.com",                                                  # 사칭 대상의 공식 사이트(실사이트)
+})
+# 서비스 홈: 그 서비스의 첫 화면(경로 '/')만 뺀다. 같은 도메인의 다른 경로는 단축 주소·사용자 페이지일 수 있어
+# 목적지를 확인하기 전에 버리지 않는다(Codex 지적)
+SERVICE_HOMES: frozenset[str] = frozenset({
+    "bitly.com", "mu-star.net", "sdu.sk",                       # 단축 서비스 홈(정지 안내 화면의 링크, KISA)
     "typedream.com", "webflow.com", "gitbook.com", "jimdo.com",  # 사이트 빌더 홈(실사이트의 '만든 곳' 링크)
-    "ethereum.org", "polkadot.network", "cosmos.network",        # 가짜 지갑 사이트가 꾸밈으로 단 공식 사이트(실사이트)
-    "dhl.com",                                                   # 사칭 대상의 공식 사이트(실사이트)
 })
 # 위협 단서: 판단 규칙(decision/providers.py)에 이미 있는 단어만 쓴다. 'input:'·'download:' 는 화면 요소 표시라 뺀다
 _CLUES: tuple[str, ...] = tuple(w.lower() for ws in _THREAT_SIGNS.values() for w in ws if ":" not in w)
@@ -130,7 +136,7 @@ def select(start_url: str, final_url: str, nav_chain: list[str], links: list,
             return
         url, host = c
         site = site_of(host)
-        if _official(host) or site in GENERIC_SITES:
+        if _official(host) or site in GENERIC_SITES or (site in SERVICE_HOMES and urlsplit(url).path in ("", "/")):
             return
         if source == "via" and site in ends:
             return

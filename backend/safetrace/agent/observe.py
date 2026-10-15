@@ -79,7 +79,9 @@ COLLECT_JS = r"""
     const r = a.getBoundingClientRect(), cs = getComputedStyle(a);
     const shown = r.width > 2 && r.height > 2 && cs.visibility !== 'hidden' && cs.display !== 'none';
     const label = (a.innerText || a.getAttribute('aria-label') || a.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
-    links.push({ href, text: label.slice(0, 200), visible: shown });
+    // 금지 분류(결제·다운로드·로그인 등)에 쓰는 속성. 분류는 Python 이 클릭 후보와 같은 규칙으로 한다
+    links.push({ href, text: label.slice(0, 200), visible: shown, hasDownload: a.hasAttribute('download'),
+                 inForm: !!a.closest('form') });
   }
   return { items: out, inputs, popup, text, title: document.title.slice(0, 200), links };
 }

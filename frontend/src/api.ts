@@ -29,7 +29,7 @@ export type Candidate = {
   threat?: string | null;
   probability?: number | null;
   hold?: boolean | null;
-  blocked?: boolean; // 하위 조사에서 회선이 도메인 이름을 보고 막음(이미 차단됨)
+  blocked?: boolean; // 하위 조사에서 회선이 도메인 이름을 보고 막은 것으로 추정(조사 대상 서버가 흉내 낼 수 있어 확정이 아니다)
   score?: number; // 고른 순서 점수 0~3(경유 3 · 위협 단서 2 · 이름 조각 1)
   text?: string; // 링크의 앵커 글자(개인정보를 가림)
 };

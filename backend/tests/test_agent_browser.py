@@ -528,6 +528,17 @@ def test_related_links_collected_apart_from_click_candidates(settings, testpages
     assert "1234-5678" not in blob and "alice@example.com" not in blob
 
 
+def test_forbidden_links_never_become_related_candidates(settings, testpages):
+    """Codex(PR 2) F1: 클릭 후보에서 막는 결제·다운로드 링크는 연관 후보로도 고르지 않는다(하위 조사가 그 주소를 열면
+    클릭 금지를 우회한다). 시험 서버의 금지 경로 기록으로 확인한다."""
+    settings.max_steps = 2
+    _, final, chain, _ = run(f"{BASE}/attack/related-pay.html", settings, testpages)
+    assert final["threat"]["threat"] == "phishing", final["threat"]
+    found = next(r["data"]["found"] for r in chain if r["kind"] == "candidates")
+    assert not any("pay.html" in c["url"] or c["url"].endswith(".apk") for c in found), found
+    assert testpages.forbidden_hits() == []
+
+
 def test_tampered_evidence_detected_end_to_end(settings, testpages):
     cid, final, chain, _ = run(f"{BASE}/benign/", settings, testpages)
     head = Head(final["head"]["seq"], final["head"]["hash"])

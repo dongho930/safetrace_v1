@@ -236,7 +236,9 @@ _PAGE_LINKS_MAX = 200  # 관찰 한 번에 받는 링크(COLLECT_JS 와 같은 �
 
 def _page_links(raw) -> list[dict]:
     """COLLECT_JS 가 모은 링크(페이지가 정한 값)를 정해진 모양으로만 받는다: http·https 절대 주소 2048자 이하,
-    앵커 글자는 개인정보를 가린 뒤 80자. 보이는지 여부는 남기지만 고르는 데는 쓰지 않는다."""
+    앵커 글자는 개인정보를 가린 뒤 80자. 보이는지 여부는 남기지만 고르는 데는 쓰지 않는다.
+    클릭 후보에서 막는 링크(결제·다운로드·로그인 등, gate.classify_forbidden)는 받지 않는다: 연관 후보로 골라 하위 조사가
+    그 주소를 열면 클릭 금지를 우회하게 된다(Codex 지적)."""
     out = []
     for x in raw if isinstance(raw, list) else []:
         if len(out) >= _PAGE_LINKS_MAX:
@@ -247,6 +249,10 @@ def _page_links(raw) -> list[dict]:
         if len(href) > 2048 or not href.startswith(("http://", "https://")):
             continue
         text = x.get("text") if isinstance(x.get("text"), str) else ""
+        info = ElementInfo.from_js({"tag": "a", "href": href, "text": text, "hasDownload": x.get("hasDownload") is True,
+                                    "inForm": x.get("inForm") is True})
+        if classify_forbidden(info):
+            continue
         out.append({"url": href, "text": mask_pii(text[:200])[:TEXT_MAX], "visible": x.get("visible") is True})
     return out
 
