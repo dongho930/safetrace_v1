@@ -53,6 +53,7 @@ export type CaseOut = {
   parent_url: string | null;
   auto: boolean | null; // 자동으로 만든 연관 사건인지(PR 4b)
   children: ChildCase[] | null; // 이 사건의 후보로 만든 사건(상세에만)
+  auto_skipped: { url: string; reason: string }[] | null; // 하위 조사했지만 자동 사건이 없는 후보와 이유(상세에만)
 };
 
 // 연관 후보로 만든 사건(부모 사건 상세의 요약)
@@ -378,5 +379,10 @@ export function cleanCase(v: unknown): CaseOut | null {
     parent_url: strOr(v.parent_url)?.slice(0, 2000) ?? null,
     auto: typeof v.auto === "boolean" ? v.auto : null,
     children: Array.isArray(v.children) ? list(v.children).slice(0, 50).flatMap(cleanChild) : null,
+    auto_skipped: Array.isArray(v.auto_skipped)
+      ? list(v.auto_skipped)
+          .slice(0, 20)
+          .flatMap((x) => (isObj(x) && typeof x.url === "string" && typeof x.reason === "string" ? [{ url: x.url.slice(0, 2000), reason: x.reason.slice(0, 32) }] : []))
+      : null,
   };
 }

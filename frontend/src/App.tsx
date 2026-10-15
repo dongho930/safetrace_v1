@@ -150,6 +150,7 @@ export default function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [folder, setFolder] = useState<FolderId>("all");
   const [query, setQuery] = useState("");
+  const [source, setSource] = useState("");
   const [error, setError] = useState("");
   const [dialog, setDialog] = useState<"" | "users" | "password">("");
   const fit = useFitZoom();
@@ -191,7 +192,10 @@ export default function App() {
   // 지금 폴더·검색에 맞는 목록. 이전·다음 사건과 '저장하고 다음 사건'도 이 순서를 따른다
   const current = FOLDERS.find((f) => f.id === folder) ?? FOLDERS[FOLDERS.length - 1];
   const q = query.trim().toLowerCase();
-  const shown = useMemo(() => cases.filter((c) => current.test(c) && (!q || c.url.toLowerCase().includes(q))), [cases, current, q]);
+  const shown = useMemo(
+    () => cases.filter((c) => current.test(c) && (!source || c.source === source) && (!q || c.url.toLowerCase().includes(q))),
+    [cases, current, q, source],
+  );
   const at = selected ? shown.findIndex((c) => c.id === selected) : -1;
   const prevId = at > 0 ? shown[at - 1].id : null;
   const nextId = at >= 0 ? (shown[at + 1]?.id ?? null) : (shown[0]?.id ?? null);
@@ -253,6 +257,8 @@ export default function App() {
           error={error}
           query={query}
           onQuery={setQuery}
+          source={source}
+          onSource={setSource}
           onSelect={setSelected}
           monitor={<LiveMonitor cases={cases} onOpen={setSelected} onEnded={refresh} />}
         />
@@ -566,6 +572,8 @@ function CaseList({
   error,
   query,
   onQuery,
+  source,
+  onSource,
   onSelect,
   monitor,
 }: {
@@ -575,6 +583,8 @@ function CaseList({
   error: string;
   query: string;
   onQuery: (q: string) => void;
+  source: string;
+  onSource: (s: string) => void;
   onSelect: (id: string) => void;
   monitor: React.ReactNode;
 }) {
@@ -588,6 +598,16 @@ function CaseList({
         <label className="sr" htmlFor="case-search">
           URL 검색
         </label>
+        <label className="sr" htmlFor="case-source">
+          출처
+        </label>
+        <select id="case-source" className="field source-filter" value={source} onChange={(e) => onSource(e.target.value)}>
+          <option value="">모든 출처</option>
+          <option value="report">신고</option>
+          <option value="kisa">KISA</option>
+          <option value="related">연관</option>
+          <option value="test">시험</option>
+        </select>
         <input id="case-search" className="field search" type="search" placeholder="URL 검색" value={query} maxLength={200} onChange={(e) => onQuery(e.target.value)} />
       </div>
       {error && (
@@ -621,7 +641,7 @@ function CaseList({
 
 // ── 실시간 화면(목록 칸 맨 위, 항상 표시): 에이전트는 한 번에 한 건을 조사한다 ─────────────
 function LiveMonitor({ cases, onOpen, onEnded }: { cases: CaseOut[]; onOpen: (id: string) => void; onEnded: () => void }) {
-  const running = cases.find((c) => c.status === "RUNNING");
+  const running = cases.find((c) => c.status === "RUNNING" && !c.auto) ?? cases.find((c) => c.status === "RUNNING");
   // 목록은 최신순이므로 가장 오래된 대기 사건(다음 차례)은 뒤에서 찾는다
   const queued = running ? undefined : [...cases].reverse().find((c) => c.status === "QUEUED");
   return (
@@ -1594,6 +1614,16 @@ function CaseTabs({
   );
 }
 
+// 자동 사건을 만들지 않은 이유(API auto_skipped)
+const AUTO_SKIP_LABEL: Record<string, string> = dict({
+  disabled: "자동 접수 꺼짐",
+  depth: "연관 사건의 후보",
+  not_threat: "위협으로 보지 않음",
+  blocked: "이미 차단됨",
+  shortener: "단축 주소",
+  limit_or_duplicate: "자동 한도·중복",
+});
+
 // 연관 후보 상태(근거 카드·경로 지도와 같은 기준). pending: 지금 하위 조사 중인 후보
 function candState(x: Candidate, pending: boolean): { label: string; tone: string } {
   if (pending) return { label: "조사 중", tone: "st-RUNNING" };
@@ -1629,6 +1659,7 @@ function RelatedTab({
 }) {
   const cands = (c.candidates ?? []).filter((x): x is Candidate => typeof x !== "string");
   const kids = new Map((c.children ?? []).map((k) => [k.candidate_url, k]));
+  const skipped = new Map((c.auto_skipped ?? []).map((x) => [x.url, x.reason]));
   const planned = num([...events].reverse().find((e) => e.kind === "candidates")?.data.investigated);
   const [busy, setBusy] = useState("");
   const [msg, setMsg] = useState("");
@@ -1653,12 +1684,13 @@ function RelatedTab({
                 <span className="muted small">
                   {x.source === "via" ? "경유" : "링크"}
                   {x.text ? ` · “${clip(x.text, 40)}”` : ""}
+                  {!kid && skipped.has(x.url) ? ` · 자동 접수 안 함(${AUTO_SKIP_LABEL[skipped.get(x.url) ?? ""] ?? "기타"})` : ""}
                 </span>
               </span>
               <span className={`chip ${st.tone}`}>{st.label}</span>
               {kid ? (
                 <button type="button" className="btn btn-ghost btn-sm" onClick={() => onOpen(kid.id)}>
-                  사건 보기 · {kid.verdict === "threat" ? "위협 확정" : kid.verdict === "benign" ? "정상 확정" : (STATUS_LABEL[kid.status] ?? kid.status)}
+                  {kid.auto ? "자동 접수됨 · " : ""}사건 보기 · {kid.verdict === "threat" ? "위협 확정" : kid.verdict === "benign" ? "정상 확정" : (STATUS_LABEL[kid.status] ?? kid.status)}
                 </button>
               ) : canCreate ? (
                 <button

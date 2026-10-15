@@ -17,6 +17,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from typing import Annotated
 from urllib.parse import urlsplit
 
@@ -27,7 +28,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from .. import accounts, package, report, verdicts
+from .. import accounts, package, related, report, verdicts
 from ..accounts import ROLES, AccountError
 from ..config import get_settings
 from ..evidence import Head, Signer, VerifyResult, verify_case
@@ -42,6 +43,7 @@ from ..preview import preview_image
 from ..ratelimit import FailureLimiter
 from ..signer.client import ChainAdmin, SignerError
 from ..store import TERMINAL, AuditLog, Case, CaseLink, CasePhase, Store, Verdict
+from ..store import now as now_utc
 
 log = logging.getLogger("safetrace.api")
 settings = get_settings()
@@ -181,6 +183,56 @@ def record_event(case_id: str, payload: dict) -> None:
                                 f"agent={str(reported.get('seq'))[:12]} signer={h['seq']}")
     if not store.add_event(case_id, payload):
         store.audit("system", "event.rejected", case_id, f"status={str(payload.get('status'))[:24]}")
+    elif payload.get("type") == "status" and payload.get("status") in TERMINAL:
+        _auto_related(case_id)
+
+
+def _auto_limit(s, parent_id: str, host: str) -> str | None:
+    """선별 조건 7~9(시점에 따라 바뀌는 중복·한도). 어긋난 조건 이름, 모두 맞으면 None. _intake_lock 안에서 부른다."""
+    since = now_utc() - timedelta(days=settings.related_auto_dedup_days)
+    if s.scalar(select(func.count()).select_from(CaseLink)
+                .where(CaseLink.target_host == host, CaseLink.created_at >= since)):
+        return "duplicate"  # 7 여러 신고에서 같은 사이트가 반복될 때
+    if s.scalar(select(func.count()).select_from(CaseLink)
+                .where(CaseLink.parent_id == parent_id, CaseLink.auto.is_(True))) >= settings.related_auto_per_case:
+        return "per_case"  # 8 신고 1건이 불어나지 않게
+    if s.scalar(select(func.count()).select_from(Case)
+                .where(Case.created_by == related.AUTO_ACTOR, Case.status.in_(PENDING))) >= settings.related_auto_max_pending:
+        return "max_pending"  # 9 사람 신고의 대기 시간 보호
+    return None
+
+
+def _auto_related(case_id: str) -> None:
+    """원 사건이 끝나면(체인을 닫고 반영한 뒤) 선별 조건을 모두 통과한 연관 후보로 새 사건을 만든다(PR 4b).
+    격리망 안의 워커가 아니라 API 가 만든다. 실패해도 원 사건 처리와 이벤트 소비는 멈추지 않는다."""
+    try:
+        with _intake_lock, store.session() as s:  # 동시에 끝난 두 사건이 같은 호스트로 두 사건을 만들지 않게
+            parent = s.get(Case, case_id)
+            if parent is None or parent.status not in TERMINAL:
+                return
+            targets = related.auto_targets(parent.source, parent.candidates or [], enabled=settings.related_auto,
+                                           threat_min_prob=settings.threat_min_prob)
+            for cand, why in targets:
+                host = related.target_host(cand)
+                dup = s.scalar(select(CaseLink).where(CaseLink.parent_id == parent.id, CaseLink.candidate_url == cand["url"]))
+                if dup is not None:
+                    continue  # 같은 종료 이벤트를 다시 받았거나 담당자가 이미 버튼으로 만든 후보
+                skip = _auto_limit(s, parent.id, host)
+                if skip:
+                    store.audit(related.AUTO_ACTOR, "case.create_related_auto_skipped", parent.id,
+                                f"{skip} host={host} url={cand['url'][:200]}")
+                    continue
+                prob = cand.get("probability")
+                note = f" host={host} why={why} threat={cand.get('threat') or '-'}" + (
+                    f" p={prob:.2f}" if isinstance(prob, (int, float)) else "")
+                try:
+                    create_related_case(s, parent, cand, related.AUTO_ACTOR, auto=True, principal=None, note=note)
+                except BlockedURL as e:
+                    store.audit(related.AUTO_ACTOR, "case.create_related_auto_skipped", parent.id,
+                                f"url_rejected:{e.reason} url={cand['url'][:200]}")
+    except Exception as e:  # 자동 생성 실패가 이벤트 소비를 멈추지 않게(원 사건 상태·체인 닫기는 이미 끝났다)
+        log.exception("auto related case failed")
+        store.audit(related.AUTO_ACTOR, "case.create_related_auto_failed", case_id, type(e).__name__)
 
 
 def enqueue(case_id: str, url: str):
@@ -316,6 +368,8 @@ class CaseOut(BaseModel):
     parent_url: str | None = None
     auto: bool | None = None
     children: list[ChildOut] | None = None
+    # 하위 조사했지만 자동 사건이 없는 후보와 이유(disabled|depth|not_threat|blocked|shortener|limit_or_duplicate, 상세에만)
+    auto_skipped: list[dict] | None = None
 
     @classmethod
     def of(cls, c: Case, v: Verdict | None = None, ph: CasePhase | None = None,
@@ -531,7 +585,8 @@ def _check_intake_limits(s, p: Principal) -> None:
         store.audit(p.name, "case.rejected", detail=f"limit=principal pending={mine}")
         raise HTTPException(429, "끝나지 않은 사건이 너무 많습니다. 조사가 끝난 뒤 다시 접수하세요",
                             headers={"Retry-After": "60"})
-    total = s.scalar(select(func.count()).select_from(Case).where(pending))
+    # 자동 연관 사건(system:related)은 자기 전용 한도(related_auto_max_pending)만 받는다: 사람 신고를 막지 않게
+    total = s.scalar(select(func.count()).select_from(Case).where(pending, Case.created_by != related.AUTO_ACTOR))
     if total >= settings.case_max_pending_total:
         store.audit(p.name, "case.rejected", detail=f"limit=total pending={total}")
         raise HTTPException(503, "대기열이 가득 찼습니다. 잠시 뒤 다시 접수하세요", headers={"Retry-After": "60"})
@@ -586,8 +641,17 @@ def _case_detail(c: Case) -> CaseOut:
     children = [ChildOut(id=k.id, url=k.url, candidate_url=link.candidate_url, status=k.status,
                          threat=(k.threat or {}).get("threat") if isinstance(k.threat, dict) else None,
                          verdict=kv[k.id].decision if k.id in kv else None, auto=link.auto) for link, k in kids]
-    return CaseOut.of(c, verdicts.latest_for(store, [c.id]).get(c.id), store.phases_for([c.id]).get(c.id),
-                      store.parents_for([c.id]).get(c.id), children)
+    out = CaseOut.of(c, verdicts.latest_for(store, [c.id]).get(c.id), store.phases_for([c.id]).get(c.id),
+                     store.parents_for([c.id]).get(c.id), children)
+    if c.status in TERMINAL:  # 자동 생성은 원 사건이 끝난 뒤에 한다
+        made = {k.candidate_url for k in children}
+        out.auto_skipped = [
+            {"url": x["url"][:2048], "reason": related.skip_reason(c.source, x, enabled=settings.related_auto,
+                                                                   threat_min_prob=settings.threat_min_prob)
+             or "limit_or_duplicate"}
+            for x in (c.candidates or []) if isinstance(x, dict) and isinstance(x.get("url"), str)
+            and x.get("sub") and x["url"] not in made][:20]
+    return out
 
 
 # ── 연관 사이트를 새 사건으로(related-sites PR 4) ─────────────────────────
@@ -596,7 +660,7 @@ class RelatedIn(BaseModel):
 
 
 def create_related_case(s, parent: Case, cand: dict, actor: str, *, auto: bool,
-                        principal: Principal | None) -> tuple[Case, bool]:
+                        principal: Principal | None, note: str = "") -> tuple[Case, bool]:
     """연관 후보로 새 사건을 만든다(담당자 버튼과 자동 생성이 같이 쓴다): 형식 검사·접수 한도·사건·연결·감사·대기열.
     같은 부모의 같은 후보는 한 번만 만들고, 이미 있으면 그 사건을 돌려준다. 반환: (자식 사건, 새로 만들었는지).
     호출하는 쪽이 _intake_lock 안에서 부른다(세기와 넣기 사이에 다른 접수가 끼지 않게).
@@ -627,7 +691,7 @@ def create_related_case(s, parent: Case, cand: dict, actor: str, *, auto: bool,
             return existing, False
         raise
     store.audit(actor, "case.create_related_auto" if auto else "case.create_related", c.id,
-                f"parent={parent.id} url={url[:200]}")
+                f"parent={parent.id} url={url[:200]}{note}")
     enqueue(c.id, c.url)
     return c, True
 
