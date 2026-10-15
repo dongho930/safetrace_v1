@@ -137,7 +137,7 @@ def test_validation(client, store):
 _MAIN_THREAT = {"threat": "phishing", "probability": 0.9, "hold": False}
 
 
-def _running_case_with_chain(store, threat=None):
+def _running_case_with_chain(store, threat=None, before=(), main=None):
     """조사 중인 사건과 아직 열린 체인(개발 모드: 같은 프로세스가 쓴 체인). 원래 조사는 연관 후보 기록(candidates)으로
     끝난다(runner 와 같은 순서). 판정 대상이 되는 위협 판단·최종 주소는 이 체인의 threat·finish 기록이다."""
     from safetrace.agent.runner import make_sealer
@@ -151,7 +151,10 @@ def _running_case_with_chain(store, threat=None):
     w.append("start", {"url": c.url})
     w.append("finish", {"reason": "agent_finished", "final_url": c.url})
     w.append("threat", dict(threat or _MAIN_THREAT))
-    w.append("candidates", {"found": [{"url": "https://c1.example/"}], "followup": True, "investigated": 1})
+    for kind, data in before:  # 평판·승격 기록 등(runner 와 같은 순서: threat 뒤, candidates 앞)
+        w.append(kind, data)
+    w.append("candidates", {"found": [{"url": "https://c1.example/"}], "followup": True, "investigated": 1,
+                            "main": main or {"status": "COMPLETED", "reason": "agent_finished"}})
     return c.id, w
 
 
@@ -230,6 +233,33 @@ def test_main_result_comes_from_signed_records(client, store):
     c = client.get(f"/api/cases/{cid}", headers=h(VIEWER)).json()
     assert (c["phase"], c["threat"]["threat"], c["threat"]["probability"]) == ("related", "phishing", 0.9)
     assert c["final_url"] == "https://example.test/related"
+
+
+def test_main_status_and_reputation_come_from_signed_records(client, store):
+    """Codex 3회차 F1: 원래 결과의 상태·사유·평판도 서명 기록에서 가져온다. 체인에는 평판 위험으로 검토 필요 승격을
+    남기고 이벤트에는 정상 완료·평판 없음을 보내도, 원래 결과는 검토 필요·평판 위험이고 종료 뒤에도 그대로다."""
+    from safetrace.api.main import record_event
+
+    sb = {"status": "match", "matches": [{"url": "https://example.test/related", "threat_type": "SOCIAL_ENGINEERING"}]}
+    esc = {"from": "COMPLETED", "to": "REVIEW_REQUIRED", "reason": "reputation_match", "threat_types": ["SOCIAL_ENGINEERING"]}
+    cid, w = _running_case_with_chain(store, threat={"threat": "benign", "probability": 0.97, "hold": False},
+                                      before=[("safebrowsing", sb), ("escalation", esc)],
+                                      main={"status": "REVIEW_REQUIRED", "reason": "reputation_match"})
+    _main_result(cid, w.head.seq, main={"status": "COMPLETED", "reason": "agent_finished"},
+                 safebrowsing={"status": "no_match", "matches": []})
+    c = client.get(f"/api/cases/{cid}", headers=h(VIEWER)).json()
+    assert (c["phase"], c["main_status"], c["safebrowsing"]["status"]) == ("related", "REVIEW_REQUIRED", "match")
+    record_event(cid, {"type": "status", "status": "COMPLETED", "reason": "agent_finished"})
+    c = client.get(f"/api/cases/{cid}", headers=h(VIEWER)).json()
+    assert (c["status"], c["finish_reason"], c["safebrowsing"]["status"]) == ("REVIEW_REQUIRED", "reputation_match", "match")
+
+
+def test_main_result_needs_signed_main_status(store):
+    """원래 조사의 마지막 기록에 결과 상태(main)가 없거나 종료 상태가 아니면 원래 결과를 받지 않는다."""
+    for main in ({"status": "RUNNING", "reason": "x"}, {"status": "COMPLETED", "reason": 5}):
+        cid, w = _running_case_with_chain(store, main=main)
+        _main_result(cid, w.head.seq)
+        assert store.phases_for([cid]) == {}
 
 
 @pytest.mark.parametrize("bad", ["past_end", "not_candidates", "tampered", "not_int"])

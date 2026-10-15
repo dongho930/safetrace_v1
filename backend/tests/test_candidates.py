@@ -276,6 +276,22 @@ def test_start_and_hop_pii_not_sent_to_reputation(settings, monkeypatch):
     assert next(r for r in chain if r["kind"] == "safebrowsing")["data"]["excluded_pii"] == 2
 
 
+def test_main_status_signed_with_candidates_record(settings, monkeypatch):
+    """원래 조사의 마지막 기록(candidates)에 평판 승격까지 반영한 결과 상태를 남긴다(API 가 원래 결과를 여기서 꺼낸다)."""
+    cands = select("https://start.example/", "https://start.example/", [], ["https://c1.example/"], PORTS)
+    benign = dict(status="COMPLETED", finish_reason="agent_finished", final_url="https://start.example/",
+                  threat={"threat": "benign", "probability": 0.95, "hold": False}, candidates_found=cands)
+
+    def lookup(urls, key, transport=None):
+        hit = [u for u in urls if u == "https://start.example/"]
+        return {"status": "match" if hit else "no_match", "matches": [{"url": u, "threat_type": "MALWARE"} for u in hit]}
+
+    _, chain = _run(settings, monkeypatch, {"https://start.example/": benign,
+                                            cands[0]["url"]: _benign_sub(cands[0]["url"])}, lookup)
+    rec = next(r for r in chain if r["kind"] == "candidates")
+    assert rec["data"]["main"] == {"status": "REVIEW_REQUIRED", "reason": "reputation_match"}
+
+
 def test_first_match_survives_failed_followup_lookup(settings, monkeypatch):
     """2회차 F2: 첫 조회에서 위험이 일치한 후보는 두 번째 조회가 실패해도 보류로 남는다."""
     cand = {"url": "https://hop.example/", "host": "hop.example", "source": "link"}

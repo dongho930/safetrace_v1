@@ -233,7 +233,8 @@ def _main_chain(api_svc, cid):
     w.append("start", {"url": "http://example.test/"})
     w.append("finish", {"reason": "agent_finished", "final_url": "http://example.test/"})
     w.append("threat", dict(_BENIGN))
-    w.append("candidates", {"found": [], "followup": True, "investigated": 1})
+    w.append("candidates", {"found": [], "followup": True, "investigated": 1,
+                            "main": {"status": "COMPLETED", "reason": "agent_finished"}})
     return w
 
 

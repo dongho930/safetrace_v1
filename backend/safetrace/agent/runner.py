@@ -182,9 +182,10 @@ def _investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], Non
     # 연관 후보 하위 조사(1단계). 후보 목록·선택 이유를 먼저 남기고, 결과를 모아 다시 남긴다
     followup = _needs_followup(status, result.threat, matched)
     chosen = cands[:s.candidate_max] if followup else []
+    # main: 원래 조사의 결과 상태. 원래 결과 이벤트의 상태·사유는 API 가 이 서명 기록에서 꺼낸다(이벤트 값을 믿지 않는다)
     _append(writer, emit, "candidates", {
         "found": [{**c, "reputation_match": c["url"] in hits} for c in cands], "followup": followup,
-        "investigated": len(chosen)})
+        "investigated": len(chosen), "main": {"status": status, "reason": reason}})
     if chosen and isinstance(result.threat, dict):
         # 원래 결과 먼저(related-sites PR 3): 하위 조사 전에 원래 사건의 결과를 보낸다. 담당자는 이때부터 판정할 수 있고,
         # 연관 사이트 조사는 뒤에서 계속한다. 종료 상태는 이 원래 결과와 같다(하위 조사는 판정을 바꾸지 않는다)

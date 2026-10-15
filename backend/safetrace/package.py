@@ -65,7 +65,7 @@ _SCHEMA: dict[str, dict[str, object]] = {
     "threat": {"threat": _STR, "probability": _PROB, "probabilities": _DICT, "hold": _BOOL, "override": _DICT,
                "provider": _STR, "model": _STR, "evidence_seqs": [_INT]},
     "safebrowsing": {"status": _STR, "matches": [_DICT]},
-    "candidates": {"found": [_DICT], "followup": _BOOL},
+    "candidates": {"found": [_DICT], "followup": _BOOL, "main": _DICT},
     "candidate_results": {"results": [_DICT]},
     "blocked_request": {"navigation": _BOOL},
     "recording": {"t0": _NUM},

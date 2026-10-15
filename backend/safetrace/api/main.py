@@ -178,12 +178,13 @@ def record_event(case_id: str, payload: dict) -> None:
     if payload.get("type") == "status" and "phase" in payload:
         # 원래 결과: 워커가 말한 '원래 조사의 마지막 기록'을 믿지 않고 체인 앞부분을 서명까지 검증한 끝으로 바꾼다
         mh = _verify_main_head(case_id, payload.get("main_head"))
-        payload = {k: v for k, v in payload.items() if k not in ("main_head", "threat", "final_url")}
+        payload = {k: v for k, v in payload.items() if k not in ("main_head", "threat", "final_url", "main", "safebrowsing")}
         if mh is None:
             store.audit("system", "event.rejected", case_id, "main_head_unverified")
             return
-        # 판정 대상이 되는 위협 판단·최종 주소는 이벤트가 아니라 검증한 서명 기록에서 가져온다
-        payload.update(main_head={"seq": mh["seq"], "hash": mh["hash"]}, threat=mh["threat"], final_url=mh["final_url"])
+        # 판정 대상이 되는 원래 결과(상태·사유·위협 판단·최종 주소·평판)는 이벤트가 아니라 검증한 서명 기록에서 가져온다
+        payload.update(main_head={"seq": mh["seq"], "hash": mh["hash"]}, threat=mh["threat"], final_url=mh["final_url"],
+                       main=mh["main"], safebrowsing=mh["safebrowsing"])
     elif payload.get("type") == "status" and payload.get("status") in TERMINAL:
         ph = store.phases_for([case_id]).get(case_id)
         if ph is not None and (payload.get("status"), payload.get("reason")) != (ph.main_status, ph.main_reason):
@@ -1073,7 +1074,8 @@ def _verify_main_head(case_id: str, seq: object) -> dict | None:
       하위 조사 기록(data.sub)이 없어야 한다
     - 운영(서명 서비스)에서는 파일의 체인이 **이 사건의** 서명 서비스 head 까지 그대로 이어져야 한다. 서명에는 사건 id 가
       없어서, 다른 사건의 서명된 기록을 이 사건 폴더에 복사해 넣는 것을 이것으로 막는다(Codex 지적)
-    - 판정 대상이 되는 위협 판단·최종 주소는 이 검증한 기록(threat·finish)에서 꺼낸다(이벤트 값을 믿지 않는다)"""
+    - 판정 대상이 되는 원래 결과는 이 검증한 기록에서 꺼낸다(이벤트 값을 믿지 않는다): 상태·사유는 마지막 candidates
+      기록의 main(러너가 평판 승격까지 반영한 값), 위협 판단은 threat, 최종 주소는 finish, 평판은 safebrowsing"""
     if type(seq) is not int or not 0 <= seq < 100_000:
         return None
     top, top_hash = seq, None
@@ -1103,10 +1105,16 @@ def _verify_main_head(case_id: str, seq: object) -> dict | None:
         return None
     threat = next((r["data"] for r in reversed(recs) if r.get("kind") == "threat"), None)
     finish = next((r["data"] for r in reversed(recs) if r.get("kind") == "finish"), {})
-    if not isinstance(threat, dict):
+    sb = next((r["data"] for r in reversed(recs) if r.get("kind") == "safebrowsing"), None)
+    main = recs[-1]["data"].get("main")
+    if not isinstance(threat, dict) or not isinstance(main, dict):
+        return None
+    if main.get("status") not in TERMINAL or not isinstance(main.get("reason"), str):
         return None
     final = finish.get("final_url") if isinstance(finish.get("final_url"), str) else None
-    return {"seq": seq, "hash": recs[-1]["hash"][:64], "threat": threat, "final_url": final}
+    return {"seq": seq, "hash": recs[-1]["hash"][:64], "threat": threat, "final_url": final,
+            "main": {"status": main["status"], "reason": main["reason"][:64]},
+            "safebrowsing": sb if isinstance(sb, dict) else None}
 
 
 def _verify_case(c: Case, signer: Signer, text: str | None = None) -> VerifyResult:
