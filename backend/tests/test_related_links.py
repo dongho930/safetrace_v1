@@ -60,6 +60,7 @@ def test_link_key():
     assert related.link_key("bit.ly") is None and related.link_key("han.gl") is None  # 단축 서비스는 잇지 않음
     assert related.link_key("www.facebook.com") is None  # 공식 브랜드(봇을 진짜 사이트로 보낸 곳)
     assert related.link_key("ethereum.org") is None  # 흔한 대형 사이트
+    assert related.link_key("sdu.sk") is None and related.link_key("www.webflow.com") is None  # 서비스 홈
     assert related.link_key("sp21-a.pages.dev") == ("sp21-a.pages.dev", True)  # 공용 호스팅은 호스트 그대로
     assert related.link_key("www.dgjlc.com") == ("dgjlc.com", False)
 

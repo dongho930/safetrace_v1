@@ -73,9 +73,10 @@ def link_key(host: str) -> tuple[str, bool] | None:
     """사건을 잇는 열쇠와 공용 호스팅 여부. 잇지 않는 호스트면 None.
 
     - 단축 서비스는 잇지 않는다(같은 단축 서비스를 썼다고 같은 조직이 아니다)
-    - 공식 브랜드·사행사업자 도메인과 흔한 대형 사이트도 잇지 않는다(피싱 키트가 봇을 진짜 사이트로 보내거나 꾸밈으로 단다)
+    - 공식 브랜드·사행사업자 도메인, 흔한 대형 사이트, 서비스 홈도 잇지 않는다(피싱 키트가 봇을 진짜 사이트로 보내거나
+      꾸밈으로 단다)
     - 공용 호스팅은 하위 도메인이 다르면 다른 운영자라 호스트가 정확히 같을 때만, 나머지는 등록 도메인으로 잇는다"""
-    from .agent.candidates import GENERIC_SITES, _official, site_of  # 사이트 계산은 후보 고르기와 같게
+    from .agent.candidates import GENERIC_SITES, SERVICE_HOMES, _official, site_of  # 사이트 계산은 후보 고르기와 같게
 
     h = (host or "").lower().rstrip(".")[:253]
     if not h or on_domain(h, SHORTENER_HOSTS) or _official(h):
@@ -83,7 +84,8 @@ def link_key(host: str) -> tuple[str, bool] | None:
     if on_domain(h, SHARED_HOSTING):
         return h, True
     site = site_of(h)
-    return (None if site in GENERIC_SITES else (site, False))
+    # 서비스 홈(단축 서비스·사이트 빌더의 본 도메인)도 잇지 않는다: 같은 서비스를 썼다고 같은 조직이 아니다
+    return None if site in GENERIC_SITES or site in SERVICE_HOMES else (site, False)
 
 
 def case_sites(url: str, final_url: str | None, threat: dict | None, candidates: list | None) -> list[dict]:
