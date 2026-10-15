@@ -173,6 +173,19 @@ def record_event(case_id: str, payload: dict) -> None:
     """
     if payload.get("type") == "status" and "candidates" in payload:
         payload = {**payload, "candidates": _clean_candidates(payload["candidates"])}
+    if payload.get("type") == "status" and "phase" in payload:
+        # 원래 결과: 워커가 말한 '원래 조사의 마지막 기록'을 믿지 않고 체인 앞부분을 서명까지 검증한 끝으로 바꾼다
+        mh = _verify_main_head(case_id, payload.get("main_head"))
+        payload = {k: v for k, v in payload.items() if k != "main_head"}
+        if mh is None:
+            store.audit("system", "event.rejected", case_id, "main_head_unverified")
+            return
+        payload["main_head"] = {"seq": mh[0], "hash": mh[1]}
+    elif payload.get("type") == "status" and payload.get("status") in TERMINAL:
+        ph = store.phases_for([case_id]).get(case_id)
+        if ph is not None and (payload.get("status"), payload.get("reason")) != (ph.main_status, ph.main_reason):
+            store.audit("system", "event.main_result_kept", case_id,
+                        f"main={ph.main_status} sent={str(payload.get('status'))[:24]}")
     if _chains is not None and payload.get("type") == "status":
         reported = payload.get("head")
         payload = {k: v for k, v in payload.items() if k != "head"}
@@ -370,6 +383,7 @@ class CaseOut(BaseModel):
     # 원래 결과가 나온 뒤 연관 사이트를 조사하는 중이면 "related"(조사 중일 때만). main_status: 원래 결과의 상태
     phase: str | None = None
     main_status: str | None = None
+    main_head_seq: int | None = None  # 원래 조사의 증거 끝(조사 중 판정은 여기에 묶는다)
     # 연관 사건(source=related)이면 그 후보가 나온 부모 사건. children: 이 사건의 후보로 만든 사건(상세에만)
     parent_id: str | None = None
     parent_url: str | None = None
@@ -385,7 +399,7 @@ class CaseOut(BaseModel):
                    final_url=c.final_url, threat=c.threat, safebrowsing=c.safebrowsing, candidates=c.candidates,
                    head_seq=c.head_seq, created_at=c.created_at.isoformat(), verdict=VerdictOut.of(v) if v else None,
                    phase=ph.phase if ph and c.status == "RUNNING" else None,
-                   main_status=ph.main_status if ph else None,
+                   main_status=ph.main_status if ph else None, main_head_seq=ph.main_head_seq if ph else None,
                    parent_id=parent[0].parent_id if parent else None, parent_url=parent[1] if parent else None,
                    auto=parent[0].auto if parent else None, children=children)
 
@@ -870,8 +884,7 @@ def save_verdict(case_id: str, body: VerdictIn, p: Annotated[Principal, Depends(
     _evidence_head(_get_case(case_id))  # 판정에 묶을 head 가 비어 있으면(닫기 실패) 먼저 받아 둔다
     try:
         v = verdicts.save(store, case_id, expected_rev=body.rev, decision=body.decision, threat=body.threat,
-                          note=body.note, reviewer=p.name, user_id=p.user_id,
-                          running_head=lambda: _running_head(case_id))
+                          note=body.note, reviewer=p.name, user_id=p.user_id)
     except verdicts.VerdictError as e:
         raise HTTPException(422, str(e)) from None
     except verdicts.VerdictConflict as e:
@@ -1039,21 +1052,25 @@ def _evidence_head(c: Case) -> Head | None:
     return Head(h["seq"], h["hash"])
 
 
-def _running_head(case_id: str) -> tuple[int, str] | None:
-    """아직 열려 있는 체인의 지금까지 끝(원래 결과 뒤 판정용). 운영은 서명 서비스가 정한 값, 개발 모드는 같은 프로세스가
-    쓴 체인의 마지막 기록. 확인하지 못하면 None(판정을 받지 않는다)."""
-    if _chains is not None:
-        try:
-            h = _chains.head(case_id)
-        except SignerError:
-            return None
-        ok = isinstance(h.get("seq"), int) and isinstance(h.get("hash"), str)
-        return (h["seq"], h["hash"][:64]) if ok else None
-    recs = package.read_chain(settings.evidence_dir, case_id)
-    last = recs[-1] if recs else None
-    if not (isinstance(last, dict) and isinstance(last.get("seq"), int) and isinstance(last.get("hash"), str)):
+def _verify_main_head(case_id: str, seq: object) -> tuple[int, str] | None:
+    """원래 조사의 증거 끝: 체인의 0..seq 번 기록을 해시·HMAC 서명·파일까지 검증하고, 그 마지막 기록이 원래 조사의
+    연관 후보 기록(candidates)이며 그 앞에 하위 조사 기록(data.sub)이 없을 때만 (seq, hash). 아니면 None.
+    서명은 서명 서비스만 하므로 워커가 이 앞부분을 지어낼 수 없다. 담당자가 본 원래 결과의 범위를 이 끝으로 고정한다."""
+    if type(seq) is not int or not 0 <= seq < 100_000:
         return None
-    return last["seq"], last["hash"][:64]
+    text = package.read_chain_text(settings.evidence_dir, case_id) or ""
+    lines = text.splitlines()[: seq + 1]
+    if len(lines) != seq + 1:
+        return None
+    if not verify_case(settings.evidence_dir, case_id, _signer(), None, text="\n".join(lines)).ok:
+        return None
+    recs = package.parse_chain("\n".join(lines))
+    last = recs[-1] if len(recs) == seq + 1 else None
+    if not last or last.get("kind") != "candidates" or not isinstance(last.get("hash"), str):
+        return None
+    if any(isinstance(r.get("data"), dict) and isinstance(r["data"].get("sub"), int) for r in recs):
+        return None
+    return seq, last["hash"][:64]
 
 
 def _verify_case(c: Case, signer: Signer, text: str | None = None) -> VerifyResult:

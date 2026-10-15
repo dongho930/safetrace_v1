@@ -138,7 +138,8 @@ _MAIN_THREAT = {"threat": "phishing", "probability": 0.9, "hold": False}
 
 
 def _running_case_with_chain(store):
-    """조사 중인 사건과 아직 열린 체인(개발 모드: 같은 프로세스가 쓴 체인)."""
+    """조사 중인 사건과 아직 열린 체인(개발 모드: 같은 프로세스가 쓴 체인). 원래 조사는 연관 후보 기록(candidates)으로
+    끝난다(runner 와 같은 순서)."""
     from safetrace.agent.runner import make_sealer
     from safetrace.api.main import settings
     from safetrace.evidence import EvidenceWriter
@@ -149,70 +150,105 @@ def _running_case_with_chain(store):
     w = EvidenceWriter(settings.evidence_dir, c.id, make_sealer(settings))
     w.append("start", {"url": c.url})
     w.append("threat", dict(_MAIN_THREAT))
+    w.append("candidates", {"found": [{"url": "https://c1.example/"}], "followup": True, "investigated": 1})
     return c.id, w
 
 
-def _main_result(cid, **over):
+def _main_result(cid, main_head, **over):
     from safetrace.api.main import record_event
 
-    ev = {"type": "status", "status": "RUNNING", "phase": "related",
+    ev = {"type": "status", "status": "RUNNING", "phase": "related", "main_head": main_head,
           "main": {"status": "COMPLETED", "reason": "agent_finished"}, "threat": dict(_MAIN_THREAT),
           "final_url": "https://example.test/related", "candidates": [{"url": "https://c1.example/", "host": "c1.example"}]}
     record_event(cid, {**ev, **over})
 
 
 def test_verdict_after_main_result_while_related_running(client, store):
-    """원래 결과 전 조사 중은 거절, 원래 결과 뒤는 받고 그때까지의 증거 끝을 묶는다. 종료 뒤에도 판정은 그대로다."""
+    """원래 결과 전 조사 중은 거절, 원래 결과 뒤는 받고 원래 조사의 증거 끝에 묶는다. 하위 조사 기록이 더 쌓여도
+    (저장 직전이라도) 판정의 증거 끝은 원래 조사의 끝이고, 종료 뒤에도 그대로다(Codex 지적)."""
     from safetrace.api.main import record_event
 
     _, tok = user_token(client, store, "reviewer")
     cid, w = _running_case_with_chain(store)
     r = post(client, tok, cid, rev=0, decision="threat", threat="phishing")
     assert r.status_code == 422 and "조사가 끝난 뒤" in r.json()["detail"]
-    _main_result(cid)
+    main = w.head
+    _main_result(cid, main.seq)
     c = client.get(f"/api/cases/{cid}", headers=h(VIEWER)).json()
-    assert (c["status"], c["phase"], c["main_status"]) == ("RUNNING", "related", "COMPLETED")
+    assert (c["status"], c["phase"], c["main_status"], c["main_head_seq"]) == ("RUNNING", "related", "COMPLETED", main.seq)
     assert c["threat"]["threat"] == "phishing" and c["candidates"][0]["host"] == "c1.example"
     listed = {x["id"]: x for x in client.get("/api/cases?limit=200", headers=h(VIEWER)).json()}
     assert listed[cid]["phase"] == "related"
+    w.append("observe", {"sub": 1, "url": "https://c1.example/"})  # 저장 직전에 하위 조사 기록이 들어옴
     r = post(client, tok, cid, rev=0, decision="threat", threat="phishing")
     assert r.status_code == 201, r.text
-    seen = w.head
-    assert r.json()["head_seq"] == seen.seq
+    assert r.json()["head_seq"] == main.seq
     with store.session() as s:
-        assert s.scalar(select(Verdict.head_hash).where(Verdict.case_id == cid)) == seen.hash
+        assert s.scalar(select(Verdict.head_hash).where(Verdict.case_id == cid)) == main.hash
     for svc in (INVESTIGATOR, SERVICE_ADMIN):  # 자동화 토큰은 여전히 확정할 수 없다
         assert post(client, svc, cid, rev=1, decision="benign").status_code == 403
-    # 하위 조사 기록이 더 쌓이고 사건이 끝나도 판정과 그때의 증거 끝은 그대로
     w.append("candidate_results", {"results": []})
     record_event(cid, {"type": "status", "status": "COMPLETED", "reason": "agent_finished", "threat": dict(_MAIN_THREAT)})
     c = client.get(f"/api/cases/{cid}", headers=h(VIEWER)).json()
     assert (c["status"], c["phase"], c["main_status"]) == ("COMPLETED", None, "COMPLETED")
-    assert (c["verdict"]["rev"], c["verdict"]["head_seq"]) == (1, seen.seq) and w.head.seq == seen.seq + 1
+    assert (c["verdict"]["rev"], c["verdict"]["head_seq"]) == (1, main.seq) and w.head.seq == main.seq + 2
 
 
-def test_verdict_refused_when_running_head_unknown(client, store, monkeypatch):
-    from safetrace.api import main
+def test_main_result_cannot_change_after_verdict(client, store):
+    """Codex(PR 3): 원래 결과는 한 번만 받는다. 담당자가 정상으로 판정한 뒤 워커가 원래 결과를 다시 보내거나 종료
+    이벤트에 다른 상태·위협을 실어도, 판정 대상(원래 결과)은 바뀌지 않는다."""
+    from safetrace.api.main import record_event
 
     _, tok = user_token(client, store, "reviewer")
-    cid, _ = _running_case_with_chain(store)
-    _main_result(cid)
-    monkeypatch.setattr(main, "_running_head", lambda case_id: None)
-    r = post(client, tok, cid, rev=0, decision="benign")
-    assert r.status_code == 422 and "증거 끝" in r.json()["detail"]
+    cid, w = _running_case_with_chain(store)
+    _main_result(cid, w.head.seq, threat={"threat": "benign", "probability": 0.95, "hold": False})
+    assert post(client, tok, cid, rev=0, decision="benign").status_code == 201
+    forged = {"main": {"status": "REVIEW_REQUIRED", "reason": "reputation_match"},
+              "threat": {"threat": "phishing", "probability": 0.99, "hold": True}}
+    _main_result(cid, w.head.seq, **forged)  # 원래 결과를 다시 보냄 → 거절
+    c = client.get(f"/api/cases/{cid}", headers=h(VIEWER)).json()
+    assert (c["threat"]["threat"], c["main_status"]) == ("benign", "COMPLETED")
+    record_event(cid, {"type": "status", "status": "REVIEW_REQUIRED", "reason": "reputation_match",
+                       "threat": forged["threat"], "final_url": "https://evil.example/", "candidates": []})
+    c = client.get(f"/api/cases/{cid}", headers=h(VIEWER)).json()
+    assert (c["status"], c["finish_reason"], c["threat"]["threat"], c["final_url"]) == (
+        "COMPLETED", "agent_finished", "benign", "https://example.test/related")
+    assert c["verdict"]["decision"] == "benign"
+    with store.session() as s:
+        actions = set(s.scalars(select(AuditLog.action).where(AuditLog.case_id == cid)))
+    assert {"event.rejected", "event.main_result_kept"} <= actions
+
+
+@pytest.mark.parametrize("bad", ["past_end", "not_candidates", "tampered", "not_int"])
+def test_main_head_must_verify(client, store, bad):
+    """원래 조사의 끝은 워커가 말한 번호를 믿지 않고 체인 앞부분을 서명까지 검증한다. 검증하지 못하면 원래 결과를 받지
+    않는다(판정도 열리지 않는다)."""
+    from safetrace.api.main import settings
+
+    cid, w = _running_case_with_chain(store)
+    seq = {"past_end": w.head.seq + 5, "not_candidates": w.head.seq - 1, "tampered": w.head.seq, "not_int": "2"}[bad]
+    if bad == "tampered":
+        p = settings.evidence_dir / cid / "chain.jsonl"
+        p.write_text(p.read_text(encoding="utf-8").replace('"threat": "phishing"', '"threat": "benign"'), encoding="utf-8")
+    _main_result(cid, seq)
+    assert store.phases_for([cid]) == {}
+    _, tok = user_token(client, store, "reviewer")
+    assert post(client, tok, cid, rev=0, decision="benign").status_code == 422
 
 
 def test_main_result_event_needs_running_and_threat(store):
     cid, _ = _running_case_with_chain(store)
-    base = {"type": "status", "status": "RUNNING", "phase": "related",
+    base = {"type": "status", "status": "RUNNING", "phase": "related", "main_head": {"seq": 2, "hash": "ab" * 32},
             "main": {"status": "COMPLETED", "reason": "agent_finished"}, "threat": dict(_MAIN_THREAT)}
     assert not store.add_event(cid, {**base, "threat": None})                        # 위협 판단 없음
     assert not store.add_event(cid, {**base, "status": "COMPLETED"})                 # 종료 상태에 phase
     assert not store.add_event(cid, {**base, "main": {"status": "RUNNING"}})         # 원래 결과가 종료 상태가 아님
     assert not store.add_event(cid, {**base, "main": {"status": "COMPLETED", "reason": 5}})
     assert not store.add_event(cid, {**base, "phase": "other"})
+    assert not store.add_event(cid, {**base, "main_head": None})                     # 검증한 증거 끝 없음
     assert store.phases_for([cid]) == {}
     assert store.add_event(cid, base)
     assert store.phases_for([cid])[cid].main_status == "COMPLETED"
+    assert not store.add_event(cid, base)  # 원래 결과는 한 번만
     assert store.add_event(cid, {"type": "status", "status": "COMPLETED", "reason": "agent_finished"})
     assert not store.add_event(cid, base)  # 끝난 사건에는 다시 받지 않는다

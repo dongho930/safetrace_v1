@@ -57,11 +57,14 @@ class CasePhase(Base):
     """원래 결과가 나온 뒤 연관 사이트를 조사하는 중인 사건(related-sites PR 3). cases 표에 열을 보태지 않는다
     (Store 는 create_all 만 써서 기존 DB 에 반영되지 않는다). 원래 결과의 상태는 종료 상태가 이와 같아야 한다."""
 
-    __tablename__ = "case_phase"
+    __tablename__ = "case_main_result"  # PR 3 첫 판(case_phase)과 열이 달라 이름을 바꿨다(create_all 은 열을 보태지 않는다)
     case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), primary_key=True)
     phase: Mapped[str] = mapped_column(String(16))  # related
     main_status: Mapped[str] = mapped_column(String(24))  # 원래 결과의 상태(종료 상태 중 하나)
     main_reason: Mapped[str | None] = mapped_column(String(64))
+    # 원래 조사의 증거 끝(API 가 체인 앞부분을 서명까지 검증한 값). 조사 중 판정은 이 끝에 묶는다
+    main_head_seq: Mapped[int] = mapped_column(Integer)
+    main_head_hash: Mapped[str] = mapped_column(String(64))
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -169,23 +172,32 @@ class Store:
     def add_event(self, case_id: str, payload: dict) -> bool:
         """이벤트를 남긴다. 상태 이벤트가 허용된 전이가 아니면(끝난 사건, 모르는 상태) 남기지 않고 False.
 
-        원래 결과 이벤트(phase=related)는 조사 중(RUNNING)이고 위협 판단과 원래 결과의 종료 상태가 있을 때만 받는다."""
+        원래 결과 이벤트(phase=related)는 조사 중(RUNNING)이고 위협 판단·원래 결과의 종료 상태·검증한 증거 끝이 있을 때
+        **한 번만** 받는다. 그 뒤에는 원래 결과(상태·사유·위협·최종 주소·평판)가 바뀌지 않는다: 담당자가 그 결과를 보고
+        판정할 수 있으므로, 종료 이벤트는 연관 후보의 결과만 반영하고 상태는 원래 결과로 맞춘다(Codex 지적)."""
         with self.session() as s, s.begin():
             if payload.get("type") == "status":
                 c = s.get(Case, case_id, with_for_update=True)
                 if c is None or payload.get("status") not in _NEXT_STATUS.get(c.status, ()):
                     return False
+                ph = s.get(CasePhase, case_id)
                 if "phase" in payload:
                     main = payload.get("main") if isinstance(payload.get("main"), dict) else {}
                     reason = main.get("reason")
-                    if (payload["phase"] != "related" or payload["status"] != "RUNNING"
+                    mh = payload.get("main_head") if isinstance(payload.get("main_head"), dict) else {}
+                    if (ph is not None or payload["phase"] != "related" or payload["status"] != "RUNNING"
                             or not isinstance(payload.get("threat"), dict) or main.get("status") not in TERMINAL
-                            or not (reason is None or isinstance(reason, str))):
+                            or not (reason is None or isinstance(reason, str))
+                            or type(mh.get("seq")) is not int or not isinstance(mh.get("hash"), str)):
                         return False
-                    ph = s.get(CasePhase, case_id) or CasePhase(case_id=case_id)
-                    ph.phase, ph.main_status, ph.at = "related", main["status"], now()
-                    ph.main_reason = reason[:64] if reason else None
-                    s.add(ph)
+                    s.add(CasePhase(case_id=case_id, phase="related", main_status=main["status"],
+                                    main_reason=reason[:64] if reason else None, main_head_seq=mh["seq"],
+                                    main_head_hash=mh["hash"][:64], at=now()))
+                elif ph is not None:
+                    # 원래 결과 뒤의 상태 이벤트: 원래 결과는 그대로 두고 연관 후보 결과(candidates)·체인 끝만 반영한다
+                    payload = {k: v for k, v in payload.items() if k not in ("threat", "final_url", "safebrowsing")}
+                    if payload["status"] in TERMINAL:
+                        payload = {**payload, "status": ph.main_status, "reason": ph.main_reason}
                 c.status = payload["status"]
                 c.finish_reason = payload.get("reason")
                 if payload.get("threat") is not None:
