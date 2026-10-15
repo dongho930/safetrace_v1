@@ -19,6 +19,7 @@ from ..decision.brands import OFFICIAL_BRAND_DOMAINS, SHARED_HOSTING, on_domain
 from ..decision.official import official_operator
 from ..decision.providers import _THREAT_SIGNS
 from ..netguard import BlockedURL, parse_url
+from .gate import ElementInfo, classify_forbidden
 
 MAX_FOUND = 20  # 기록하는 후보 수(사건당)
 TEXT_MAX = 80  # 후보에 남기는 앵커 글자
@@ -143,6 +144,8 @@ def select(start_url: str, final_url: str, nav_chain: list[str], links: list,
         if source == "link" and site in visited_sites:
             return
         text = text[:TEXT_MAX] if isinstance(text, str) else ""
+        if source == "link" and classify_forbidden(ElementInfo(tag="a", href=url, text=text)):
+            return  # 결제·다운로드·로그인 링크는 하위 조사가 열지 않게 여기서도 한 번 더 뺀다(수집 쪽과 같은 규칙)
         item = {"url": url, "host": host, "source": source, "score": _score(url, host, text, source, frags),
                 "text": text}
         if site not in best:

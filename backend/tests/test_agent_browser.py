@@ -535,7 +535,7 @@ def test_forbidden_links_never_become_related_candidates(settings, testpages):
     _, final, chain, _ = run(f"{BASE}/attack/related-pay.html", settings, testpages)
     assert final["threat"]["threat"] == "phishing", final["threat"]
     found = next(r["data"]["found"] for r in chain if r["kind"] == "candidates")
-    assert not any("pay.html" in c["url"] or c["url"].endswith(".apk") for c in found), found
+    assert not any("pay.html" in c["url"] or "done.html" in c["url"] or c["url"].endswith(".apk") for c in found), found
     assert testpages.forbidden_hits() == []
 
 

@@ -253,6 +253,10 @@ def _page_links(raw) -> list[dict]:
                                     "inForm": x.get("inForm") is True})
         if classify_forbidden(info):
             continue
+        if x.get("imgOnly") is True and not text.strip():
+            # 글자 없는 이미지 링크는 무엇인지 모른다(이미지 '결제' 버튼일 수 있다). 클릭 후보로 OCR 을 거쳐 통과한 것만
+            # _note_links 가 클릭 후보 쪽에서 받는다
+            continue
         out.append({"url": href, "text": mask_pii(text[:200])[:TEXT_MAX], "visible": x.get("visible") is True})
     return out
 

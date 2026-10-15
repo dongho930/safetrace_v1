@@ -62,9 +62,9 @@ def test_select_excludes_generic_sites_and_keeps_best_link():
              {"url": "https://ethereum.org/en/", "text": "Ethereum"},
              {"url": "https://www.typedream.com/", "text": "Made with Typedream"},
              {"url": "https://camp.example/about", "text": "안내"},
-             {"url": "https://camp.example/pay", "text": "충전하기"}]  # 같은 사이트는 점수가 높은 링크를 남긴다
+             {"url": "https://camp.example/event", "text": "첫충 이벤트"}]  # 같은 사이트는 점수가 높은 링크를 남긴다
     got = select("https://start.example/", "", [], links, PORTS)
-    assert [(c["url"], c["score"]) for c in got] == [("https://camp.example/pay", 2)]
+    assert [(c["url"], c["score"]) for c in got] == [("https://camp.example/event", 2)]
 
 
 def test_service_home_excluded_only_at_root():
@@ -330,3 +330,11 @@ def test_blocked_is_shown_as_estimate():
 
     got = related_opinion({"threat_ko": "피싱", "probability": 0.9, "hold": False, "blocked": True, "error": False})
     assert got.endswith("회선 차단 추정") and "이미 차단됨" not in got
+
+
+def test_select_drops_forbidden_links():
+    """Codex(PR 2) 2회차: 수집 쪽을 지나온 링크라도 결제·다운로드 링크는 후보로 고르지 않는다."""
+    got = select("https://start.example/", "", [],
+                 [{"url": "https://pay.example/x", "text": "카지노 결제하기"}, {"url": "https://app.example/a.apk", "text": "받기"},
+                  {"url": "https://ok.example/", "text": "카지노"}], PORTS)
+    assert [c["host"] for c in got] == ["ok.example"]

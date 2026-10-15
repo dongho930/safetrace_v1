@@ -78,10 +78,11 @@ COLLECT_JS = r"""
     if (href.length > 2048 || !/^https?:\/\//i.test(href)) continue;
     const r = a.getBoundingClientRect(), cs = getComputedStyle(a);
     const shown = r.width > 2 && r.height > 2 && cs.visibility !== 'hidden' && cs.display !== 'none';
-    const label = (a.innerText || a.getAttribute('aria-label') || a.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
-    // 금지 분류(결제·다운로드·로그인 등)에 쓰는 속성. 분류는 Python 이 클릭 후보와 같은 규칙으로 한다
-    links.push({ href, text: label.slice(0, 200), visible: shown, hasDownload: a.hasAttribute('download'),
-                 inForm: !!a.closest('form') });
+    // 금지 분류(결제·다운로드·로그인 등)는 Python 이 클릭 후보와 같은 규칙으로 한다. 글자도 클릭 후보와 같게 화면 글자·
+    // aria-label·title·이미지 alt 를 모두 합친다(하나만 읽으면 aria-label 에만 '결제'를 둔 링크가 빠져나간다, Codex 지적)
+    const imgOnly = !(a.innerText || '').trim() && !!a.querySelector('img');
+    links.push({ href, text: textOf(a), visible: shown, hasDownload: a.hasAttribute('download'),
+                 inForm: !!a.closest('form'), imgOnly });
   }
   return { items: out, inputs, popup, text, title: document.title.slice(0, 200), links };
 }
