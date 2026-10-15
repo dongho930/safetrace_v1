@@ -51,15 +51,26 @@ def cand(**over):
             **over}
 
 
-def finish(store, cands, source="report"):
-    """조사 중인 원 사건을 만들고 종료 이벤트를 보낸다(API 가 받는 경로 그대로)."""
-    from safetrace.api.main import record_event
+def finish(store, cands, source="report", signed=None):
+    """조사 중인 원 사건을 만들고 종료 이벤트를 보낸다(API 가 받는 경로 그대로). runner 처럼 증거 체인에 후보 기록과
+    하위 조사 결과 기록을 서명해 남긴다(자동 사건은 이 기록으로 고른다). signed: 체인에 남길 후보(없으면 cands 와 같다)."""
+    from safetrace.agent.runner import make_sealer
+    from safetrace.api.main import record_event, settings
+    from safetrace.evidence import EvidenceWriter
 
     with store.session() as s, s.begin():
         c = Case(url="http://kc-telegram.example/", source=source, status="RUNNING", created_by="t")
         s.add(c)
+    rows = [dict(x) for x in (cands if signed is None else signed) if isinstance(x, dict)]
+    w = EvidenceWriter(settings.evidence_dir, c.id, make_sealer(settings))
+    w.append("start", {"url": c.url})
+    w.append("candidates", {"found": rows, "followup": True, "investigated": sum(1 for x in rows if x.get("sub")),
+                            "main": {"status": "COMPLETED", "reason": "agent_finished"}})
+    if any(x.get("sub") for x in rows):
+        w.append("candidate_results", {"results": [x for x in rows if x.get("sub")]})
     record_event(c.id, {"type": "status", "status": "COMPLETED", "reason": "agent_finished",
-                        "threat": {"threat": "illegal_gambling", "probability": 0.9, "hold": False}, "candidates": cands})
+                        "threat": {"threat": "illegal_gambling", "probability": 0.9, "hold": False}, "candidates": cands,
+                        "head": {"seq": w.head.seq, "hash": w.head.hash}})
     return c.id
 
 
@@ -74,6 +85,7 @@ def children(store, pid):
     ({}, {}, "related", "depth"),                                         # 2
     ({"sub": None}, {}, "report", "not_threat"),                          # 3 하위 조사 안 함
     ({"status": "UNREACHABLE"}, {}, "report", "not_threat"),              # 3 선별 결과 없음
+    ({"status": None}, {}, "report", "not_threat"),                       # 3 상태가 없으면 결과 없음(Codex 3회차 F2)
     ({"threat": "benign"}, {}, "report", "not_threat"),                   # 4
     ({"probability": 0.5}, {}, "report", "not_threat"),                   # 4 원래 사건의 기준 미만
     ({"hold": True}, {}, "report", "not_threat"),                         # 4 보류
@@ -110,6 +122,32 @@ def test_creates_only_selected_candidates(client, store, isolated):
     assert {x["url"]: x["reason"] for x in d["auto_skipped"]} == {benign["url"]: "not_threat", held["url"]: "not_threat"}
     child = client.get(f"/api/cases/{links[0].child_id}", headers={"Authorization": f"Bearer {VIEWER}"}).json()
     assert (child["source"], child["auto"], child["parent_id"]) == ("related", True, pid)
+
+
+def test_unsigned_candidate_cannot_create_case(store, isolated):
+    """Codex 3회차 F2: 침해된 워커가 종료 이벤트에만 위협 후보(하위 조사·평판 위험 표시)를 넣으면, 서명된 증거에는 그런
+    하위 조사가 없으므로 자동 사건을 만들지 않는다. 체인을 검증하지 못해도(끝을 잘라 냄) 만들지 않는다."""
+    forged = cand(threat=None, probability=None, status=None, reputation_match=True)
+    pid = finish(store, [forged], signed=[{k: forged[k] for k in ("url", "host", "source")}])
+    assert children(store, pid) == [] and isolated == []
+    pid = finish(store, [cand()], signed=[])  # 체인에는 후보가 없다
+    assert children(store, pid) == [] and isolated == []
+    from safetrace.api.main import settings
+
+    good = cand()
+    pid2 = finish(store, [good])
+    with store.session() as s, s.begin():  # 증거가 맞을 때만: 체인 끝을 잘라 내면 검증 실패
+        s.query(CaseLink).filter(CaseLink.parent_id == pid2).delete()
+    chain = settings.evidence_dir / pid2 / "chain.jsonl"
+    lines = chain.read_text(encoding="utf-8").splitlines()
+    chain.write_text("".join(x + "\n" for x in lines[:-1]), encoding="utf-8")
+    from safetrace.api.main import _auto_related
+
+    before = len(isolated)
+    _auto_related(pid2)
+    assert children(store, pid2) == [] and len(isolated) == before
+    with store.session() as s:
+        assert s.scalar(select(AuditLog).where(AuditLog.case_id == pid2, AuditLog.detail == "chain_unverified"))
 
 
 def test_no_grandchildren(store):

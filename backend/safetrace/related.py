@@ -17,7 +17,7 @@ from .decision.brands import SHARED_HOSTING, SHORTENER_HOSTS, on_domain
 
 AUTO_ACTOR = "system:related"  # 자동 생성 주체(사람 계정·자동화 토큰 이름과 겹치지 않는 내부 이름)
 _NOT_THREAT = (None, "benign", "unknown")
-_NO_RESULT = ("UNREACHABLE", "BLOCKED", "FAILED")
+_HAS_RESULT = ("COMPLETED", "REVIEW_REQUIRED")  # 하위 조사가 화면을 보고 판단한 상태(접속 불가·차단·실패는 결과 없음)
 
 
 def target_host(c: dict) -> str:
@@ -41,7 +41,7 @@ def skip_reason(parent_source: str, c: dict, *, enabled: bool, threat_min_prob: 
         return "disabled"
     if parent_source == "related":                                    # 2 자동·버튼 자식 모두 손자 사건을 만들지 않는다
         return "depth"
-    if not c.get("sub") or c.get("status") in _NO_RESULT:            # 3 선별 결과가 있는 것만
+    if not c.get("sub") or c.get("status") not in _HAS_RESULT:       # 3 선별 결과가 있는 것만(상태가 없어도 아님)
         return "not_threat"
     prob = c.get("probability")
     threat = (c.get("threat") not in _NOT_THREAT and isinstance(prob, (int, float))

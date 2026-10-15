@@ -226,15 +226,54 @@ def _auto_limit(s, parent_id: str, host: str) -> str | None:
     return None
 
 
+def _signed_candidates(c: Case) -> list[dict] | None:
+    """자동 연관 사건의 선별 근거(Codex 지적): 워커가 종료 이벤트로 보고한 후보 목록이 아니라, 닫고 검증한 체인의 원래
+    조사 후보 기록(candidates)과 하위 조사 결과 기록(candidate_results)을 runner 와 같은 방식으로 합친 것.
+    체인을 검증하지 못하면 None(만들지 않는다). 워커는 조사 중인 사건에 거짓 기록을 서명받을 수 있으므로 이것으로 거짓
+    선별을 모두 막지는 못하지만, 자동 사건을 만든 근거가 원 사건의 서명된 증거에 그대로 남고(감사·패키지) 이벤트와 증거가
+    다를 때 증거를 따른다. 남는 위험은 부모당 3·대기 10·깊이 1 한도로 묶는다(docs/threat-model.md)."""
+    text = package.read_chain_text(settings.evidence_dir, c.id)
+    if text is None or not _verify_case(c, _signer(), text).ok:
+        return None
+    recs = package.parse_chain(text)
+
+    def last(kind: str) -> dict:
+        for r in reversed(recs):
+            d = r.get("data")
+            if r.get("kind") == kind and isinstance(d, dict) and "sub" not in d:
+                return d
+        return {}
+
+    found, results = last("candidates").get("found"), last("candidate_results").get("results")
+    by_url = {r["url"]: r for r in results if isinstance(r, dict) and isinstance(r.get("url"), str)}         if isinstance(results, list) else {}
+    out = []
+    for f in found if isinstance(found, list) else []:
+        if not isinstance(f, dict) or not isinstance(f.get("url"), str):
+            continue
+        r = by_url.get(f["url"], {})
+        out.append({**f, **{k: v for k, v in r.items() if k != "reputation_match"},
+                    "reputation_match": f.get("reputation_match") is True or r.get("reputation_match") is True})
+    return _clean_candidates(out)
+
+
 def _auto_related(case_id: str) -> None:
     """원 사건이 끝나면(체인을 닫고 반영한 뒤) 선별 조건을 모두 통과한 연관 후보로 새 사건을 만든다(PR 4b).
-    격리망 안의 워커가 아니라 API 가 만든다. 실패해도 원 사건 처리와 이벤트 소비는 멈추지 않는다."""
+    격리망 안의 워커가 아니라 API 가 만든다. 후보는 이벤트가 아니라 검증한 체인에서 고른다(_signed_candidates).
+    실패해도 원 사건 처리와 이벤트 소비는 멈추지 않는다."""
     try:
+        with store.session() as s:
+            c = s.get(Case, case_id)
+            if c is None or c.status not in TERMINAL or not settings.related_auto or c.source == "related":
+                return
+            signed = _signed_candidates(c)  # 체인 검증은 접수 잠금 밖에서
+        if signed is None:
+            store.audit(related.AUTO_ACTOR, "case.create_related_auto_skipped", case_id, "chain_unverified")
+            return
         with _intake_lock, store.session() as s:  # 동시에 끝난 두 사건이 같은 호스트로 두 사건을 만들지 않게
             parent = s.get(Case, case_id)
             if parent is None or parent.status not in TERMINAL:
                 return
-            targets = related.auto_targets(parent.source, parent.candidates or [], enabled=settings.related_auto,
+            targets = related.auto_targets(parent.source, signed, enabled=settings.related_auto,
                                            threat_min_prob=settings.threat_min_prob)
             for cand, why in targets:
                 host = related.target_host(cand)
