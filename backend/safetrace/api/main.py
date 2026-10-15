@@ -25,7 +25,8 @@ from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from PIL import Image
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -33,7 +34,7 @@ from sqlalchemy.exc import IntegrityError
 from .. import accounts, package, related, report, verdicts
 from ..accounts import ROLES, AccountError
 from ..config import get_settings
-from ..evidence import Head, Signer, VerifyResult, verify_case
+from ..evidence import Head, Signer, VerifyResult, iter_evidence, open_evidence, verify_case
 from ..live import CHANNEL as LIVE_CHANNEL
 from ..live import END as LIVE_END
 from ..live import WATCH_KEY as LIVE_WATCH_KEY
@@ -52,6 +53,7 @@ settings = get_settings()
 store = Store(settings.database_url)
 
 _FILE_NAME = re.compile(r"^[a-z0-9_\-]{1,64}\.(png|webm)$")
+PREVIEW_MAX_BYTES = 64 << 20  # 미리보기로 줄일 원본 PNG 상한(페이지 전체 캡처보다 넉넉히)
 _CASE_ID = re.compile(r"^[a-f0-9\-]{36}$")
 
 
@@ -932,17 +934,27 @@ def case_file(case_id: str, name: str, p: Annotated[Principal, Depends(need("vie
     _get_case(case_id)
     if not _FILE_NAME.match(name):
         raise HTTPException(404, "not found")
-    path = settings.evidence_dir / case_id / "files" / name
-    if not path.is_file():
-        raise HTTPException(404, "not found")
+    # 증거 볼륨은 에이전트가 쓴다: 링크를 따라가거나 FIFO 에서 기다리지 않게 안전하게 연 fd 로만 내보낸다(Codex 지적)
+    try:
+        fd, st = open_evidence(settings.evidence_dir, case_id, "files", name)
+    except FileNotFoundError:
+        raise HTTPException(404, "not found") from None
+    except OSError as e:
+        store.audit("system", "evidence.unsafe_file", case_id, f"{name} {type(e).__name__}: {str(e)[:60]}")
+        raise HTTPException(404, "not found") from None
     # 증거 파일은 한 번 쓰이면 바뀌지 않는다(바뀌면 검증 실패) → 브라우저가 캐시해도 된다(인증 필요하므로 private)
     headers = {"Content-Security-Policy": "sandbox; default-src 'none'", "Cache-Control": "private, max-age=3600"}
     if preview and name.endswith(".png"):
         # 화면 표시용 JPEG(증거 아님). 원본은 preview 없이 요청
-        data, media = preview_image(path)
+        try:
+            raw = b"".join(iter_evidence(fd, min(st.st_size, PREVIEW_MAX_BYTES)))
+            data, media = preview_image(raw, (case_id, name, st.st_mtime_ns, st.st_size))
+        except (OSError, ValueError, Image.DecompressionBombError):
+            raise HTTPException(404, "not found") from None
         return Response(data, media_type=media, headers=headers)
     media = "image/png" if name.endswith(".png") else "video/webm"
-    return FileResponse(path, media_type=media, headers=headers)
+    return StreamingResponse(iter_evidence(fd, st.st_size), media_type=media,
+                             headers={**headers, "Content-Length": str(st.st_size)})
 
 
 @app.websocket("/api/cases/{case_id}/live")
