@@ -77,7 +77,7 @@ def children(store, pid):
     ({"threat": "benign"}, {}, "report", "not_threat"),                   # 4
     ({"probability": 0.5}, {}, "report", "not_threat"),                   # 4 원래 사건의 기준 미만
     ({"hold": True}, {}, "report", "not_threat"),                         # 4 보류
-    ({"blocked": True}, {}, "report", "blocked"),                         # 5
+    ({"blocked": True}, {}, "report", None),                              # 5 회선 차단은 추정이라 건너뛰지 않음
     ({"final_url": "https://bit.ly/abc", "host": "bit.ly"}, {}, "report", "shortener"),  # 6
     ({}, {}, "report", None),
     ({"threat": "benign", "reputation_match": True}, {}, "report", None),  # 4 평판 위험은 AI 판단과 무관하게
@@ -88,14 +88,15 @@ def test_skip_reason(over, opts, source, reason):
 
 def test_auto_targets_reason():
     rep = {**GOOD, "url": "https://r.example/", "threat": "benign", "reputation_match": True}
-    got = related.auto_targets("report", [GOOD, {"url": 5}, "x", rep, {**GOOD, "url": "https://b.example/", "blocked": True}], **OPTS)
+    held = {**GOOD, "url": "https://b.example/", "hold": True}
+    got = related.auto_targets("report", [GOOD, {"url": 5}, "x", rep, held], **OPTS)
     assert [(c["url"], why) for c, why in got] == [(GOOD["url"], "threat"), ("https://r.example/", "reputation")]
 
 
 # ── API: 종료 이벤트 뒤 자동 생성 ─────────────────────────
 def test_creates_only_selected_candidates(client, store, isolated):
-    good, benign, blocked = cand(), cand(threat="benign"), cand(blocked=True)
-    pid = finish(store, [good, benign, blocked, cand(sub=None)])
+    good, benign, held = cand(), cand(threat="benign"), cand(hold=True)
+    pid = finish(store, [good, benign, held, cand(sub=None)])
     links = children(store, pid)
     assert [(lk.candidate_url, lk.auto, lk.target_host, lk.created_by) for lk in links] == [
         (good["url"], True, good["final_url"][8:-1], related.AUTO_ACTOR)]
@@ -106,7 +107,7 @@ def test_creates_only_selected_candidates(client, store, isolated):
     assert f"parent={pid}" in a.detail and "why=threat threat=illegal_gambling p=0.90" in a.detail
     d = client.get(f"/api/cases/{pid}", headers={"Authorization": f"Bearer {VIEWER}"}).json()
     assert [k["auto"] for k in d["children"]] == [True]
-    assert {x["url"]: x["reason"] for x in d["auto_skipped"]} == {benign["url"]: "not_threat", blocked["url"]: "blocked"}
+    assert {x["url"]: x["reason"] for x in d["auto_skipped"]} == {benign["url"]: "not_threat", held["url"]: "not_threat"}
     child = client.get(f"/api/cases/{links[0].child_id}", headers={"Authorization": f"Bearer {VIEWER}"}).json()
     assert (child["source"], child["auto"], child["parent_id"]) == ("related", True, pid)
 

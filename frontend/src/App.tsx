@@ -1619,7 +1619,6 @@ const AUTO_SKIP_LABEL: Record<string, string> = dict({
   disabled: "자동 접수 꺼짐",
   depth: "연관 사건의 후보",
   not_threat: "위협으로 보지 않음",
-  blocked: "이미 차단됨",
   shortener: "단축 주소",
   limit_or_duplicate: "자동 한도·중복",
 });

@@ -32,7 +32,11 @@ def skip_reason(parent_source: str, c: dict, *, enabled: bool, threat_min_prob: 
     """조건 1~6 중 처음 어긋난 이유 코드. 모두 통과하면 None.
 
     disabled 자동 접수 꺼짐 · depth 연관 사건의 후보(깊이 1) · not_threat 선별 결과가 위협이 아님 ·
-    blocked 이미 차단됨 · shortener 도착한 곳이 단축 서비스"""
+    shortener 도착한 곳이 단축 서비스
+
+    명세의 조건 5(이미 차단됨이면 만들지 않음)는 두지 않는다: 회선 차단은 조사 대상 서버가 흉내 낼 수 있는 '추정'이라
+    (PR 2 Codex 지적), 그것만으로 자동 조사를 건너뛰면 공격자가 차단된 척해 자동 조사를 피할 수 있다. 정말 막힌 곳이면
+    자동 사건이 '접속 불가 · 회선 차단 감지'로 담당자 검토에 간다(부모당 3·대기 10 한도 안)"""
     if not enabled:                                                   # 1
         return "disabled"
     if parent_source == "related":                                    # 2 자동·버튼 자식 모두 손자 사건을 만들지 않는다
@@ -44,8 +48,6 @@ def skip_reason(parent_source: str, c: dict, *, enabled: bool, threat_min_prob: 
               and prob >= threat_min_prob and not c.get("hold"))
     if not (threat or c.get("reputation_match") is True):             # 4 원래 사건이 위협으로 보는 기준과 같게
         return "not_threat"
-    if c.get("blocked") is True:                                      # 5
-        return "blocked"
     if on_domain(target_host(c), SHORTENER_HOSTS):                    # 6 같은 단축 서비스는 같은 조직이 아니다
         return "shortener"
     return None
