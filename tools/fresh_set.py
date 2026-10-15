@@ -214,13 +214,20 @@ def cmd_eval(a) -> None:
                     "--set", str(dst.relative_to(ROOT)), "--label", f"fresh_{a.date}"], cwd=ROOT, check=True)
 
 
+# 하루 한 번 도는 평가의 라벨(cmd_eval 의 fresh_<날짜>, 도구 전 첫 회는 fresh_openphish)
+_DAILY_LABEL = re.compile(r"^fresh_(openphish|\d{8})$")
+
+
 def fresh_runs() -> list[tuple[dict, list[dict]]]:
-    """실사이트 평가 결과(라벨이 fresh 로 시작) 파일마다 (메타, 기록)."""
-    out = []
+    """하루 한 번 돈 실사이트 평가 결과마다 (메타, 기록). 같은 라벨은 처음 것만 센다. 같은 세트를 개선 전후 측정용으로
+    다시 돌린 결과(라벨 fresh_20261015_discovery 등)는 넣지 않는다 — 넣으면 같은 날을 여러 번 세어 누적이 부풀었다."""
+    out, seen = [], set()
     for p in sorted(EVAL.glob("*.jsonl")):
         lines = [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()]
         meta = next((x for x in lines if x.get("meta")), {})
-        if str(meta.get("label") or "").startswith("fresh"):
+        label = str(meta.get("label") or "")
+        if _DAILY_LABEL.match(label) and label not in seen:
+            seen.add(label)
             out.append((meta, [x for x in lines if not x.get("meta")]))
     return out
 

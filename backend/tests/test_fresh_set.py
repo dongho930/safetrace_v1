@@ -83,11 +83,14 @@ def test_summary_counts_without_urls(fresh):
 
     rec = lambda u, threat, status="COMPLETED": {"group": "fresh", "expected": "malicious", "url": u,  # noqa: E731
                                                  "status": status, "threat": threat, "seconds": 5.0}
-    run("fresh_a", "2026-10-14T09:11", [rec("https://a/", "phishing"), rec("https://b/", "benign", "REVIEW_REQUIRED")])
-    run("fresh_b", "2026-10-15T09:00", [rec("https://c/", "phishing"), rec("https://c/", "phishing")])
+    run("fresh_openphish", "2026-10-14T09:11", [rec("https://a/", "phishing"), rec("https://b/", "benign", "REVIEW_REQUIRED")])
+    run("fresh_20261015", "2026-10-15T09:00", [rec("https://c/", "phishing"), rec("https://c/", "phishing")])
     run("set55", "2026-10-14T09:32", [rec("https://z/", "phishing")])  # 고정 세트는 세지 않는다
+    # 같은 세트를 개선 측정용으로 다시 돈 결과는 세지 않는다(같은 날을 두 번 셌다)
+    run("fresh_20261015_discovery", "2026-10-15T10:51", [rec("https://c/", "benign")])
     md = fresh_set.summary_md(fresh_set.fresh_runs())
     assert "https://" not in md
+    assert md.count("| 2026-10-15 |") == 1, md
     assert "| **누적** | **3** | 4 | **3 (75%)** | 1 (0) | 1 | 0 |" in md, md
 
 
