@@ -40,7 +40,7 @@ from ..netguard import BlockedURL, parse_url
 from ..preview import preview_image
 from ..ratelimit import FailureLimiter
 from ..signer.client import ChainAdmin, SignerError
-from ..store import TERMINAL, AuditLog, Case, Store, Verdict
+from ..store import TERMINAL, AuditLog, Case, CasePhase, Store, Verdict
 
 log = logging.getLogger("safetrace.api")
 settings = get_settings()
@@ -296,12 +296,17 @@ class CaseOut(BaseModel):
     head_seq: int | None
     created_at: str
     verdict: VerdictOut | None = None  # 담당자의 현재 판정
+    # 원래 결과가 나온 뒤 연관 사이트를 조사하는 중이면 "related"(조사 중일 때만). main_status: 원래 결과의 상태
+    phase: str | None = None
+    main_status: str | None = None
 
     @classmethod
-    def of(cls, c: Case, v: Verdict | None = None) -> CaseOut:
+    def of(cls, c: Case, v: Verdict | None = None, ph: CasePhase | None = None) -> CaseOut:
         return cls(id=c.id, url=c.url, source=c.source, status=c.status, finish_reason=c.finish_reason,
                    final_url=c.final_url, threat=c.threat, safebrowsing=c.safebrowsing, candidates=c.candidates,
-                   head_seq=c.head_seq, created_at=c.created_at.isoformat(), verdict=VerdictOut.of(v) if v else None)
+                   head_seq=c.head_seq, created_at=c.created_at.isoformat(), verdict=VerdictOut.of(v) if v else None,
+                   phase=ph.phase if ph and c.status == "RUNNING" else None,
+                   main_status=ph.main_status if ph else None)
 
 
 class LoginIn(BaseModel):
@@ -544,14 +549,15 @@ def create_case(body: CaseCreate, p: Annotated[Principal, Depends(need("investig
 def list_cases(p: Annotated[Principal, Depends(need("viewer"))], limit: int = Query(50, ge=1, le=200)):
     with store.session() as s:
         rows = s.scalars(select(Case).order_by(Case.created_at.desc()).limit(limit)).all()
-    latest = verdicts.latest_for(store, [c.id for c in rows])
-    return [CaseOut.of(c, latest.get(c.id)) for c in rows]
+    ids = [c.id for c in rows]
+    latest, phases = verdicts.latest_for(store, ids), store.phases_for(ids)
+    return [CaseOut.of(c, latest.get(c.id), phases.get(c.id)) for c in rows]
 
 
 @app.get("/api/cases/{case_id}", response_model=CaseOut)
 def get_case(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]):
     c = _get_case(case_id)
-    return CaseOut.of(c, verdicts.latest_for(store, [c.id]).get(c.id))
+    return CaseOut.of(c, verdicts.latest_for(store, [c.id]).get(c.id), store.phases_for([c.id]).get(c.id))
 
 
 # ── 담당자 판정 ─────────────────────────────────────────
@@ -567,7 +573,8 @@ def save_verdict(case_id: str, body: VerdictIn, p: Annotated[Principal, Depends(
     _evidence_head(_get_case(case_id))  # 판정에 묶을 head 가 비어 있으면(닫기 실패) 먼저 받아 둔다
     try:
         v = verdicts.save(store, case_id, expected_rev=body.rev, decision=body.decision, threat=body.threat,
-                          note=body.note, reviewer=p.name, user_id=p.user_id)
+                          note=body.note, reviewer=p.name, user_id=p.user_id,
+                          running_head=lambda: _running_head(case_id))
     except verdicts.VerdictError as e:
         raise HTTPException(422, str(e)) from None
     except verdicts.VerdictConflict as e:
@@ -733,6 +740,23 @@ def _evidence_head(c: Case) -> Head | None:
     store.audit("system", "evidence.head_recovered", c.id, f"seq={h['seq']}")
     c.head_seq, c.head_hash = h["seq"], h["hash"]
     return Head(h["seq"], h["hash"])
+
+
+def _running_head(case_id: str) -> tuple[int, str] | None:
+    """아직 열려 있는 체인의 지금까지 끝(원래 결과 뒤 판정용). 운영은 서명 서비스가 정한 값, 개발 모드는 같은 프로세스가
+    쓴 체인의 마지막 기록. 확인하지 못하면 None(판정을 받지 않는다)."""
+    if _chains is not None:
+        try:
+            h = _chains.head(case_id)
+        except SignerError:
+            return None
+        ok = isinstance(h.get("seq"), int) and isinstance(h.get("hash"), str)
+        return (h["seq"], h["hash"][:64]) if ok else None
+    recs = package.read_chain(settings.evidence_dir, case_id)
+    last = recs[-1] if recs else None
+    if not (isinstance(last, dict) and isinstance(last.get("seq"), int) and isinstance(last.get("hash"), str)):
+        return None
+    return last["seq"], last["hash"][:64]
 
 
 def _verify_case(c: Case, signer: Signer, text: str | None = None) -> VerifyResult:

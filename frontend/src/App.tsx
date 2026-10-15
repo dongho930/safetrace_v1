@@ -122,17 +122,23 @@ const pct = (v: number) => (typeof v === "number" && Number.isFinite(v) ? v.toFi
 
 // ── 분류 폴더: 목록 필터이자 현황 숫자(예전 지표 카드를 대신한다) ─────────────
 const isSuspect = (c: CaseOut) => !!c.threat && !["benign", "unknown"].includes(c.threat.threat);
+// 원래 결과가 나왔고 연관 사이트를 조사하는 중인 사건은 원래 결과의 상태로 분류한다(조사 중 폴더에 넣지 않는다)
+const relatedRunning = (c: CaseOut) => c.phase === "related" && c.status === "RUNNING" && !!c.main_status;
+const asMain = (c: CaseOut): CaseOut => (relatedRunning(c) ? { ...c, status: c.main_status as string } : c);
 type FolderId = "review" | "running" | "suspect" | "decided" | "unreachable" | "all";
 const FOLDERS: { id: FolderId; label: string; color: string; test: (c: CaseOut) => boolean }[] = [
-  { id: "review", label: "검토 필요", color: "var(--review)", test: needsReview },
-  { id: "running", label: "조사 중", color: "var(--primary)", test: (c) => c.status === "RUNNING" || c.status === "QUEUED" },
-  { id: "suspect", label: "위협 의심 · 판정 전", color: "var(--threat)", test: (c) => c.status === "COMPLETED" && isSuspect(c) && !c.verdict },
+  { id: "review", label: "검토 필요", color: "var(--review)", test: (c) => needsReview(asMain(c)) },
+  { id: "running", label: "조사 중", color: "var(--primary)", test: (c) => (c.status === "RUNNING" || c.status === "QUEUED") && !relatedRunning(c) },
+  { id: "suspect", label: "위협 의심 · 판정 전", color: "var(--threat)", test: (c) => asMain(c).status === "COMPLETED" && isSuspect(c) && !c.verdict },
   { id: "decided", label: "판정 완료", color: "var(--safe)", test: (c) => c.verdict?.decision === "threat" || c.verdict?.decision === "benign" },
-  { id: "unreachable", label: "접속 불가 · 차단", color: "var(--idle-line)", test: (c) => ["UNREACHABLE", "BLOCKED", "FAILED"].includes(c.status) },
+  { id: "unreachable", label: "접속 불가 · 차단", color: "var(--idle-line)", test: (c) => ["UNREACHABLE", "BLOCKED", "FAILED"].includes(asMain(c).status) },
   { id: "all", label: "전체", color: "var(--header)", test: () => true },
 ];
 // 담당자가 확인할 사건(검토 필요, 위협 의심인데 판정 전)은 목록에 파란 점
-const unread = (c: CaseOut) => needsReview(c) || (c.status === "COMPLETED" && isSuspect(c) && !c.verdict);
+const unread = (raw: CaseOut) => {
+  const c = asMain(raw);
+  return needsReview(c) || (c.status === "COMPLETED" && isSuspect(c) && !c.verdict);
+};
 
 // ── 앱 ─────────────────────────────────────────────
 export default function App() {
@@ -638,9 +644,18 @@ function LiveMonitor({ cases, onOpen, onEnded }: { cases: CaseOut[]; onOpen: (id
 
 // 실행 중인 사건 하나: 자기 /events 를 따로 구독한다(사건이 바뀌면 key 로 다시 만들어 이전 연결을 끊는다).
 // 기록 전체를 쌓지 않고 화면에 필요한 요약(관찰 수·마지막 화면·마지막 선택)만 갱신한다(믿지 않는 기록이 몰려와도 메모리가 늘지 않게)
-type MonitorView = { maxSeq: number; steps: number; shot: string | null; cands: Map<string, string>; act: Act | null };
+type MonitorView = {
+  maxSeq: number;
+  steps: number;
+  shot: string | null;
+  cands: Map<string, string>;
+  act: Act | null;
+  sub: number; // 연관 후보 하위 조사 번호(0 = 원래 주소)
+  subTotal: number;
+  subHost: string;
+};
 type Act = { what: string; prob: number; running: boolean };
-const EMPTY_VIEW: MonitorView = { maxSeq: -1, steps: 0, shot: null, cands: new Map(), act: null };
+const EMPTY_VIEW: MonitorView = { maxSeq: -1, steps: 0, shot: null, cands: new Map(), act: null, sub: 0, subTotal: 0, subHost: "" };
 
 function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) => void; onEnded: () => void }) {
   const [view, setView] = useState<MonitorView>(EMPTY_VIEW);
@@ -678,9 +693,9 @@ function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) 
           <span className="dot" />
           LIVE
         </span>
-        <h2 className="monitor-title">{ended ? "조사 끝남" : "지금 조사 중"}</h2>
-        <span className="monitor-host" title={c.url}>
-          {clip(hostPath(c.url), 40)}
+        <h2 className="monitor-title">{ended ? "조사 끝남" : view.sub ? `연관 사이트 ${view.sub}/${view.subTotal || view.sub}` : "지금 조사 중"}</h2>
+        <span className="monitor-host" title={view.sub ? view.subHost : c.url}>
+          {clip(view.sub && view.subHost ? view.subHost : hostPath(c.url), 40)}
         </span>
         <button type="button" className="btn btn-ghost btn-sm" aria-label="조사 중인 사건 상세 보기" onClick={() => onOpen(c.id)}>
           상세 보기
@@ -718,6 +733,11 @@ function step(v: MonitorView, e: EvidenceEvent): MonitorView {
   const next = { ...v, maxSeq: e.seq };
   const png = e.files.find((f) => f.endsWith(".png"));
   if ((e.kind === "observe" || e.kind === "finish") && png) next.shot = png;
+  if (e.kind === "candidates") next.subTotal = Math.max(0, Math.min(10, Math.trunc(num(d.investigated)) || 0));
+  if (e.kind === "start" && typeof d.sub === "number" && Number.isInteger(d.sub) && d.sub > 0 && d.sub <= 10) {
+    next.sub = d.sub;
+    next.subHost = clip(hostOf(text(d.url, 2000)), 60);
+  }
   if (e.kind === "observe") {
     if (typeof d.sub !== "number") next.steps = v.steps + 1;
     next.cands = new Map(clickables(d.candidates).map((x) => [x.id, x.text]));
@@ -732,6 +752,14 @@ function step(v: MonitorView, e: EvidenceEvent): MonitorView {
 }
 
 function StatusChip({ c }: { c: CaseOut }) {
+  if (relatedRunning(c)) {
+    return (
+      <>
+        <StatusChip c={asMain(c)} />
+        <span className="chip st-RUNNING">연관 사이트 조사 중</span>
+      </>
+    );
+  }
   // 담당자가 확정한 사건은 판정을 먼저 보여 준다
   const v = c.verdict;
   if (v?.decision === "threat") return <span className="chip st-threat">■ {THREAT_LABEL[v.threat ?? ""] ?? v.threat} 확정</span>;
@@ -751,7 +779,8 @@ function StatusChip({ c }: { c: CaseOut }) {
   );
 }
 
-function caseSummary(c: CaseOut): string {
+function caseSummary(raw: CaseOut): string {
+  const c = asMain(raw);
   if (c.status === "RUNNING" || c.status === "QUEUED") return "에이전트가 조사하는 중";
   const parts: string[] = [];
   if (c.verdict?.decision === "hold") parts.push("담당자 보류");
@@ -852,7 +881,7 @@ const Workspace = memo(function Workspace({
         }
         if (e.type === "status") {
           setStatus(e.status);
-          if (TERMINAL.has(e.status)) getCase(id).then(setC).catch(() => undefined);
+          if (TERMINAL.has(e.status) || e.phase === "related") getCase(id).then(setC).catch(() => undefined);
         }
       },
       ac.signal,
@@ -867,8 +896,12 @@ const Workspace = memo(function Workspace({
   // 끝난 사건은 사건 자체의 상태를 쓴다(SSE 는 지난 '조사 중' 상태부터 다시 보내 준다)
   const st = c && TERMINAL.has(c.status) ? c.status : c ? status || c.status : "";
   // 상태를 아직 모르면(사건·기록을 받는 중) 조사 중으로 치지 않는다: 끝난 사건을 열 때 실시간 연결을 열었다 닫지 않게
-  const running = st === "RUNNING" || st === "QUEUED";
+  // 원래 결과가 나오면(연관 사이트 조사 중) 요약·근거·판정은 원래 결과로 보여 주고, 내려받기·검증만 끝날 때까지 막는다
+  const related = !!c && c.phase === "related" && st === "RUNNING";
+  const running = (st === "RUNNING" || st === "QUEUED") && !related;
   const steps = sorted.filter((e) => e.kind === "observe" && typeof e.data.sub !== "number").length;
+  const relatedTotal = num([...sorted].reverse().find((e) => e.kind === "candidates")?.data.investigated);
+  const relatedSeen = new Set(sorted.filter((e) => typeof e.data.sub === "number").map((e) => e.data.sub)).size;
   const reasons = useMemo(() => (c && !running ? buildReasons(sorted, c) : []), [sorted, c, running]);
   const screens = useMemo(() => buildScreens(reasons, sorted), [reasons, sorted]);
   const [tab, setTab] = useState<TabId>("screens");
@@ -878,11 +911,11 @@ const Workspace = memo(function Workspace({
   const opened = useRef(false);
   useEffect(() => {
     // 기록을 다 받은 뒤(SSE 가 끝 상태를 보낸 뒤)에 정한다. 그 전에는 화면 목록이 비어 보일 수 있다
-    if (opened.current || !c || !TERMINAL.has(status)) return;
+    if (opened.current || !c || !(TERMINAL.has(status) || related)) return;
     opened.current = true;
     if (screens.length === 0) setTab("log");
     else setPick(screens[0].file);
-  }, [status, c, screens]);
+  }, [status, c, screens, related]);
   const openScreen = (r: Reason) => {
     if (!r.shot) return;
     setTab("screens");
@@ -892,9 +925,18 @@ const Workspace = memo(function Workspace({
     <>
       <div className="detail-body">
         <div className="statusline">
-          <span className={`chip st-${st}`}>
-            {STATUS_GLYPH[st] ?? "●"} {STATUS_LABEL[st] ?? (st || "불러오는 중")}
-          </span>
+          {related && c ? (
+            <StatusChip c={c} />
+          ) : (
+            <span className={`chip st-${st}`}>
+              {STATUS_GLYPH[st] ?? "●"} {STATUS_LABEL[st] ?? (st || "불러오는 중")}
+            </span>
+          )}
+          {related && Number.isFinite(relatedTotal) && (
+            <span className="muted small">
+              연관 사이트 {Math.min(relatedSeen, relatedTotal)}/{relatedTotal}
+            </span>
+          )}
           {c && (
             <span className="muted">
               {fmtDateTime(c.created_at)} 접수 · {steps}단계 관찰
@@ -921,7 +963,7 @@ const Workspace = memo(function Workspace({
         ) : (
           <section className="panel progress-panel" aria-label="조사 경과">
             <CaseTabs id={id} c={c} events={sorted} screens={screens} tab={tab} onTab={setTab} pick={pick} onPick={setPick} />
-            <CaseFooterBar c={c} id={id} running={running} canExport={canExport} verify={verify} onVerify={setVerify} />
+            <CaseFooterBar c={c} id={id} running={running || related} related={related} canExport={canExport} verify={verify} onVerify={setVerify} />
           </section>
         )}
       </div>
@@ -1709,6 +1751,7 @@ function CaseFooterBar({
   c,
   id,
   running,
+  related = false,
   canExport,
   verify,
   onVerify,
@@ -1716,6 +1759,7 @@ function CaseFooterBar({
   c: CaseOut | null;
   id: string;
   running: boolean;
+  related?: boolean;
   canExport: boolean;
   verify: VerifyState;
   onVerify: (v: VerifyState) => void;
@@ -1795,6 +1839,7 @@ function CaseFooterBar({
       ) : (
         <span className="muted small">보고서·패키지 내려받기는 조사관 이상만 할 수 있습니다</span>
       )}
+      {related && canExport && <span className="muted small">연관 사이트 조사가 끝나면 내려받을 수 있습니다</span>}
       {pkgMsg && (
         <p className="err" role="alert" style={{ flexBasis: "100%" }}>
           {pkgMsg}

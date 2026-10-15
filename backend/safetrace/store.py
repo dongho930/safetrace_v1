@@ -53,6 +53,18 @@ class CaseEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class CasePhase(Base):
+    """원래 결과가 나온 뒤 연관 사이트를 조사하는 중인 사건(related-sites PR 3). cases 표에 열을 보태지 않는다
+    (Store 는 create_all 만 써서 기존 DB 에 반영되지 않는다). 원래 결과의 상태는 종료 상태가 이와 같아야 한다."""
+
+    __tablename__ = "case_phase"
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), primary_key=True)
+    phase: Mapped[str] = mapped_column(String(16))  # related
+    main_status: Mapped[str] = mapped_column(String(24))  # 원래 결과의 상태(종료 상태 중 하나)
+    main_reason: Mapped[str | None] = mapped_column(String(64))
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -124,12 +136,25 @@ class Store:
         return self.Session()
 
     def add_event(self, case_id: str, payload: dict) -> bool:
-        """이벤트를 남긴다. 상태 이벤트가 허용된 전이가 아니면(끝난 사건, 모르는 상태) 남기지 않고 False."""
+        """이벤트를 남긴다. 상태 이벤트가 허용된 전이가 아니면(끝난 사건, 모르는 상태) 남기지 않고 False.
+
+        원래 결과 이벤트(phase=related)는 조사 중(RUNNING)이고 위협 판단과 원래 결과의 종료 상태가 있을 때만 받는다."""
         with self.session() as s, s.begin():
             if payload.get("type") == "status":
                 c = s.get(Case, case_id, with_for_update=True)
                 if c is None or payload.get("status") not in _NEXT_STATUS.get(c.status, ()):
                     return False
+                if "phase" in payload:
+                    main = payload.get("main") if isinstance(payload.get("main"), dict) else {}
+                    reason = main.get("reason")
+                    if (payload["phase"] != "related" or payload["status"] != "RUNNING"
+                            or not isinstance(payload.get("threat"), dict) or main.get("status") not in TERMINAL
+                            or not (reason is None or isinstance(reason, str))):
+                        return False
+                    ph = s.get(CasePhase, case_id) or CasePhase(case_id=case_id)
+                    ph.phase, ph.main_status, ph.at = "related", main["status"], now()
+                    ph.main_reason = reason[:64] if reason else None
+                    s.add(ph)
                 c.status = payload["status"]
                 c.finish_reason = payload.get("reason")
                 if payload.get("threat") is not None:
@@ -142,6 +167,13 @@ class Store:
                         setattr(c, k, payload[k])
             s.add(CaseEvent(case_id=case_id, payload=payload))
         return True
+
+    def phases_for(self, case_ids: list[str]) -> dict[str, CasePhase]:
+        """사건 여러 개의 원래 결과 표시를 한 번에 가져온다(목록용)."""
+        if not case_ids:
+            return {}
+        with self.session() as s:
+            return {p.case_id: p for p in s.scalars(select(CasePhase).where(CasePhase.case_id.in_(case_ids)))}
 
     def set_head(self, case_id: str, seq: int, hash_: str) -> None:
         """head 가 비어 있는 사건에 서명 서비스의 head 를 채운다(닫기에 실패했다가 나중에 다시 닫아 받은 값)."""

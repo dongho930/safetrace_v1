@@ -47,6 +47,8 @@ export type CaseOut = {
   head_seq: number | null;
   created_at: string;
   verdict: Verdict | null; // 담당자의 현재 판정(없으면 null)
+  phase: "related" | null; // 원래 결과가 나왔고 연관 사이트를 조사하는 중
+  main_status: string | null; // 원래 결과의 상태(phase 가 related 일 때 폴더·판정에 쓴다)
 };
 
 // 담당자 판정. 덮어쓰지 않고 판(rev)을 쌓는다. 저장할 때 보고 있던 판 번호를 보내 동시 수정을 막는다(409)
@@ -70,7 +72,8 @@ export type EvidenceEvent = {
   files: string[];
   hash: string;
 };
-export type StatusEvent = { type: "status"; status: string; reason: string | null; threat?: Threat | null };
+// phase="related": 원래 결과가 나왔고 연관 사이트를 조사하는 중(related-sites PR 3)
+export type StatusEvent = { type: "status"; status: string; reason: string | null; threat?: Threat | null; phase?: "related" };
 export type StepEvent = { type: "step"; step: number; url: string };
 export type AgentEvent = EvidenceEvent | StatusEvent | StepEvent;
 
@@ -247,7 +250,12 @@ export function cleanEvent(raw: unknown): AgentEvent | null {
   }
   if (raw.type === "status") {
     if (typeof raw.status !== "string") return null;
-    return { type: "status", status: raw.status.slice(0, 24), reason: typeof raw.reason === "string" ? raw.reason : null };
+    return {
+      type: "status",
+      status: raw.status.slice(0, 24),
+      reason: typeof raw.reason === "string" ? raw.reason : null,
+      ...(raw.phase === "related" ? { phase: "related" as const } : {}),
+    };
   }
   if (raw.type === "step") {
     if (typeof raw.step !== "number" || typeof raw.url !== "string") return null;
@@ -339,5 +347,7 @@ export function cleanCase(v: unknown): CaseOut | null {
     head_seq: typeof v.head_seq === "number" ? v.head_seq : null,
     created_at: v.created_at,
     verdict: ver,
+    phase: v.phase === "related" ? "related" : null,
+    main_status: strOr(v.main_status)?.slice(0, 24) ?? null,
   };
 }

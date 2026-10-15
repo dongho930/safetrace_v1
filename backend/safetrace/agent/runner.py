@@ -181,6 +181,13 @@ def _investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], Non
     _append(writer, emit, "candidates", {
         "found": [{**c, "reputation_match": c["url"] in hits} for c in cands], "followup": followup,
         "investigated": len(chosen)})
+    if chosen and isinstance(result.threat, dict):
+        # 원래 결과 먼저(related-sites PR 3): 하위 조사 전에 원래 사건의 결과를 보낸다. 담당자는 이때부터 판정할 수 있고,
+        # 연관 사이트 조사는 뒤에서 계속한다. 종료 상태는 이 원래 결과와 같다(하위 조사는 판정을 바꾸지 않는다)
+        emit({"type": "status", "status": "RUNNING", "phase": "related", "main": {"status": status, "reason": reason},
+              "threat": result.threat, "final_url": result.final_url, "safebrowsing": sb,
+              "candidates": [{**c, "reputation_match": c["url"] in hits,
+                              "reputation_unchecked": c["url"] not in first_checked} for c in cands]})
     results = _investigate_candidates(chosen, s, decider, writer, emit, resolver, sink) if chosen else []
     if results:
         _check_candidate_reputation(results, hits, first_checked, s, transport, writer, emit)

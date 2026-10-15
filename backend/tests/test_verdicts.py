@@ -131,3 +131,88 @@ def test_validation(client, store):
     running = new_case(store, status="RUNNING")
     r = post(client, tok, running, rev=0, decision="benign")
     assert r.status_code == 422 and "조사가 끝난 뒤" in r.json()["detail"]
+
+
+# ── related-sites PR 3: 원래 결과 먼저 ─────────────────────────
+_MAIN_THREAT = {"threat": "phishing", "probability": 0.9, "hold": False}
+
+
+def _running_case_with_chain(store):
+    """조사 중인 사건과 아직 열린 체인(개발 모드: 같은 프로세스가 쓴 체인)."""
+    from safetrace.agent.runner import make_sealer
+    from safetrace.api.main import settings
+    from safetrace.evidence import EvidenceWriter
+
+    with store.session() as s, s.begin():
+        c = Case(url="https://example.test/related", source="test", status="RUNNING", created_by="t")
+        s.add(c)
+    w = EvidenceWriter(settings.evidence_dir, c.id, make_sealer(settings))
+    w.append("start", {"url": c.url})
+    w.append("threat", dict(_MAIN_THREAT))
+    return c.id, w
+
+
+def _main_result(cid, **over):
+    from safetrace.api.main import record_event
+
+    ev = {"type": "status", "status": "RUNNING", "phase": "related",
+          "main": {"status": "COMPLETED", "reason": "agent_finished"}, "threat": dict(_MAIN_THREAT),
+          "final_url": "https://example.test/related", "candidates": [{"url": "https://c1.example/", "host": "c1.example"}]}
+    record_event(cid, {**ev, **over})
+
+
+def test_verdict_after_main_result_while_related_running(client, store):
+    """원래 결과 전 조사 중은 거절, 원래 결과 뒤는 받고 그때까지의 증거 끝을 묶는다. 종료 뒤에도 판정은 그대로다."""
+    from safetrace.api.main import record_event
+
+    _, tok = user_token(client, store, "reviewer")
+    cid, w = _running_case_with_chain(store)
+    r = post(client, tok, cid, rev=0, decision="threat", threat="phishing")
+    assert r.status_code == 422 and "조사가 끝난 뒤" in r.json()["detail"]
+    _main_result(cid)
+    c = client.get(f"/api/cases/{cid}", headers=h(VIEWER)).json()
+    assert (c["status"], c["phase"], c["main_status"]) == ("RUNNING", "related", "COMPLETED")
+    assert c["threat"]["threat"] == "phishing" and c["candidates"][0]["host"] == "c1.example"
+    listed = {x["id"]: x for x in client.get("/api/cases?limit=200", headers=h(VIEWER)).json()}
+    assert listed[cid]["phase"] == "related"
+    r = post(client, tok, cid, rev=0, decision="threat", threat="phishing")
+    assert r.status_code == 201, r.text
+    seen = w.head
+    assert r.json()["head_seq"] == seen.seq
+    with store.session() as s:
+        assert s.scalar(select(Verdict.head_hash).where(Verdict.case_id == cid)) == seen.hash
+    for svc in (INVESTIGATOR, SERVICE_ADMIN):  # 자동화 토큰은 여전히 확정할 수 없다
+        assert post(client, svc, cid, rev=1, decision="benign").status_code == 403
+    # 하위 조사 기록이 더 쌓이고 사건이 끝나도 판정과 그때의 증거 끝은 그대로
+    w.append("candidate_results", {"results": []})
+    record_event(cid, {"type": "status", "status": "COMPLETED", "reason": "agent_finished", "threat": dict(_MAIN_THREAT)})
+    c = client.get(f"/api/cases/{cid}", headers=h(VIEWER)).json()
+    assert (c["status"], c["phase"], c["main_status"]) == ("COMPLETED", None, "COMPLETED")
+    assert (c["verdict"]["rev"], c["verdict"]["head_seq"]) == (1, seen.seq) and w.head.seq == seen.seq + 1
+
+
+def test_verdict_refused_when_running_head_unknown(client, store, monkeypatch):
+    from safetrace.api import main
+
+    _, tok = user_token(client, store, "reviewer")
+    cid, _ = _running_case_with_chain(store)
+    _main_result(cid)
+    monkeypatch.setattr(main, "_running_head", lambda case_id: None)
+    r = post(client, tok, cid, rev=0, decision="benign")
+    assert r.status_code == 422 and "증거 끝" in r.json()["detail"]
+
+
+def test_main_result_event_needs_running_and_threat(store):
+    cid, _ = _running_case_with_chain(store)
+    base = {"type": "status", "status": "RUNNING", "phase": "related",
+            "main": {"status": "COMPLETED", "reason": "agent_finished"}, "threat": dict(_MAIN_THREAT)}
+    assert not store.add_event(cid, {**base, "threat": None})                        # 위협 판단 없음
+    assert not store.add_event(cid, {**base, "status": "COMPLETED"})                 # 종료 상태에 phase
+    assert not store.add_event(cid, {**base, "main": {"status": "RUNNING"}})         # 원래 결과가 종료 상태가 아님
+    assert not store.add_event(cid, {**base, "main": {"status": "COMPLETED", "reason": 5}})
+    assert not store.add_event(cid, {**base, "phase": "other"})
+    assert store.phases_for([cid]) == {}
+    assert store.add_event(cid, base)
+    assert store.phases_for([cid])[cid].main_status == "COMPLETED"
+    assert store.add_event(cid, {"type": "status", "status": "COMPLETED", "reason": "agent_finished"})
+    assert not store.add_event(cid, base)  # 끝난 사건에는 다시 받지 않는다
