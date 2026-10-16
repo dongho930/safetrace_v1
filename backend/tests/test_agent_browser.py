@@ -312,6 +312,32 @@ def test_dead_destination_reaches_threat_judgment(settings, testpages, request, 
     assert all(urlsplit(u).hostname in {"127.0.0.1", "localhost"} for u in fin["nav_chain"]), fin["nav_chain"]
 
 
+def test_threat_request_carries_each_screen(settings, testpages):
+    """판단 요청의 화면별 주소·제목·금지 요소가 요약과 같은 순서로 짝을 이룬다(코드 규칙이 한 화면 근거끼리만 묶게)."""
+    from safetrace.agent.runner import make_decider
+
+    class Capture:
+        def __init__(self):
+            self.inner, self.req = make_decider(settings), None
+
+        def action(self, state):
+            return self.inner.action(state)
+
+        def threat(self, req):
+            self.req = req
+            return self.inner.threat(req)
+
+    settings.max_steps = 2
+    testpages.clear()
+    d = Capture()
+    investigate(str(uuid.uuid4()), f"{BASE}/phish/track.html", settings, lambda e: None, decider=d)
+    r = d.req
+    assert len(r.pages) == len(r.page_urls) == len(r.page_titles) == len(r.page_forbidden) >= 1
+    assert r.page_titles[0] == "본인 확인" and urlsplit(r.page_urls[0]).path == "/phish/track.html"
+    assert any(x.startswith("input:password") for x in r.page_forbidden[0]), r.page_forbidden
+    assert all(x in r.forbidden_seen for f in r.page_forbidden for x in f)
+
+
 def test_dead_end_link_is_not_retried(settings, testpages):
     """확인 화면에서 누른 버튼이 사라진 목적지로 가면 원래 화면으로 돌아오고, 그 버튼은 다시 내놓지 않는다."""
     settings.max_steps = 6

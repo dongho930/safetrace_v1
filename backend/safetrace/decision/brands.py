@@ -47,6 +47,7 @@ SHARED_HOSTING: tuple[str, ...] = (
     "pages.dev", "netlify.app", "vercel.app", "github.io", "webflow.io", "typedream.app", "framer.website",
     "weebly.com", "jimdofree.com", "blogspot.com", "gitbook.io", "replit.app", "craftum.io", "cleverapps.io",
     "azurefd.net", "amazonaws.com",  # OpenPhish 2026-10-15
+    "framer.app",                    # OpenPhish 2026-10-16(브랜드 없는 로그인 화면)
     "dothome.co.kr",                 # OpenPhish 2026-10-14·15
     "creatorlink.net",               # KISA 2024
 )
@@ -122,6 +123,92 @@ def brand_name_in(url: str, final_url: str) -> tuple[str, str] | None:
         brand = brand_name_domain(h)
         if brand:
             return brand, h
+    return None
+
+
+TYPO_MIN_BRAND = 6  # 오타 비교는 이 길이 이상 브랜드만(짧은 이름은 한두 글자 차이가 흔한 단어다: steam·stream, toss·boss)
+TYPO_MAX_DISTANCE = 2
+
+
+def _distance(a: str, b: str) -> int:
+    """편집 거리(글자 넣기·빼기·바꾸기 횟수)."""
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def name_parts(host: str) -> list[str]:
+    """운영자가 고른 이름 조각. 공용 호스팅은 그 아래 하위 도메인에서, 아니면 등록 도메인의 끝(.com·.co.kr)을 뺀 부분에서."""
+    h = host.lower().rstrip(".")
+    hosting = next((d for d in SHARED_HOSTING if on_domain(h, (d,))), None)
+    if hosting:
+        part = h[: -len(hosting)].rstrip(".")
+    else:
+        site = site_of(h)
+        part = h[: -len(site)] + site.split(".")[0]
+    return [t for t in _TOKEN.split(part) if t]
+
+
+def typo_of(host: str, brand: str) -> bool:
+    """이름 조각이 브랜드와 한두 글자 다른지(예: trzer → trezor). 브랜드로 시작하는 조각은 오타가 아니다
+    (그쪽은 lookalike_brand·brand_name_domain 이 본다)."""
+    n = len(brand)
+    if n < TYPO_MIN_BRAND:
+        return False
+    for t in name_parts(host):
+        if t.startswith(brand):
+            continue
+        windows = {t[:k] for k in (n - 1, n, n + 1) if len(t) >= k}
+        if any(0 < _distance(w, brand) <= TYPO_MAX_DISTANCE for w in windows):
+            return True
+    return False
+
+
+def _host(url: str) -> str:
+    return (urlsplit(url).hostname or "").lower().rstrip(".")
+
+
+def claimed_brands(title: str) -> list[str]:
+    """제목이 내세우는 브랜드(영문 이름이 한 낱말로 들어 있음, 예: 'Steam Community', 'Trezor® Hardware').
+    모두 돌려준다: 하나만 고르면 제목에 다른 브랜드를 덧붙여('Trezor Hardware | Naver') 규칙을 피할 수 있다(Codex 지적)."""
+    t = title.lower()
+    return [b for b in OFFICIAL_BRAND_DOMAINS if re.search(rf"(?<![a-z0-9]){b}(?![a-z0-9])", t)]
+
+
+def brand_typo_claim(titles: list[str], page_urls: list[str]) -> tuple[str, str] | None:
+    """화면 제목이 브랜드를 내세우는데 그 화면의 도메인 이름이 브랜드와 한두 글자 다르면 (브랜드, 호스트).
+    titles·page_urls 는 화면마다 같은 순서다(제목은 페이지 값, 주소는 브라우저 값). 짝이 맞지 않으면 적용하지 않는다.
+    관찰: 오늘의 실사이트 세트(OpenPhish 2026-10-16) Trezor 사칭 GitBook(하위 도메인 이름이 trezor 의 오타, 제목 'Trezor® Hardware')."""
+    if len(titles) != len(page_urls):
+        return None
+    for title, url in zip(titles, page_urls, strict=True):
+        host = _host(url)
+        for brand in claimed_brands(title):
+            if not official_brand(host) and typo_of(host, brand):
+                return brand, host
+    return None
+
+
+def brand_login_on_shared_hosting(titles: list[str], page_urls: list[str],
+                                  page_forbidden: list[list[str]]) -> tuple[str, str] | None:
+    """공용 호스팅(누구나 하위 도메인을 만든다)의 화면이 제목으로 브랜드를 내세우고 그 화면에 로그인 요소(로그인 버튼·링크,
+    비밀번호 입력)가 있으면 (브랜드, 호스트). 브랜드의 공식 서비스는 공용 호스팅에 로그인 화면을 두지 않는다.
+    관찰: 오늘의 실사이트 세트(OpenPhish 2026-10-16) Steam 사칭 netlify('Steam Community', 'Sign in').
+    page_forbidden 은 화면마다 에이전트가 본 금지 요소(사유:종류:글자)다. 다른 화면의 로그인 요소는 근거로 쓰지 않고,
+    화면별 짝이 맞지 않으면 적용하지 않는다."""
+    if not len(titles) == len(page_urls) == len(page_forbidden):
+        return None
+    for title, url, seen in zip(titles, page_urls, page_forbidden, strict=True):
+        if not any(x.startswith(("login:", "input:password")) for x in seen):
+            continue
+        host = _host(url)
+        brands = claimed_brands(title)
+        if brands and on_domain(host, SHARED_HOSTING) and not official_brand(host):
+            return brands[0], host
     return None
 
 
