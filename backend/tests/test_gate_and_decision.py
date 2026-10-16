@@ -648,6 +648,8 @@ def test_link_takedown_keeps_other_threats():
     ("https://naver.me/abc", ["https://www.naver.com/"], None),  # 공식 도메인끼리의 이동
     ("https://www.apple.com/", ["https://www.apple.com/kr/"], None),
     ("https://phish.example/", [], None),
+    ("https://ornate.netlify.app/", ["https://steamcommunity.com/"], ("steam", "steamcommunity.com")),
+    ("https://x.typedream.app/", ["https://www.ledger.com/start"], ("ledger", "www.ledger.com")),
 ])
 def test_official_redirect(url, page_urls, expected):
     from safetrace.decision.brands import official_redirect
@@ -703,6 +705,19 @@ def test_official_redirect_threat_goes_to_review():
     ("www.lotteglogis.com", None),
     ("name.n-payost.shop", None),
     ("hometax-go.kr.refund.top", "hometax"),
+    # 오늘의 실사이트 세트(OpenPhish 2026-10-14~16)에서 본 게임·지갑 사칭
+    ("www.roblox.et", "roblox"),
+    ("roblox.com.mu", "roblox"),
+    ("ledgernload.gitbook.io", "ledger"),
+    ("ledgerdownloads.com", "ledger"),
+    ("en--help-trezor-wallet-cdn-en.typedream.app", "trezor"),
+    ("www.roblox.com", None),
+    ("tr.rbxcdn.com", None),
+    ("trezor.io", None),
+    ("shop.ledger.com", None),
+    ("store.steampowered.com", None),
+    ("steamcommunity.com", None),
+    ("shared.akamai.steamstatic.com", None),
 ])
 def test_lookalike_brand(host, brand):
     from safetrace.decision.brands import lookalike_brand

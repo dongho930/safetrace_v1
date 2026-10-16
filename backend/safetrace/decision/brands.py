@@ -30,6 +30,12 @@ OFFICIAL_BRAND_DOMAINS: dict[str, tuple[str, ...]] = {
     # Meta 비즈니스 사칭 → www.facebook.com)
     "apple": ("apple.com",),
     "facebook": ("facebook.com",),
+    # 오늘의 실사이트 세트(OpenPhish 2026-10-16)에서 본 게임·가상자산 지갑 사칭: Roblox 사칭 도메인의 프로필 화면,
+    # Ledger·Trezor 사칭 GitBook·다운로드 사이트, Steam 사칭 로그인
+    "roblox": ("roblox.com", "rbxcdn.com"),
+    "trezor": ("trezor.io",),
+    "ledger": ("ledger.com",),
+    "steam": ("steampowered.com", "steamcommunity.com", "steamstatic.com", "steamusercontent.com"),
 }
 # 단축 URL 서비스: 평가 세트·KISA 신고 자료(var/probe)에서 실제로 본 것만. 남의 주소로 넘기는 것이 본업이라 넘긴 곳을
 # 근거로 삼지 않는다(gourl.kr·vo.la 는 사라진 링크를 naver.com·쿠팡 검색으로 넘긴다)
