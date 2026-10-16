@@ -154,7 +154,7 @@ def name_parts(host: str) -> list[str]:
 
 
 def typo_of(host: str, brand: str) -> bool:
-    """이름 조각이 브랜드와 한두 글자 다른지(예: web-trzerardware → trezor). 브랜드로 시작하는 조각은 오타가 아니다
+    """이름 조각이 브랜드와 한두 글자 다른지(예: trzer → trezor). 브랜드로 시작하는 조각은 오타가 아니다
     (그쪽은 lookalike_brand·brand_name_domain 이 본다)."""
     n = len(brand)
     if n < TYPO_MIN_BRAND:
@@ -182,7 +182,7 @@ def claimed_brands(title: str) -> list[str]:
 def brand_typo_claim(titles: list[str], page_urls: list[str]) -> tuple[str, str] | None:
     """화면 제목이 브랜드를 내세우는데 그 화면의 도메인 이름이 브랜드와 한두 글자 다르면 (브랜드, 호스트).
     titles·page_urls 는 화면마다 같은 순서다(제목은 페이지 값, 주소는 브라우저 값). 짝이 맞지 않으면 적용하지 않는다.
-    관찰: 오늘의 실사이트 세트(OpenPhish 2026-10-16) Trezor 사칭 GitBook web-trzerardware.gitbook.io('Trezor® Hardware')."""
+    관찰: 오늘의 실사이트 세트(OpenPhish 2026-10-16) Trezor 사칭 GitBook(하위 도메인 이름이 trezor 의 오타, 제목 'Trezor® Hardware')."""
     if len(titles) != len(page_urls):
         return None
     for title, url in zip(titles, page_urls, strict=True):

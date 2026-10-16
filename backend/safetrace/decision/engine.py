@@ -231,7 +231,7 @@ class Engine:
                 override={"reason": "brand_name_domain", "brand": named[0], "destination": named[1],
                           "original": {"threat": res.choice, "probability": prob, "provider": provider}},
             )
-        # 화면 제목이 브랜드를 내세우는데 (1) 그 화면의 도메인이 브랜드 이름의 오타이거나(web-trzerardware → trezor)
+        # 화면 제목이 브랜드를 내세우는데 (1) 그 화면의 도메인이 브랜드 이름의 오타이거나(trzer → trezor)
         # (2) 공용 호스팅에 로그인 요소와 함께 있다(Steam 사칭 netlify). 모델은 꾸민 화면을 정상으로 보기 쉽다
         claim = brand_typo_claim(req.page_titles, req.page_urls)
         reason = "brand_typo_domain"

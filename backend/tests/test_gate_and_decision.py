@@ -830,11 +830,11 @@ def test_brand_name_domain_goes_to_review(choice, url, final, text, reason):
 
 # ── 화면이 브랜드를 내세우는데 도메인이 오타이거나 공용 호스팅의 로그인 화면 ─────────
 @pytest.mark.parametrize("host, brand, expected", [
-    ("web-trzerardware.gitbook.io", "trezor", True),   # OpenPhish 2026-10-16('Trezor® Hardware')
-    ("rodlox.cu.ma", "roblox", True),
-    ("learn-ledgeer-cloud-sso.typedream.app", "ledger", True),
-    ("faceebook.blogspot.com", "facebook", True),
-    ("ledgernload.gitbook.io", "ledger", False),       # 브랜드로 시작: 오타가 아니다(다른 규칙)
+    ("web-trzerwallet.gitbook.io", "trezor", True),    # OpenPhish 2026-10-16 Trezor 사칭 GitBook 과 같은 모양(가짜 이름)
+    ("rodlox-sample.example", "roblox", True),
+    ("sample-ledgeer.typedream.app", "ledger", True),
+    ("faceebook-sample.blogspot.com", "facebook", True),
+    ("ledgersample.gitbook.io", "ledger", False),      # 브랜드로 시작: 오타가 아니다(다른 규칙)
     ("www.roblox.com", "roblox", False),
     ("store.stream.example", "steam", False),          # 짧은 브랜드는 오타로 보지 않는다(steam·stream)
     ("gitbook.io", "trezor", False),                    # 공용 호스팅 이름 자체는 운영자의 이름이 아니다
@@ -847,7 +847,7 @@ def test_typo_of(host, brand, expected):
 
 @pytest.mark.parametrize("screens, reason", [
     # Codex 2회차: 제목에 다른 브랜드를 덧붙여도(첫 일치 하나만 보면 'naver' 로 오타 비교를 건너뛴다) 모든 브랜드로 본다
-    ([("https://web-trzerardware.gitbook.io/", "Trezor Hardware | Naver", [])], "brand_typo_domain"),
+    ([("https://web-trzerwallet.gitbook.io/", "Trezor Hardware | Naver", [])], "brand_typo_domain"),
     ([("https://x.netlify.app/", "Naver | Steam Community", ["login:a:Sign in"])], "brand_login_shared_hosting"),
 ])
 def test_extra_brand_cannot_suppress_claim(screens, reason):
@@ -859,8 +859,8 @@ def test_brand_claim_needs_per_screen_pairs():
     # 화면별 제목·금지 요소가 화면 주소와 짝이 맞지 않으면(출처를 모르면) 적용하지 않는다
     from safetrace.decision.brands import brand_login_on_shared_hosting, brand_typo_claim
 
-    url = "https://web-trzerardware.gitbook.io/"
-    assert brand_typo_claim(["Trezor Hardware"], [url]) == ("trezor", "web-trzerardware.gitbook.io")
+    url = "https://web-trzerwallet.gitbook.io/"
+    assert brand_typo_claim(["Trezor Hardware"], [url]) == ("trezor", "web-trzerwallet.gitbook.io")
     assert brand_typo_claim([], [url]) is None
     assert brand_typo_claim(["x", "Trezor Hardware"], [url]) is None
     assert brand_login_on_shared_hosting(["Steam Community"], ["https://x.netlify.app/"], [["login:a:Sign in"]])
@@ -873,19 +873,19 @@ def _claim_req(url, title, forbidden=()):
 
 @pytest.mark.parametrize("choice, url, title, forbidden, reason", [
     # 오타 도메인 + 제목이 그 브랜드: 내용이 있어도 담당자 검토
-    ("benign", "https://web-trzerardware.gitbook.io/", "Trezor® @@Hardware® | us", ["input:text:Search"], "brand_typo_domain"),
+    ("benign", "https://web-trzerwallet.gitbook.io/", "Trezor® @@Hardware® | us", ["input:text:Search"], "brand_typo_domain"),
     # 공용 호스팅 + 제목이 브랜드 + 로그인 요소
-    ("benign", "https://ornate-alfajores-8b7080.netlify.app/", "Steam Community :: Sienna", ["login:a:Sign in"],
+    ("benign", "https://sample-site-1234.netlify.app/", "Steam Community :: Sienna", ["login:a:Sign in"],
      "brand_login_shared_hosting"),
     ("unknown", "https://x.github.io/", "Facebook", ["input:password:Password"], "brand_login_shared_hosting"),
     # 로그인 요소가 없으면(블로그·문서, 가계부 앱의 낱말 'Ledger') 그대로
     ("benign", "https://x.github.io/", "Steam deck tips", [], None),
-    ("benign", "https://srimanth999.github.io/", "Dirham Rupee Ledger", [], None),
+    ("benign", "https://budget-sample.github.io/", "Dirham Rupee Ledger", [], None),
     # 제목이 브랜드를 내세우지 않으면 그대로
     ("benign", "https://my-app.vercel.app/", "My Budget App", ["login:button:Sign in"], None),
     # 공식 도메인이거나 모델이 위협 유형을 골랐으면 그대로
     ("benign", "https://steamcommunity.com/login", "Steam Community :: Sign In", ["input:password:Password"], None),
-    ("phishing", "https://ornate-alfajores-8b7080.netlify.app/", "Steam Community", ["login:a:Sign in"], None),
+    ("phishing", "https://sample-site-1234.netlify.app/", "Steam Community", ["login:a:Sign in"], None),
 ])
 def test_brand_claim_goes_to_review(choice, url, title, forbidden, reason):
     p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
@@ -913,7 +913,7 @@ def _screens_req(screens):
 
 @pytest.mark.parametrize("screens, reason", [
     # Codex F1: 제목에 ' | 주소 | ' 를 넣어도 제목 전체로 본다(요약 글을 잘라 제목을 짐작하지 않는다)
-    ([("https://web-trzerardware.gitbook.io/", "Guide | https://web-trzerardware.gitbook.io/ | Trezor Hardware", [])],
+    ([("https://web-trzerwallet.gitbook.io/", "Guide | https://web-trzerwallet.gitbook.io/ | Trezor Hardware", [])],
      "brand_typo_domain"),
     # Codex F2: 로그인 요소는 다른 화면의 것이면 근거가 아니다(같은 화면의 제목과 로그인 요소만 묶는다)
     ([("https://example.com/login", "Community", ["input:password:Password"]),
