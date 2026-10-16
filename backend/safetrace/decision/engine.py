@@ -7,7 +7,7 @@ import re
 from urllib.parse import urlsplit
 
 from ..config import Settings
-from .brands import lookalike_destination, lookalike_in, official_redirect, on_domain, thin_content
+from .brands import brand_name_in, lookalike_destination, lookalike_in, official_redirect, on_domain, thin_content
 from .official import all_official
 from .providers import JevProvider, Provider, ProviderError, RuleProvider, state_for_jev, timed
 from .schema import (
@@ -209,6 +209,16 @@ class Engine:
                 choice=Threat.PHISHING.value, probabilities={Threat.PHISHING.value: 1.0}, confidence=None,
                 model=res.model, provider="brand_lookalike", latency_ms=ms, threat=Threat.PHISHING, hold=True,
                 override={"reason": "brand_lookalike", "brand": brand,
+                          "original": {"threat": res.choice, "probability": prob, "provider": provider}},
+            )
+        named = brand_name_in(req.url, req.final_url)
+        if named and res.choice in (Threat.UNKNOWN, Threat.BENIGN):
+            # 등록 도메인 이름이 브랜드 이름 그대로인데 공식 도메인이 아니다(roblox.et·roblox.com.mu, 최상위 도메인만 바꿈):
+            # 진짜처럼 꾸민 화면에 내용이 있어 모델이 정상으로 보기 쉽다(Roblox 사칭 프로필 화면 3/3). 담당자 검토로 보낸다
+            return ThreatDecision(
+                choice=Threat.PHISHING.value, probabilities={Threat.PHISHING.value: 1.0}, confidence=None,
+                model=res.model, provider="brand_name_domain", latency_ms=ms, threat=Threat.PHISHING, hold=True,
+                override={"reason": "brand_name_domain", "brand": named[0], "destination": named[1],
                           "original": {"threat": res.choice, "probability": prob, "provider": provider}},
             )
         return ThreatDecision(

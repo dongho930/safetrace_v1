@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from urllib.parse import unquote, urlsplit
 
-from ..decision.brands import OFFICIAL_BRAND_DOMAINS, SHARED_HOSTING, on_domain
+from ..decision.brands import OFFICIAL_BRAND_DOMAINS, SHARED_HOSTING, on_domain, site_of
 from ..decision.official import official_operator
 from ..decision.providers import _THREAT_SIGNS
 from ..netguard import BlockedURL, parse_url
@@ -23,7 +23,6 @@ from .gate import ElementInfo, classify_forbidden
 
 MAX_FOUND = 20  # 기록하는 후보 수(사건당)
 TEXT_MAX = 80  # 후보에 남기는 앵커 글자
-_SECOND_LEVEL = {"co", "or", "go", "ne", "ac", "re", "pe", "com", "net", "org", "gov", "edu"}
 
 # 흔한 대형 사이트: 위협 사이트가 꾸밈으로 링크하는 정상 서비스. 하위 조사 3곳을 여기에 쓰지 않는다.
 # 연관 후보로 나와 하위 조사 결과가 정상이었던 것만 둔다(평가 기록 var/eval/20261014-2355_related_baseline·
@@ -48,17 +47,6 @@ _CLUES: tuple[str, ...] = tuple(w.lower() for ws in _THREAT_SIGNS.values() for w
 _FRAG_SPLIT = re.compile(r"[.\-_]")
 _COMMON_FRAGS = frozenset({"shop", "online", "login", "live", "support", "docs", "static", "website", "server",
                            "page", "security", "secure", "auth", "sign", "mail", "service"})
-
-
-def site_of(host: str) -> str:
-    """등록 도메인을 어림한다(예: news.naver.com → naver.com, www.epost.go.kr → epost.go.kr)."""
-    h = host.lower().rstrip(".")
-    if h.replace(".", "").isdigit() or ":" in h:  # IP 주소는 그대로
-        return h
-    labels = [x for x in h.split(".") if x]
-    if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in _SECOND_LEVEL:
-        return ".".join(labels[-3:])
-    return ".".join(labels[-2:])
 
 
 def _official(host: str) -> bool:
