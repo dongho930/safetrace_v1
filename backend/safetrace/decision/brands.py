@@ -52,6 +52,18 @@ SHARED_HOSTING: tuple[str, ...] = (
 )
 THIN_TEXT_CHARS = 200  # 조사한 화면 글자를 다 합쳐 이보다 적으면 '내용이 거의 없음'
 _TOKEN = re.compile(r"[.\-_]")
+_SECOND_LEVEL = {"co", "or", "go", "ne", "ac", "re", "pe", "com", "net", "org", "gov", "edu"}
+
+
+def site_of(host: str) -> str:
+    """등록 도메인을 어림한다(예: news.naver.com → naver.com, www.epost.go.kr → epost.go.kr, roblox.com.mu → roblox.com.mu)."""
+    h = host.lower().rstrip(".")
+    if h.replace(".", "").isdigit() or ":" in h:  # IP 주소는 그대로
+        return h
+    labels = [x for x in h.split(".") if x]
+    if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in _SECOND_LEVEL:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
 
 
 def on_domain(host: str, domains: tuple[str, ...]) -> bool:
@@ -88,6 +100,29 @@ def lookalike_brand(host: str) -> str | None:
         return None  # 어느 브랜드든 공식 도메인이면 사칭이 아니다
     tokens = [t for t in _TOKEN.split(h) if t]
     return next((b for b in OFFICIAL_BRAND_DOMAINS if any(t.startswith(b) for t in tokens)), None)
+
+
+def brand_name_domain(host: str) -> str | None:
+    """등록 도메인 이름이 브랜드 이름 그대로인데 공식 도메인이 아니면 그 브랜드(최상위 도메인만 바꾼 사칭).
+
+    관찰: 오늘의 실사이트 세트(OpenPhish 2026-10-14~16)의 Roblox 사칭 www.roblox.et·roblox.com.mu·roblox.rw 등,
+    KISA 2024 자료의 telegram.lgbt·www.toss.club. 이름 조각이 브랜드로 '시작'하는 것(mi-telegram.com)보다 좁다.
+    공용 호스팅(하위 도메인은 누구나 만들고 facebook.github.io 같은 공식 프로젝트도 있다)·단축 서비스는 보지 않는다."""
+    h = host.lower().rstrip(".")
+    if not h or official_brand(h) or on_domain(h, SHARED_HOSTING) or on_domain(h, SHORTENER_HOSTS):
+        return None
+    name = site_of(h).split(".")[0]  # IP 주소는 첫 숫자라 브랜드가 아니다
+    return name if name in OFFICIAL_BRAND_DOMAINS else None
+
+
+def brand_name_in(url: str, final_url: str) -> tuple[str, str] | None:
+    """신고된 주소나 최종 주소가 브랜드 이름 그대로의 다른 도메인이면 (브랜드, 호스트)."""
+    for u in (url, final_url):
+        h = (urlsplit(u).hostname or "").lower().rstrip(".")
+        brand = brand_name_domain(h)
+        if brand:
+            return brand, h
+    return None
 
 
 def lookalike_in(url: str, final_url: str) -> str | None:

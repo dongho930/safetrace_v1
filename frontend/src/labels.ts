@@ -22,6 +22,7 @@ export function overrideLabel(o: Threat["override"]): string {
     return dest
       ? `열리지 않은 목적지가 브랜드 사칭 도메인(${brand} · ${dest}) → 담당자 검토`
       : `브랜드 사칭 도메인(${brand}), 화면 내용 없음 → 담당자 검토`;
+  if (o.reason === "brand_name_domain") return `브랜드 이름 그대로의 다른 도메인(${brand} · ${dest}) → 담당자 검토`;
   if (o.reason === "official_betting_domain") {
     const ops = strs(o.operators);
     return `공식 사행사업자 도메인${ops.length ? ` · ${ops.join(", ")}` : ""}`;

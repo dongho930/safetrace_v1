@@ -764,6 +764,70 @@ def test_brand_lookalike_with_no_content_goes_to_review(choice, text, overridden
         assert d.threat == choice and d.override is None
 
 
+# ── 브랜드 이름 그대로의 다른 도메인(최상위 도메인만 바꾼 사칭) ─────────────
+@pytest.mark.parametrize("host, brand", [
+    ("www.roblox.et", "roblox"),          # OpenPhish 2026-10-16(단축 주소의 목적지, 가짜 프로필 화면)
+    ("roblox.com.mu", "roblox"),
+    ("users.roblox.rw", "roblox"),
+    ("telegram.lgbt", "telegram"),        # KISA 2024
+    ("www.toss.club", "toss"),
+    ("www.roblox.com", None),             # 공식
+    ("naver.me", None),
+    ("robloxr.com.es", None),             # 이름이 브랜드로 '시작'만 함: 내용 없을 때의 규칙(brand_lookalike)만
+    ("mi-telegram.com", None),
+    ("facebook.github.io", None),         # 공용 호스팅의 하위 도메인은 누구나 만든다(공식 프로젝트도 있다)
+    ("roblox.pages.dev", None),
+    ("127.0.0.1", None),
+])
+def test_brand_name_domain(host, brand):
+    from safetrace.decision.brands import brand_name_domain
+
+    assert brand_name_domain(host) == brand
+
+
+def test_brand_name_domain_not_on_normal_sites():
+    # 정상 사이트 목록·평가 세트 정상 사이트는 하나도 걸리지 않는다
+    import csv
+    from pathlib import Path
+    from urllib.parse import urlsplit
+
+    from safetrace.decision.brands import brand_name_domain
+
+    data = Path(__file__).resolve().parents[2] / "data"
+    hosts = [urlsplit(r[2]).hostname for r in csv.reader((data / "eval_set.csv").open(encoding="utf-8"))
+             if r and r[0] == "normal"]
+    for f in ("normal_sites.csv", "normal_sites_checked.csv"):
+        hosts += [urlsplit(r["url"]).hostname for r in csv.DictReader((data / f).open(encoding="utf-8-sig"))]
+    assert len(hosts) > 100
+    assert [h for h in hosts if h and brand_name_domain(h)] == []
+
+
+@pytest.mark.parametrize("choice, url, final, text, reason", [
+    # 진짜처럼 꾸며 내용이 있는 화면: 모델이 정상으로 봐도 담당자 검토로
+    ("benign", "https://to.lk/abc", "https://www.roblox.et/users/1/profile", "Roblox 프로필 친구 팔로워 " * 30,
+     "brand_name_domain"),
+    # 판단 불가이거나 내용이 없으면 앞선 규칙(이름이 브랜드로 시작하는 도메인)이 먼저다
+    ("unknown", "https://www.roblox.et/", "https://www.roblox.et/", "Roblox " * 60, "brand_lookalike"),
+    ("benign", "https://www.roblox.et/", "https://www.roblox.et/", "OK", "brand_lookalike"),
+    ("phishing", "https://www.roblox.et/", "https://www.roblox.et/", "Roblox " * 60, None),  # 모델이 고른 위협 유형은 그대로
+    ("benign", "https://www.roblox.com/", "https://www.roblox.com/", "Roblox " * 60, None),
+])
+def test_brand_name_domain_goes_to_review(choice, url, final, text, reason):
+    p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
+                    transport=_jev_transport({"type": "choice", "choice": choice,
+                                              "probabilities": {choice: 0.85, "phishing": 0.15}}))
+    req = ThreatRequest(url=url, final_url=final, redirect_count=1, domains=[url.split("/")[2], final.split("/")[2]],
+                        pages=[f"[0] Roblox | {final} | {text}"])
+    d = Engine([p], 0.45, 0.6).decide_threat(req)
+    if reason is None:
+        assert d.threat == choice and d.override is None
+    else:
+        assert d.threat == "phishing" and d.hold and d.override["reason"] == reason
+        assert d.override["brand"] == "roblox" and d.override["original"]["threat"] == choice
+    if reason == "brand_name_domain":
+        assert d.override["destination"] == "www.roblox.et"
+
+
 def test_official_brand_domain_with_no_content_kept():
     p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
                     transport=_jev_transport({"type": "choice", "choice": "benign",
