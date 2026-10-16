@@ -828,6 +828,82 @@ def test_brand_name_domain_goes_to_review(choice, url, final, text, reason):
         assert d.override["destination"] == "www.roblox.et"
 
 
+# ── 화면이 브랜드를 내세우는데 도메인이 오타이거나 공용 호스팅의 로그인 화면 ─────────
+@pytest.mark.parametrize("host, brand, expected", [
+    ("web-trzerardware.gitbook.io", "trezor", True),   # OpenPhish 2026-10-16('Trezor® Hardware')
+    ("rodlox.cu.ma", "roblox", True),
+    ("learn-ledgeer-cloud-sso.typedream.app", "ledger", True),
+    ("faceebook.blogspot.com", "facebook", True),
+    ("ledgernload.gitbook.io", "ledger", False),       # 브랜드로 시작: 오타가 아니다(다른 규칙)
+    ("www.roblox.com", "roblox", False),
+    ("store.stream.example", "steam", False),          # 짧은 브랜드는 오타로 보지 않는다(steam·stream)
+    ("gitbook.io", "trezor", False),                    # 공용 호스팅 이름 자체는 운영자의 이름이 아니다
+])
+def test_typo_of(host, brand, expected):
+    from safetrace.decision.brands import typo_of
+
+    assert typo_of(host, brand) is expected
+
+
+def test_page_titles_cut_at_the_browser_url():
+    from safetrace.decision.brands import page_titles
+
+    pages = ["[0] Trezor® Hardware | us | https://a.gitbook.io/ | 본문 | 더", "[1]  | https://b.example/ | "]
+    assert page_titles(pages, ["https://a.gitbook.io/", "https://b.example/"]) == [
+        ("a.gitbook.io", "Trezor® Hardware | us"), ("b.example", "")]
+
+
+def _claim_req(url, title, forbidden=()):
+    return ThreatRequest(url=url, final_url=url, redirect_count=0, domains=[url.split("/")[2]],
+                         pages=[f"[0] {title} | {url} | " + "본문 " * 80], page_urls=[url], forbidden_seen=list(forbidden))
+
+
+@pytest.mark.parametrize("choice, url, title, forbidden, reason", [
+    # 오타 도메인 + 제목이 그 브랜드: 내용이 있어도 담당자 검토
+    ("benign", "https://web-trzerardware.gitbook.io/", "Trezor® @@Hardware® | us", ["input:text:Search"], "brand_typo_domain"),
+    # 공용 호스팅 + 제목이 브랜드 + 로그인 요소
+    ("benign", "https://ornate-alfajores-8b7080.netlify.app/", "Steam Community :: Sienna", ["login:a:Sign in"],
+     "brand_login_shared_hosting"),
+    ("unknown", "https://x.github.io/", "Facebook", ["input:password:Password"], "brand_login_shared_hosting"),
+    # 로그인 요소가 없으면(블로그·문서, 가계부 앱의 낱말 'Ledger') 그대로
+    ("benign", "https://x.github.io/", "Steam deck tips", [], None),
+    ("benign", "https://srimanth999.github.io/", "Dirham Rupee Ledger", [], None),
+    # 제목이 브랜드를 내세우지 않으면 그대로
+    ("benign", "https://my-app.vercel.app/", "My Budget App", ["login:button:Sign in"], None),
+    # 공식 도메인이거나 모델이 위협 유형을 골랐으면 그대로
+    ("benign", "https://steamcommunity.com/login", "Steam Community :: Sign In", ["input:password:Password"], None),
+    ("phishing", "https://ornate-alfajores-8b7080.netlify.app/", "Steam Community", ["login:a:Sign in"], None),
+])
+def test_brand_claim_goes_to_review(choice, url, title, forbidden, reason):
+    p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
+                    transport=_jev_transport({"type": "choice", "choice": choice,
+                                              "probabilities": {choice: 0.55, "phishing": 0.45}}))
+    d = Engine([p], 0.45, 0.6).decide_threat(_claim_req(url, title, forbidden))
+    if reason is None:
+        assert d.threat == choice and d.override is None
+    else:
+        assert d.threat == "phishing" and d.hold and d.override["reason"] == reason
+        assert d.override["destination"] == url.split("/")[2] and d.override["original"]["threat"] == choice
+
+
+def test_brand_claim_not_on_normal_sites():
+    # 정상 사이트 목록(브라우저로 본 제목)과 평가 세트 정상 사이트는 걸리지 않는다
+    import csv
+    from pathlib import Path
+
+    from safetrace.decision.brands import brand_login_on_shared_hosting, brand_typo_claim
+
+    data = Path(__file__).resolve().parents[2] / "data"
+    rows = [r for r in csv.DictReader((data / "normal_sites_browser_checked.csv").open(encoding="utf-8-sig"))
+            if r.get("browser_title")]
+    assert rows
+    for r in rows:
+        u = r.get("browser_final_url") or r["url"]
+        pages, urls = [f"[0] {r['browser_title']} | {u} | x"], [u]
+        assert brand_typo_claim(pages, urls) is None, u
+        assert brand_login_on_shared_hosting(pages, urls, ["login:a:로그인", "input:password:비밀번호"]) is None, u
+
+
 def test_official_brand_domain_with_no_content_kept():
     p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
                     transport=_jev_transport({"type": "choice", "choice": "benign",

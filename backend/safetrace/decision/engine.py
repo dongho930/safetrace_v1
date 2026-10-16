@@ -7,7 +7,16 @@ import re
 from urllib.parse import urlsplit
 
 from ..config import Settings
-from .brands import brand_name_in, lookalike_destination, lookalike_in, official_redirect, on_domain, thin_content
+from .brands import (
+    brand_login_on_shared_hosting,
+    brand_name_in,
+    brand_typo_claim,
+    lookalike_destination,
+    lookalike_in,
+    official_redirect,
+    on_domain,
+    thin_content,
+)
 from .official import all_official
 from .providers import JevProvider, Provider, ProviderError, RuleProvider, state_for_jev, timed
 from .schema import (
@@ -219,6 +228,20 @@ class Engine:
                 choice=Threat.PHISHING.value, probabilities={Threat.PHISHING.value: 1.0}, confidence=None,
                 model=res.model, provider="brand_name_domain", latency_ms=ms, threat=Threat.PHISHING, hold=True,
                 override={"reason": "brand_name_domain", "brand": named[0], "destination": named[1],
+                          "original": {"threat": res.choice, "probability": prob, "provider": provider}},
+            )
+        # 화면 제목이 브랜드를 내세우는데 (1) 그 화면의 도메인이 브랜드 이름의 오타이거나(web-trzerardware → trezor)
+        # (2) 공용 호스팅에 로그인 요소와 함께 있다(Steam 사칭 netlify). 모델은 꾸민 화면을 정상으로 보기 쉽다
+        claim = brand_typo_claim(req.pages, req.page_urls)
+        reason = "brand_typo_domain"
+        if not claim:
+            claim = brand_login_on_shared_hosting(req.pages, req.page_urls, req.forbidden_seen)
+            reason = "brand_login_shared_hosting"
+        if claim and res.choice in (Threat.UNKNOWN, Threat.BENIGN):
+            return ThreatDecision(
+                choice=Threat.PHISHING.value, probabilities={Threat.PHISHING.value: 1.0}, confidence=None,
+                model=res.model, provider=reason, latency_ms=ms, threat=Threat.PHISHING, hold=True,
+                override={"reason": reason, "brand": claim[0], "destination": claim[1],
                           "original": {"threat": res.choice, "probability": prob, "provider": provider}},
             )
         return ThreatDecision(

@@ -124,6 +124,10 @@ def _override_ko(o: object) -> str | None:
                else f"브랜드 사칭 도메인({brand}), 화면 내용 없음 → 담당자 검토")
     elif reason == "brand_name_domain":
         out = f"브랜드 이름 그대로의 다른 도메인({brand} · {dest}) → 담당자 검토"
+    elif reason == "brand_typo_domain":
+        out = f"브랜드를 내세운 화면인데 도메인이 그 이름의 오타({brand} · {dest}) → 담당자 검토"
+    elif reason == "brand_login_shared_hosting":
+        out = f"공용 호스팅에서 브랜드를 내세운 로그인 화면({brand} · {dest}) → 담당자 검토"
     elif reason == "official_betting_domain":
         ops = o.get("operators")
         ops = [x for x in ops if isinstance(x, str)] if isinstance(ops, list) else []
