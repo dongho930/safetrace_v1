@@ -348,6 +348,8 @@ class AgentRun:
         self.live = live  # LiveSink(선택): 콘솔 실시간 화면
         self.page_summaries: list[str] = []
         self.page_urls: list[str] = []  # page_summaries 와 같은 순서로 그 화면을 연 주소(브라우저 값)
+        self.page_titles: list[str] = []  # 같은 순서로 그 화면의 제목과 금지 요소(코드 규칙이 한 화면 근거끼리만 묶게)
+        self.page_forbidden: list[list[str]] = []
         self.summary_evidence: list[int] = []
         self._shot = 0
         self._host_ok: dict[str, tuple[float, bool, str]] = {}
@@ -1017,6 +1019,8 @@ class AgentRun:
             self.result.forbidden_seen.extend(x for x in obs.forbidden if x not in self.result.forbidden_seen)
             self.page_summaries.append(f"[{step}] {obs.state.title} | {obs.state.url} | {obs.state.text[:600]}")
             self.page_urls.append(obs.state.url[:2048])
+            self.page_titles.append(obs.state.title[:200])
+            self.page_forbidden.append([x[:300] for x in obs.forbidden[:50]])
             self.summary_evidence.append(obs.evidence_seq)
             self.emit({"type": "step", "step": step, "url": obs.state.url})
             loop = self.budget.observe_state(obs.state_key)
@@ -1207,7 +1211,8 @@ class AgentRun:
         req = ThreatRequest(
             url=self.start_url[:2048], final_url=(self.result.final_url or self.start_url)[:2048],
             redirect_count=max(0, len(self.result.nav_chain) - 1), domains=domains[:30],
-            pages=self.page_summaries[-20:], page_urls=self.page_urls[-20:], forbidden_seen=self.result.forbidden_seen[:50],
+            pages=self.page_summaries[-20:], page_urls=self.page_urls[-20:], page_titles=self.page_titles[-20:],
+            page_forbidden=self.page_forbidden[-20:], forbidden_seen=self.result.forbidden_seen[:50],
             blocked_destinations=self.result.blocked_destinations[:20],
         )
         try:

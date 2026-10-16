@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
+from typing import Annotated
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -115,6 +116,11 @@ class ThreatRequest(BaseModel):
     pages: list[str] = Field(max_length=20)  # 단계별 마스킹된 텍스트 요약
     # pages 와 같은 순서로 그 화면을 연 주소(브라우저 값, 페이지가 정할 수 없음). 코드 규칙만 쓰고 Jev 로는 보내지 않는다
     page_urls: list[str] = Field(default_factory=list, max_length=20)
+    # 같은 순서로 그 화면의 제목과 그 화면에서 본 금지 요소. 코드 규칙이 한 화면의 근거끼리만 묶으려고 따로 받는다
+    # (요약 글에서 제목을 잘라 내면 제목에 ' | 주소 | ' 를 넣어 속일 수 있고, forbidden_seen 은 모든 화면을 합친 것이다)
+    page_titles: list[Annotated[str, Field(max_length=200)]] = Field(default_factory=list, max_length=20)
+    page_forbidden: list[Annotated[list[Annotated[str, Field(max_length=300)]], Field(max_length=50)]] = Field(
+        default_factory=list, max_length=20)
     forbidden_seen: list[str] = Field(default_factory=list, max_length=50)  # 예: "input:password", "download:apk"
     blocked_destinations: list[BlockedDestination] = Field(default_factory=list, max_length=20)
 

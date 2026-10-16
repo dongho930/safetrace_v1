@@ -168,16 +168,8 @@ def typo_of(host: str, brand: str) -> bool:
     return False
 
 
-def page_titles(pages: list[str], page_urls: list[str]) -> list[tuple[str, str]]:
-    """(화면을 연 호스트, 제목). pages 는 '[단계] 제목 | 주소 | 글', page_urls 는 같은 순서의 브라우저 주소다.
-    제목은 그 주소 앞까지로 자른다(제목에 ' | ' 가 들어 있어도)."""
-    out = []
-    for summary, url in zip(pages, page_urls, strict=False):
-        body = summary.split("] ", 1)[1] if summary.startswith("[") and "] " in summary else summary
-        i = body.find(f" | {url} |")
-        title = body[:i] if i >= 0 else body.split(" | ", 1)[0]
-        out.append(((urlsplit(url).hostname or "").lower().rstrip("."), title))
-    return out
+def _host(url: str) -> str:
+    return (urlsplit(url).hostname or "").lower().rstrip(".")
 
 
 def claimed_brand(title: str) -> str | None:
@@ -186,26 +178,32 @@ def claimed_brand(title: str) -> str | None:
     return next((b for b in OFFICIAL_BRAND_DOMAINS if re.search(rf"(?<![a-z0-9]){b}(?![a-z0-9])", t)), None)
 
 
-def brand_typo_claim(pages: list[str], page_urls: list[str]) -> tuple[str, str] | None:
+def brand_typo_claim(titles: list[str], page_urls: list[str]) -> tuple[str, str] | None:
     """화면 제목이 브랜드를 내세우는데 그 화면의 도메인 이름이 브랜드와 한두 글자 다르면 (브랜드, 호스트).
+    titles·page_urls 는 화면마다 같은 순서다(제목은 페이지 값, 주소는 브라우저 값). 짝이 맞지 않으면 적용하지 않는다.
     관찰: 오늘의 실사이트 세트(OpenPhish 2026-10-16) Trezor 사칭 GitBook web-trzerardware.gitbook.io('Trezor® Hardware')."""
-    for host, title in page_titles(pages, page_urls):
-        brand = claimed_brand(title)
+    if len(titles) != len(page_urls):
+        return None
+    for title, url in zip(titles, page_urls, strict=True):
+        brand, host = claimed_brand(title), _host(url)
         if brand and not official_brand(host) and typo_of(host, brand):
             return brand, host
     return None
 
 
-def brand_login_on_shared_hosting(pages: list[str], page_urls: list[str],
-                                  forbidden_seen: list[str]) -> tuple[str, str] | None:
-    """공용 호스팅(누구나 하위 도메인을 만든다)의 화면이 제목으로 브랜드를 내세우고 로그인 요소(로그인 버튼·링크, 비밀번호
-    입력)가 있으면 (브랜드, 호스트). 브랜드의 공식 서비스는 공용 호스팅에 로그인 화면을 두지 않는다.
+def brand_login_on_shared_hosting(titles: list[str], page_urls: list[str],
+                                  page_forbidden: list[list[str]]) -> tuple[str, str] | None:
+    """공용 호스팅(누구나 하위 도메인을 만든다)의 화면이 제목으로 브랜드를 내세우고 그 화면에 로그인 요소(로그인 버튼·링크,
+    비밀번호 입력)가 있으면 (브랜드, 호스트). 브랜드의 공식 서비스는 공용 호스팅에 로그인 화면을 두지 않는다.
     관찰: 오늘의 실사이트 세트(OpenPhish 2026-10-16) Steam 사칭 netlify('Steam Community', 'Sign in').
-    forbidden_seen 은 에이전트가 화면에서 본 금지 요소(사유:종류:글자)다."""
-    if not any(x.startswith(("login:", "input:password")) for x in forbidden_seen):
+    page_forbidden 은 화면마다 에이전트가 본 금지 요소(사유:종류:글자)다. 다른 화면의 로그인 요소는 근거로 쓰지 않고,
+    화면별 짝이 맞지 않으면 적용하지 않는다."""
+    if not len(titles) == len(page_urls) == len(page_forbidden):
         return None
-    for host, title in page_titles(pages, page_urls):
-        brand = claimed_brand(title)
+    for title, url, seen in zip(titles, page_urls, page_forbidden, strict=True):
+        if not any(x.startswith(("login:", "input:password")) for x in seen):
+            continue
+        brand, host = claimed_brand(title), _host(url)
         if brand and on_domain(host, SHARED_HOSTING) and not official_brand(host):
             return brand, host
     return None

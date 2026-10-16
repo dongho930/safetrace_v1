@@ -157,7 +157,8 @@ class Engine:
 
     def decide_threat(self, req: ThreatRequest) -> ThreatDecision:
         opts = {t.value: THREAT_CRITERIA[t] for t in Threat}
-        state = req.model_dump(exclude={"page_urls"})  # 화면별 주소는 코드 규칙만 쓴다(Jev 입력은 그대로)
+        # 화면별 주소·제목·금지 요소는 코드 규칙만 쓴다(Jev 입력은 그대로)
+        state = req.model_dump(exclude={"page_urls", "page_titles", "page_forbidden"})
         provider, res, ms = self._choose(state, THREAT_QUESTION, opts)
         prob = res.probabilities.get(res.choice, 0.0)
         if res.choice == Threat.ILLEGAL_GAMBLING:
@@ -232,10 +233,10 @@ class Engine:
             )
         # 화면 제목이 브랜드를 내세우는데 (1) 그 화면의 도메인이 브랜드 이름의 오타이거나(web-trzerardware → trezor)
         # (2) 공용 호스팅에 로그인 요소와 함께 있다(Steam 사칭 netlify). 모델은 꾸민 화면을 정상으로 보기 쉽다
-        claim = brand_typo_claim(req.pages, req.page_urls)
+        claim = brand_typo_claim(req.page_titles, req.page_urls)
         reason = "brand_typo_domain"
         if not claim:
-            claim = brand_login_on_shared_hosting(req.pages, req.page_urls, req.forbidden_seen)
+            claim = brand_login_on_shared_hosting(req.page_titles, req.page_urls, req.page_forbidden)
             reason = "brand_login_shared_hosting"
         if claim and res.choice in (Threat.UNKNOWN, Threat.BENIGN):
             return ThreatDecision(

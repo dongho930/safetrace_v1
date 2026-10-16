@@ -845,17 +845,20 @@ def test_typo_of(host, brand, expected):
     assert typo_of(host, brand) is expected
 
 
-def test_page_titles_cut_at_the_browser_url():
-    from safetrace.decision.brands import page_titles
+def test_brand_claim_needs_per_screen_pairs():
+    # 화면별 제목·금지 요소가 화면 주소와 짝이 맞지 않으면(출처를 모르면) 적용하지 않는다
+    from safetrace.decision.brands import brand_login_on_shared_hosting, brand_typo_claim
 
-    pages = ["[0] Trezor® Hardware | us | https://a.gitbook.io/ | 본문 | 더", "[1]  | https://b.example/ | "]
-    assert page_titles(pages, ["https://a.gitbook.io/", "https://b.example/"]) == [
-        ("a.gitbook.io", "Trezor® Hardware | us"), ("b.example", "")]
+    url = "https://web-trzerardware.gitbook.io/"
+    assert brand_typo_claim(["Trezor Hardware"], [url]) == ("trezor", "web-trzerardware.gitbook.io")
+    assert brand_typo_claim([], [url]) is None
+    assert brand_typo_claim(["x", "Trezor Hardware"], [url]) is None
+    assert brand_login_on_shared_hosting(["Steam Community"], ["https://x.netlify.app/"], [["login:a:Sign in"]])
+    assert brand_login_on_shared_hosting(["Steam Community"], ["https://x.netlify.app/"], []) is None
 
 
 def _claim_req(url, title, forbidden=()):
-    return ThreatRequest(url=url, final_url=url, redirect_count=0, domains=[url.split("/")[2]],
-                         pages=[f"[0] {title} | {url} | " + "본문 " * 80], page_urls=[url], forbidden_seen=list(forbidden))
+    return _screens_req([(url, title, list(forbidden))])
 
 
 @pytest.mark.parametrize("choice, url, title, forbidden, reason", [
@@ -886,6 +889,42 @@ def test_brand_claim_goes_to_review(choice, url, title, forbidden, reason):
         assert d.override["destination"] == url.split("/")[2] and d.override["original"]["threat"] == choice
 
 
+def _screens_req(screens):
+    """에이전트(loop._judge)처럼 만든 판단 요청. screens 는 (주소, 제목, 그 화면의 금지 요소)."""
+    seen = []
+    for _, _, f in screens:
+        seen.extend(x for x in f if x not in seen)
+    return ThreatRequest(
+        url=screens[0][0], final_url=screens[-1][0], redirect_count=0, domains=[s[0].split("/")[2] for s in screens],
+        pages=[f"[{i}] {t} | {u} | " + "본문 " * 80 for i, (u, t, _) in enumerate(screens)],
+        page_urls=[u for u, _, _ in screens], page_titles=[t for _, t, _ in screens],
+        page_forbidden=[list(f) for _, _, f in screens], forbidden_seen=seen)
+
+
+@pytest.mark.parametrize("screens, reason", [
+    # Codex F1: 제목에 ' | 주소 | ' 를 넣어도 제목 전체로 본다(요약 글을 잘라 제목을 짐작하지 않는다)
+    ([("https://web-trzerardware.gitbook.io/", "Guide | https://web-trzerardware.gitbook.io/ | Trezor Hardware", [])],
+     "brand_typo_domain"),
+    # Codex F2: 로그인 요소는 다른 화면의 것이면 근거가 아니다(같은 화면의 제목과 로그인 요소만 묶는다)
+    ([("https://example.com/login", "Community", ["input:password:Password"]),
+      ("https://x.github.io/", "Steam deck tips", [])], None),
+    ([("https://example.com/", "Home", []),
+      ("https://x.github.io/", "Steam Community", ["login:a:Sign in"])], "brand_login_shared_hosting"),
+])
+def test_brand_claim_uses_each_screen(screens, reason):
+    sent = []
+    p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
+                    transport=_jev_transport({"type": "choice", "choice": "benign",
+                                              "probabilities": {"benign": 0.9, "phishing": 0.1}}, capture=sent))
+    d = Engine([p], 0.45, 0.6).decide_threat(_screens_req(screens))
+    for field in ("page_urls", "page_titles", "page_forbidden"):  # 화면별 값은 코드 규칙만 쓴다(Jev 입력은 그대로)
+        assert field not in json.dumps(sent[0])
+    if reason is None:
+        assert d.threat == "benign" and d.override is None
+    else:
+        assert d.threat == "phishing" and d.hold and d.override["reason"] == reason
+
+
 def test_brand_claim_not_on_normal_sites():
     # 정상 사이트 목록(브라우저로 본 제목)과 평가 세트 정상 사이트는 걸리지 않는다
     import csv
@@ -899,9 +938,8 @@ def test_brand_claim_not_on_normal_sites():
     assert rows
     for r in rows:
         u = r.get("browser_final_url") or r["url"]
-        pages, urls = [f"[0] {r['browser_title']} | {u} | x"], [u]
-        assert brand_typo_claim(pages, urls) is None, u
-        assert brand_login_on_shared_hosting(pages, urls, ["login:a:로그인", "input:password:비밀번호"]) is None, u
+        assert brand_typo_claim([r["browser_title"]], [u]) is None, u
+        assert brand_login_on_shared_hosting([r["browser_title"]], [u], [["login:a:로그인", "input:password:비밀번호"]]) is None, u
 
 
 def test_official_brand_domain_with_no_content_kept():
