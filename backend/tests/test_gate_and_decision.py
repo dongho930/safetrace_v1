@@ -845,6 +845,16 @@ def test_typo_of(host, brand, expected):
     assert typo_of(host, brand) is expected
 
 
+@pytest.mark.parametrize("screens, reason", [
+    # Codex 2회차: 제목에 다른 브랜드를 덧붙여도(첫 일치 하나만 보면 'naver' 로 오타 비교를 건너뛴다) 모든 브랜드로 본다
+    ([("https://web-trzerardware.gitbook.io/", "Trezor Hardware | Naver", [])], "brand_typo_domain"),
+    ([("https://x.netlify.app/", "Naver | Steam Community", ["login:a:Sign in"])], "brand_login_shared_hosting"),
+])
+def test_extra_brand_cannot_suppress_claim(screens, reason):
+    d = Engine([RuleProvider()], 0.45, 0.6).decide_threat(_screens_req(screens))
+    assert d.threat == "phishing" and d.hold and d.override["reason"] == reason
+
+
 def test_brand_claim_needs_per_screen_pairs():
     # 화면별 제목·금지 요소가 화면 주소와 짝이 맞지 않으면(출처를 모르면) 적용하지 않는다
     from safetrace.decision.brands import brand_login_on_shared_hosting, brand_typo_claim

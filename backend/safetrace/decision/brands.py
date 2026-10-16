@@ -172,10 +172,11 @@ def _host(url: str) -> str:
     return (urlsplit(url).hostname or "").lower().rstrip(".")
 
 
-def claimed_brand(title: str) -> str | None:
-    """제목이 내세우는 브랜드(영문 이름이 한 낱말로 들어 있음, 예: 'Steam Community', 'Trezor® Hardware')."""
+def claimed_brands(title: str) -> list[str]:
+    """제목이 내세우는 브랜드(영문 이름이 한 낱말로 들어 있음, 예: 'Steam Community', 'Trezor® Hardware').
+    모두 돌려준다: 하나만 고르면 제목에 다른 브랜드를 덧붙여('Trezor Hardware | Naver') 규칙을 피할 수 있다(Codex 지적)."""
     t = title.lower()
-    return next((b for b in OFFICIAL_BRAND_DOMAINS if re.search(rf"(?<![a-z0-9]){b}(?![a-z0-9])", t)), None)
+    return [b for b in OFFICIAL_BRAND_DOMAINS if re.search(rf"(?<![a-z0-9]){b}(?![a-z0-9])", t)]
 
 
 def brand_typo_claim(titles: list[str], page_urls: list[str]) -> tuple[str, str] | None:
@@ -185,9 +186,10 @@ def brand_typo_claim(titles: list[str], page_urls: list[str]) -> tuple[str, str]
     if len(titles) != len(page_urls):
         return None
     for title, url in zip(titles, page_urls, strict=True):
-        brand, host = claimed_brand(title), _host(url)
-        if brand and not official_brand(host) and typo_of(host, brand):
-            return brand, host
+        host = _host(url)
+        for brand in claimed_brands(title):
+            if not official_brand(host) and typo_of(host, brand):
+                return brand, host
     return None
 
 
@@ -203,9 +205,10 @@ def brand_login_on_shared_hosting(titles: list[str], page_urls: list[str],
     for title, url, seen in zip(titles, page_urls, page_forbidden, strict=True):
         if not any(x.startswith(("login:", "input:password")) for x in seen):
             continue
-        brand, host = claimed_brand(title), _host(url)
-        if brand and on_domain(host, SHARED_HOSTING) and not official_brand(host):
-            return brand, host
+        host = _host(url)
+        brands = claimed_brands(title)
+        if brands and on_domain(host, SHARED_HOSTING) and not official_brand(host):
+            return brands[0], host
     return None
 
 
