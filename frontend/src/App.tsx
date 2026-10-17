@@ -45,8 +45,8 @@ import {
   verifyCase,
 } from "./api";
 import {
-  buildOverlay, buildPath, buildReasons, buildScreens, clip, hostOrFile, hostPath, jpegSize, liveClick, locateSeg, recordingClicks, recordings, SCREEN_H, SCREEN_W,
-  segStarts, type ClickPoint, type Overlay, type Reason, type RecItem, type Screen, type Tone,
+  buildOverlay, buildPath, buildReasons, buildScreens, clip, hostOrFile, hostPath, jpegSize, liveClick, locateSeg, MAX_RECORDINGS, recordingClicks, recordings, SCREEN_H,
+  SCREEN_W, segStarts, type ClickPoint, type Overlay, type Reason, type RecItem, type Screen, type Tone,
 } from "./evidence";
 import { ACTION_LABEL, NET_CATEGORY_LABEL, overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
 
@@ -2301,12 +2301,13 @@ function RecordingPlayer({ caseId, recs, events }: { caseId: string; recs: RecIt
   // 받기: 한 줄로 차례대로(합계 상한을 지키고 앞 구간부터 준비되게). 지워지면(gen 증가) 받는 중이던 것은 버린다
   const store = useRef({ gen: 0, got: {} as Record<string, string | undefined>, queue: [] as string[], busy: false, used: 0 });
 
-  // 조사 중에는 녹화가 늘어난다: 새 파일만 줄에 넣는다
-  const files = recs.map((r) => r.file).join("\n");
+  // 조사 중에는 녹화가 늘어난다: 새 파일만 줄에 넣는다. 이름을 이어 붙였다 나누지 않고(이름 안의 구분자로 요청이 불어나지 않게)
+  // 받기 시도는 실패를 포함해 녹화 수 상한까지만
+  const files = JSON.stringify(recs.map((r) => r.file));
   useEffect(() => {
     const s = store.current;
-    for (const f of files.split("\n")) {
-      if (!f || f in s.got) continue;
+    for (const f of JSON.parse(files) as string[]) {
+      if (f in s.got || Object.keys(s.got).length >= MAX_RECORDINGS) continue;
       s.got[f] = undefined;
       s.queue.push(f);
     }
