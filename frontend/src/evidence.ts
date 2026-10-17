@@ -360,3 +360,23 @@ export function recordings(events: EvidenceEvent[]): RecItem[] {
   }
   return out.sort((a, b) => a.sub - b.sub);
 }
+
+// 녹화 이어 재생: 구간(녹화)마다 전체 막대에서의 시작 위치. 길이를 모르는 구간은 0
+export function segStarts(durs: number[]): number[] {
+  const out: number[] = [];
+  let s = 0;
+  for (const d of durs) {
+    out.push(s);
+    s += d;
+  }
+  return out;
+}
+// 전체 위치 g(초)가 몇 번째 구간의 몇 초인지. 길이 0 인 구간은 건너뛰고, 끝을 넘으면 마지막 구간의 끝
+export function locateSeg(durs: number[], g: number): { i: number; local: number } {
+  let s = 0;
+  for (let i = 0; i < durs.length; i++) {
+    if (g < s + durs[i] || i === durs.length - 1) return { i, local: Math.min(Math.max(0, g - s), durs[i]) };
+    s += durs[i];
+  }
+  return { i: 0, local: 0 };
+}
