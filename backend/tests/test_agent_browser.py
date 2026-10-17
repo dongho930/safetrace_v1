@@ -46,6 +46,9 @@ def test_gamble_reaches_hidden_deposit_screen(settings, testpages):
     urls = [urlsplit(r["data"]["url"]).path for r in chain if r["kind"] == "observe"]
     assert "/gamble/deposit.html" in urls, urls
     assert final["threat"]["threat"] == "illegal_gambling"
+    # 통과한 클릭은 클릭 표시용 상자·시각과 '누르려고 화면을 옮겼는지'를 남긴다
+    pts = [r["data"] for r in chain if r["kind"] == "gate" and r["data"].get("point")]
+    assert pts and all(isinstance(g["at"], float) and isinstance(g["scrolled"], bool) for g in pts), pts
     # 127.0.0.1 → localhost 로 넘어갔다. 둘 다 이미 조사한 사이트(시작·최종)라 연관 후보가 아니다
     fin = next(r["data"] for r in chain if r["kind"] == "finish")
     assert any(urlsplit(u).hostname == "localhost" for u in fin["nav_chain"])
@@ -1017,7 +1020,8 @@ def test_agent_capture_expands_scroll_locked_page(settings, testpages):
 @pytest.mark.parametrize("locked", [False, True])
 def test_click_point_is_where_the_button_is(locked):
     """클릭 표시 좌표: 창 아래쪽(y=2000) 버튼을 창 안으로 옮긴 뒤 잰 창 기준 상자 중심이 그 버튼 색이다.
-    스크롤이 잠긴 페이지(body 가 스크롤)도 같다. 표시 속성 형식이 아니면 재지 않는다."""
+    스크롤이 잠긴 페이지(body 가 스크롤)도 같다. 표시 속성 형식이 아니면 재지 않는다.
+    옮기느라 화면이 움직였는지도 돌려준다(녹화 재생의 커서가 화면이 옮겨진 뒤에 가게): 창 안의 버튼은 False."""
     import asyncio
     import io
 
@@ -1028,6 +1032,7 @@ def test_click_point_is_where_the_button_is(locked):
 
     style = "html{height:100%;overflow:hidden}body{height:100%;overflow-y:auto}" if locked else ""
     html = (f"<style>body{{margin:0}}{style}</style><div style='height:2600px;position:relative'>"
+            "<button data-t='e6' style='position:absolute;left:100px;top:100px;width:80px;height:30px'>보기</button>"
             "<button data-t='e7' style='position:absolute;left:500px;top:2000px;width:160px;height:50px;border:0;"
             "background:#00c000;color:transparent'>신청</button></div>")
     run = AgentRun.__new__(AgentRun)
@@ -1038,14 +1043,17 @@ def test_click_point_is_where_the_button_is(locked):
             b = await p.chromium.launch()
             page = await b.new_page(viewport={"width": 1280, "height": 800})
             await page.set_content(html)
-            pt = await run._click_point(page, "e7")
+            near = await run._click_point(page, "e6")
+            pt, moved = await run._click_point(page, "e7")
             bad = await run._click_point(page, "e7']")
             png = await page.screenshot()
             await b.close()
-            return pt, bad, png
+            return near, pt, moved, bad, png
 
-    pt, bad, png = asyncio.run(go())
-    assert bad is None and pt is not None
+    near, pt, moved, bad, png = asyncio.run(go())
+    assert near == ([100, 100, 80, 30], False), near
+    assert moved is True
+    assert bad == (None, False) and pt is not None
     x, y, w, h = pt
     assert 0 <= y and y + h <= 800 and (w, h) == (160, 50), pt
     r, g, bl = Image.open(io.BytesIO(png)).convert("RGB").getpixel((x + w // 2, y + h // 2))

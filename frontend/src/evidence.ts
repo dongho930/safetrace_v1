@@ -319,7 +319,8 @@ export function liveClick(text: string): ClickPoint | null {
     return null;
   }
 }
-export type RecClick = ClickPoint & { t: number };
+// scrolled: 누르려고 요소를 창 안으로 옮기느라 화면이 움직였다(에이전트 기록). 예전 기록에는 없어 false
+export type RecClick = ClickPoint & { t: number; scrolled: boolean };
 // 녹화 위 클릭: 게이트 기록의 클릭 시각(at) - 녹화 0초 시각(t0) = 영상 시간(초). 둘 다 에이전트 쪽 같은 시계(epoch 초)
 export function recordingClicks(events: EvidenceEvent[], rec: EvidenceEvent | undefined): RecClick[] {
   const t0 = rec?.data.t0;
@@ -332,10 +333,32 @@ export function recordingClicks(events: EvidenceEvent[], rec: EvidenceEvent | un
     const at = e.data.at;
     if (!p || typeof at !== "number" || !Number.isFinite(at)) continue;
     const t = at - t0;
-    if (t >= 0 && t < 3600) out.push({ ...p, t });
+    if (t >= 0 && t < 3600) out.push({ ...p, t, scrolled: e.data.scrolled === true });
     if (out.length >= 200) break;
   }
   return out.sort((a, b) => a.t - b.t);
+}
+
+// 클릭 표시의 움직임. 커서(화살표)가 대상 버튼으로 미끄러져 간 뒤 누른 표시(대상 상자·물결)를 한다.
+// 이동 시간은 거리에 따라 0.12~0.3초(창 폭을 가로지르면 0.3초), 처음 나타날 때는 그 자리에서 0.15초 동안 서서히
+export const CURSOR_IN = 0.15;
+export function cursorTravel(from: ClickPoint | null, to: ClickPoint): number {
+  if (!from) return CURSOR_IN;
+  const d = Math.hypot(from.x + from.w / 2 - (to.x + to.w / 2), from.y + from.h / 2 - (to.y + to.h / 2));
+  return Math.min(0.3, Math.max(0.12, 0.1 + (d / SCREEN_W) * 0.2));
+}
+// 녹화 재생 위 커서: 클릭 시각을 미리 아니까 0.6초 전에 출발해 다가가 누른다. 다만 누르려고 화면을 옮긴 클릭은
+// 화면이 옮겨진 뒤(클릭 시각)에 출발해 도착하면 누른 표시를 한다 — 미리 가면 옮기기 전 화면의 엉뚱한 곳을 가리킨다.
+// t: 영상 시각. 돌려주는 값: 지금 커서가 가 있는(가는) 클릭 번호, 이동 시간, 누른 표시를 시작할 영상 시각
+export const CURSOR_LEAD = 0.6;
+export type RecCursor = { k: number; travel: number; hitAt: number };
+export function recCursor(clicks: RecClick[], t: number): RecCursor | null {
+  let k = -1;
+  for (let i = 0; i < clicks.length; i++) if (t >= (clicks[i].scrolled ? clicks[i].t : clicks[i].t - CURSOR_LEAD)) k = i;
+  if (k < 0) return null;
+  const c = clicks[k];
+  const travel = cursorTravel(k > 0 ? clicks[k - 1] : null, c);
+  return { k, travel, hitAt: c.scrolled ? c.t + travel : c.t };
 }
 
 // 조사 녹화 목록: 원래 주소(sub 없음)와 연관 후보 하위 조사(sub 1~)마다 하나씩. 실시간 화면은 하위 조사까지 이어지므로

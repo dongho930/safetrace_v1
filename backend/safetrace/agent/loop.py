@@ -753,19 +753,25 @@ class AgentRun:
         except (PWError, PWTimeout):
             pass
 
-    async def _click_point(self, page: Page, eid: str) -> list[int] | None:
+    async def _click_point(self, page: Page, eid: str) -> tuple[list[int] | None, bool]:
         """누를 요소를 창 안으로 옮기고(Playwright 클릭도 누르기 전에 하는 일) 창 기준 상자 [x, y, 폭, 높이]를 잰다.
         콘솔이 실시간 화면·녹화 재생 위에 클릭 표시를 그리는 데 쓴다(녹화 파일은 그대로). 상자는 페이지 JS 가 아니라
         브라우저 프로토콜로 잰다(measure_rects 와 같음). 못 재거나 창 밖이면 None — 클릭은 그대로 한다.
-        게이트 검사 전에 부른다. 스크롤 뒤 화면 두 장을 기다려 페이지의 스크롤 처리(바꿔치기 포함)가 검사 전에 끝나게 한다."""
+        게이트 검사 전에 부른다. 스크롤 뒤 화면 두 장을 기다려 페이지의 스크롤 처리(바꿔치기 포함)가 검사 전에 끝나게 한다.
+        돌려주는 값: (상자, 옮기느라 요소가 움직였는지). 움직였으면 녹화 재생의 커서는 화면이 옮겨진 뒤에 버튼으로 간다
+        (미리 가면 옮기기 전 화면의 엉뚱한 곳을 가리킨다). 옮기기 전 위치를 못 재면 움직인 것으로 본다."""
         vp = page.viewport_size
         if not _EID.fullmatch(eid) or not vp:
-            return None
+            return None, False
         loc = page.locator(f"[{self.attr}='{eid}']").first
+        try:
+            before = await loc.bounding_box(timeout=_BOX_TIMEOUT_MS)
+        except (PWError, PWTimeout):
+            before = None
         try:
             await loc.scroll_into_view_if_needed(timeout=2000)
         except (PWError, PWTimeout):
-            return None
+            return None, False
         try:  # 스크롤 이벤트는 다음 화면에 전달된다: 그 처리가 끝난 뒤 재고 검사한다(응답하지 않는 페이지는 1초까지만)
             await asyncio.wait_for(page.evaluate(_TWO_FRAMES_JS), 1.0)
         except (PWError, asyncio.TimeoutError):
@@ -773,14 +779,15 @@ class AgentRun:
         try:
             bb = await loc.bounding_box(timeout=_BOX_TIMEOUT_MS)
         except (PWError, PWTimeout):
-            return None
+            return None, False
         if not bb:
-            return None
+            return None, False
+        moved = not before or abs(before["x"] - bb["x"]) > 1 or abs(before["y"] - bb["y"]) > 1
         x0, y0 = max(0.0, bb["x"]), max(0.0, bb["y"])
         x1, y1 = min(float(vp["width"]), bb["x"] + bb["width"]), min(float(vp["height"]), bb["y"] + bb["height"])
         if x1 - x0 < 1 or y1 - y0 < 1:
-            return None
-        return [round(x0), round(y0), max(1, round(x1 - x0)), max(1, round(y1 - y0))]
+            return None, False
+        return [round(x0), round(y0), max(1, round(x1 - x0)), max(1, round(y1 - y0))], moved
 
     async def _click(self, ctx: BrowserContext, page: Page, eid: str) -> tuple[Page, str]:
         """클릭하고 (현재 페이지, 결과)를 돌려준다. 결과: ok | failed | no_effect"""
@@ -1078,7 +1085,7 @@ class AgentRun:
             if decision.action == ActionKind.CLICK:
                 # 클릭 표시 좌표는 게이트 검사 전에 잰다: 누르려고 창 안으로 옮기는 스크롤에 페이지가 반응해 요소를 바꿔도
                 # (결제 버튼으로 바꿔치기) 검사가 스크롤 뒤의 요소를 본다(Codex 지적: 검사 뒤에 스크롤하면 바뀐 요소를 눌렀다)
-                point = await self._click_point(page, decision.element_id or "")
+                point, scrolled = await self._click_point(page, decision.element_id or "")
                 cur = await self._read_element(page, decision.element_id or "")
                 gate = self.gate.check_click(offered, decision.element_id, obs.infos.get(decision.element_id or ""), cur)
                 point = point if gate.allowed else None
@@ -1086,8 +1093,10 @@ class AgentRun:
                     self.live.click(point)  # 콘솔 실시간 화면의 클릭 표시(영상과 같은 통로라 누르기 직전 화면에 맞춰 보인다)
                 self._record("gate", {"step": step, "action": "click", "element": decision.element_id,
                                       "allowed": gate.allowed, "reason": gate.reason,
-                                      # 누르기 직전 창 기준 상자와 시각(녹화 t0 와 같은 시계, epoch 초): 콘솔 클릭 표시용
-                                      **({"point": point, "at": round(time.time(), 3)} if point else {})})
+                                      # 누르기 직전 창 기준 상자와 시각(녹화 t0 와 같은 시계, epoch 초), 누르려고 화면을
+                                      # 옮겼는지: 콘솔 클릭 표시용
+                                      **({"point": point, "at": round(time.time(), 3), "scrolled": scrolled}
+                                         if point else {})})
                 if not gate.allowed:
                     if gate.reason.startswith("ssrf:") and cur is not None:
                         self._note_blocked_destination(cur.href, gate.reason)  # 링크 목적지를 열 수 없어 누르지 않음
