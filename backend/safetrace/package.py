@@ -59,7 +59,7 @@ _SCHEMA: dict[str, dict[str, object]] = {
     "observe": {"title": _STR, "candidates": [_DICT], "forbidden": [_STR], "has_popup": _BOOL, "boxes": _DICT,
                 "text_excerpt": _STR, "text_sha256": _STR, "capture": _STR, "links_seen": _INT},
     "decision": {"choice": _STR, "probability": _PROB, "probabilities": _DICT, "provider": _STR, "model": _STR},
-    "gate": {"action": _STR, "element": _STR, "allowed": _BOOL, "point": [_INT], "at": _NUM},
+    "gate": {"action": _STR, "element": _STR, "allowed": _BOOL, "point": [_INT], "at": _NUM, "scrolled": _BOOL},
     "action": {"action": _STR, "element": _STR, "outcome": _STR, "result_url": _STR},
     "finish": {"nav_chain": [_STR], "final_url": _STR, "capture": _STR},
     "threat": {"threat": _STR, "probability": _PROB, "probabilities": _DICT, "hold": _BOOL, "override": _DICT,

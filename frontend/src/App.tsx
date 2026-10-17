@@ -45,7 +45,7 @@ import {
   verifyCase,
 } from "./api";
 import {
-  buildOverlay, buildPath, buildReasons, buildScreens, clip, hostOrFile, hostPath, jpegSize, liveClick, locateSeg, MAX_RECORDINGS, recordingClicks, recordings, SCREEN_H,
+  buildOverlay, buildPath, buildReasons, buildScreens, clip, CURSOR_IN, cursorTravel, hostOrFile, hostPath, jpegSize, liveClick, locateSeg, MAX_RECORDINGS, recCursor, recordingClicks, recordings, SCREEN_H,
   SCREEN_W, segStarts, type ClickPoint, type Overlay, type Reason, type RecItem, type Screen, type Tone,
 } from "./evidence";
 import { ACTION_LABEL, NET_CATEGORY_LABEL, overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
@@ -742,9 +742,10 @@ function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) 
   }, [c.id]);
 
   const { steps, shot, act } = view;
-  // 클릭 표시: 영상과 같은 통로로 와서 같은 재생 버퍼를 거친다(누르기 직전 화면에 맞춰 보인다). n 이 바뀔 때 물결
-  const [click, setClick] = useState<{ p: ClickPoint; n: number } | null>(null);
-  const onClick = useCallback((p: ClickPoint) => setClick((c) => ({ p, n: (c?.n ?? 0) + 1 })), []);
+  // 클릭 표시: 영상과 같은 통로로 와서 같은 재생 버퍼를 거친다(누르기 직전 화면에 맞춰 보인다). n 이 바뀔 때 물결.
+  // 다음 클릭을 미리 알 수 없으니 메시지가 온 뒤 커서가 앞 클릭 자리에서 이동하고, 도착하면 누른 표시를 한다
+  const [click, setClick] = useState<{ p: ClickPoint; travel: number; n: number } | null>(null);
+  const onClick = useCallback((p: ClickPoint) => setClick((c) => ({ p, travel: cursorTravel(c?.p ?? null, p), n: (c?.n ?? 0) + 1 })), []);
   const still = shot ? <LiveScreen caseId={c.id} name={shot} /> : <span className="small">첫 화면을 기다리는 중…</span>;
   return (
     <>
@@ -763,7 +764,7 @@ function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) 
       </div>
       <div className="monitor-screen screen-body">
         {!ended && !videoOff ? <LiveVideo caseId={c.id} onFps={setFps} onEnd={() => setVideoOff(true)} onClick={onClick} fallback={still} /> : still}
-        {click && !ended && !videoOff && <ClickMark p={click.p} hitKey={click.n} align="top" />}
+        {click && !ended && !videoOff && <ClickMark p={click.p} hitKey={click.n} align="top" travel={click.travel} hitDelay={click.travel} />}
         <span className="monitor-meta">
           {fps > 0 && !videoOff ? `${fps}fps · ` : ""}
           {String(steps).padStart(2, "0")}/{Math.max(MAX_STEPS, steps)}
@@ -2464,11 +2465,12 @@ function RecordingPlayer({ caseId, recs, events }: { caseId: string; recs: RecIt
   };
 
   const msg = fail[recs[ci].file] ?? (urls[recs[ci].file] ? "" : "불러오는 중…");
-  // 커서 위치: 0.6초 안에 누를 클릭(없으면 마지막으로 누른 곳). 물결은 누른 뒤 0.7초 동안
+  // 커서: 곧 누를 클릭으로 미리 가거나(화면을 옮긴 클릭은 옮긴 뒤에) 마지막으로 누른 곳. 누른 표시는 0.7초 동안.
+  // 이동 시간은 영상 시간이라 재생 속도로 나눈다
   const cl = clicks[ci] ?? [];
-  let k = -1;
-  for (let j = 0; j < cl.length; j++) if (local >= cl[j].t - 0.6) k = j;
-  const mark = k >= 0 ? cl[k] : null;
+  const cursor = recCursor(cl, local);
+  const mark = cursor ? cl[cursor.k] : null;
+  const hitKey = cursor && local >= cursor.hitAt && local <= cursor.hitAt + 0.7 ? cursor.k : null;
   return (
     <div className="rec-player" ref={wrap}>
       {n > 1 && (
@@ -2509,7 +2511,7 @@ function RecordingPlayer({ caseId, recs, events }: { caseId: string; recs: RecIt
         ))}
         {msg && <span className="small rec-msg">{msg}</span>}
         {n > 1 && <span className="rec-seg-label">{segName(ci)}</span>}
-        {mark && <ClickMark p={mark} hitKey={local >= mark.t && local <= mark.t + 0.7 ? k : null} align="middle" />}
+        {mark && cursor && <ClickMark p={mark} hitKey={hitKey} align="middle" travel={cursor.travel / rate} />}
       </div>
       <div className="rec-ctl">
         <button type="button" className="btn btn-ghost btn-sm rec-btn rec-play" aria-label={playing ? "일시정지" : "재생"} title={playing ? "일시정지" : "재생"} onClick={toggle}>
@@ -2763,21 +2765,26 @@ function LiveVideo({
   );
 }
 
-// 클릭 표시: 화면(1280×800) 좌표의 버튼 위에 커서와 클릭 물결. 화면 크기에 맞춰 줄어드는 영상·캔버스와 같은 비율로 겹친다
-// (align: 실시간 캔버스는 위쪽 맞춤, 녹화 영상은 가운데 맞춤). 커서는 앞 클릭 자리에서 미끄러져 오고, hitKey 가 바뀔 때 물결이 다시 퍼진다.
-function ClickMark({ p, hitKey, align }: { p: ClickPoint; hitKey: number | null; align: "top" | "middle" }) {
+// 클릭 표시: 화면(1280×800) 좌표의 버튼 위에 커서와 누른 표시. 화면 크기에 맞춰 줄어드는 영상·캔버스와 같은 비율로 겹친다
+// (align: 실시간 캔버스는 위쪽 맞춤, 녹화 영상은 가운데 맞춤). 커서는 앞 클릭 자리에서 travel 초 동안 미끄러져 오고(처음엔
+// 그 자리에서 서서히), 누른 표시(대상 상자·물결)는 커서와 따로 대상 버튼에 고정해 hitDelay 초 뒤에 보인다 — 커서와 한 묶음이면
+// 이동하는 동안 상자·물결이 커서를 따라 미끄러졌다. hitKey 가 바뀔 때 누른 표시가 다시 나온다
+function ClickMark({ p, hitKey, align, travel, hitDelay = 0 }: { p: ClickPoint; hitKey: number | null; align: "top" | "middle"; travel: number; hitDelay?: number }) {
   const cx = p.x + p.w / 2;
   const cy = p.y + p.h / 2;
+  const delay = { animationDelay: `${hitDelay}s` };
   return (
     <svg className="click-layer" viewBox={`0 0 ${SCREEN_W} ${SCREEN_H}`} preserveAspectRatio={align === "top" ? "xMidYMin meet" : "xMidYMid meet"} aria-hidden="true">
-      <g className="click-cursor" style={{ transform: `translate(${cx}px, ${cy}px)` }}>
-        {hitKey !== null && (
-          <g key={hitKey} className="click-hit">
+      {hitKey !== null && (
+        <g transform={`translate(${cx} ${cy})`}>
+          <g key={hitKey} className="click-hit" style={delay}>
             <rect className="click-target" x={-p.w / 2 - 4} y={-p.h / 2 - 4} width={p.w + 8} height={p.h + 8} rx="6" />
-            <circle className="click-ripple" r="30" />
+            <circle className="click-ripple" r="30" style={delay} />
           </g>
-        )}
-        <path className="click-arrow" d="M0 0 L0 30 L8 22 L14 35 L20 32 L14 20 L25 20 Z" />
+        </g>
+      )}
+      <g className="click-cursor" style={{ transform: `translate(${cx}px, ${cy}px)`, transitionDuration: `${travel}s` }}>
+        <path className="click-arrow" style={{ animationDuration: `${CURSOR_IN}s` }} d="M0 0 L0 30 L8 22 L14 35 L20 32 L14 20 L25 20 Z" />
       </g>
     </svg>
   );
