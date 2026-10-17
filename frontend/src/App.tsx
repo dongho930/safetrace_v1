@@ -746,6 +746,9 @@ function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) 
   // 다음 클릭을 미리 알 수 없으니 메시지가 온 뒤 커서가 앞 클릭 자리에서 이동하고, 도착하면 누른 표시를 한다
   const [click, setClick] = useState<{ p: ClickPoint; travel: number; n: number } | null>(null);
   const onClick = useCallback((p: ClickPoint) => setClick((c) => ({ p, travel: cursorTravel(c?.p ?? null, p), n: (c?.n ?? 0) + 1 })), []);
+  // 연관 사이트 하위 조사는 새 브라우저에서 다른 사이트를 연다: 앞 조사에서 누른 자리의 커서를 지우고, 그 조사의 첫 클릭 때
+  // 그 자리에서 다시 나타낸다(지우지 않으면 클릭 없이 스크롤만 하는 하위 조사 내내 다른 사이트 위에 커서가 멈춰 있었다)
+  useEffect(() => setClick(null), [view.sub]);
   const still = shot ? <LiveScreen caseId={c.id} name={shot} /> : <span className="small">첫 화면을 기다리는 중…</span>;
   return (
     <>
