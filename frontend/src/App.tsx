@@ -164,6 +164,7 @@ export default function App() {
 
   const signOut = useCallback(() => {
     clearToken();
+    clearShotCache();
     setUser(null);
     setCases([]);
     setSelected(null);
@@ -722,6 +723,7 @@ function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) 
   const [ended, setEnded] = useState(false);
   const [fps, setFps] = useState(0);
   const [videoOff, setVideoOff] = useState(false);
+  const [videoShown, setVideoShown] = useState(false); // 실시간 영상이 한 번이라도 그려졌다(끝나도 마지막 프레임을 둔다)
   const endedRef = useRef(onEnded);
   endedRef.current = onEnded;
 
@@ -766,7 +768,12 @@ function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) 
         </button>
       </div>
       <div className="monitor-screen screen-body">
-        {!ended && !videoOff ? <LiveVideo caseId={c.id} onFps={setFps} onEnd={() => setVideoOff(true)} onClick={onClick} fallback={still} /> : still}
+        {/* 조사가 끝나도 영상이 그려졌으면 마지막 프레임을 둔다(정지 화면으로 바꾸면 다시 받는 동안 어두운 바탕이 보였다) */}
+        {!videoOff && (!ended || videoShown) ? (
+          <LiveVideo caseId={c.id} onFps={setFps} onEnd={() => setVideoOff(true)} onShown={() => setVideoShown(true)} onClick={onClick} fallback={still} />
+        ) : (
+          still
+        )}
         {click && !ended && !videoOff && <ClickMark p={click.p} hitKey={click.n} align="top" travel={click.travel} hitDelay={click.travel} />}
         <span className="monitor-meta">
           {fps > 0 && !videoOff ? `${fps}fps · ` : ""}
@@ -2589,26 +2596,31 @@ function LiveVideo({
   caseId,
   onFps,
   onEnd,
+  onShown,
   onClick,
   fallback,
 }: {
   caseId: string;
   onFps: (fps: number) => void;
   onEnd: () => void;
+  onShown?: () => void;
   onClick?: (p: ClickPoint) => void;
   fallback: React.ReactNode;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
+  // 캔버스는 첫 프레임을 실제로 그린 뒤에 보인다(그 전에는 fallback). 메시지가 오자마자 바꾸면 재생 버퍼(LIVE_DELAY_MS)와
+  // 디코드 동안 빈 캔버스(어두운 바탕)가 보여 깜빡였다
   const [hasFrame, setHasFrame] = useState(false);
-  const cb = useRef({ onFps, onEnd, onClick });
-  cb.current = { onFps, onEnd, onClick };
+  const cb = useRef({ onFps, onEnd, onShown, onClick });
+  cb.current = { onFps, onEnd, onShown, onClick };
 
   useEffect(() => {
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${location.host}/api/cases/${encodeURIComponent(caseId)}/live`);
     ws.binaryType = "blob";
     let alive = true;
-    let got = false;
+    let got = false; // 프레임 메시지를 받았다(없으면 8초 뒤 단계별 화면으로)
+    let painted = false; // 첫 프레임을 그렸다
     let count = 0;
     const reduce = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     // 받은 프레임(디코드 끝남)을 받은 시각과 함께 쌓아 두고, 화면 주기마다 꺼내 그린다
@@ -2687,6 +2699,11 @@ function LiveVideo({
       shownAt = f.at;
       lastPresent = now;
       paint(now);
+      if (!painted) {
+        painted = true;
+        setHasFrame(true);
+        cb.current.onShown?.();
+      }
     };
     const loop = (now: number) => {
       // 너무 밀렸으면(받은 지 오래된 프레임) 최근 것만 남긴다
@@ -2729,10 +2746,7 @@ function LiveVideo({
         return;
       }
       count += 1;
-      if (!got) {
-        got = true;
-        setHasFrame(true);
-      }
+      got = true;
       const gap = at - lastArrival;
       if (lastArrival && gap <= LIVE_GAP_MS) iv = Math.min(120, Math.max(16, iv * 0.85 + gap * 0.15));
       lastArrival = at;
@@ -2742,8 +2756,10 @@ function LiveVideo({
       }
       decode(blob, at);
     };
-    ws.onclose = () => {
-      if (alive) cb.current.onEnd();
+    // 조사가 끝나 서버가 정상으로 닫으면(1000) 마지막 프레임을 그대로 둔다(정지 화면으로 바꾸면 다시 받는 동안 깜빡였다).
+    // 프레임을 하나도 못 그렸거나 연결이 끊긴 것이면 단계별 화면으로
+    ws.onclose = (e) => {
+      if (alive && !(e.code === 1000 && painted)) cb.current.onEnd();
     };
     return () => {
       alive = false;
@@ -2817,13 +2833,45 @@ function Marks({ o }: { o: Overlay }) {
 // 실시간 화면: 새 화면을 다 받아 그릴 준비가 끝날 때까지 이전 화면을 그대로 두고(이중 버퍼) 교차 페이드로 바꾼다.
 // 표시 방식은 한 가지: 폭에 맞추되 창 한 화면(1280×800 비율)이 칸 높이에 들어가게, 더 길면 세로 스크롤.
 type Frame = { url: string; name: string; w: number; h: number };
+// 받은 화면 사진(줄인 미리보기) 기억: 화면 요소가 새로 만들어져도(조사 중 화면 → 근거 화면 탭, 조사 끝) 같은 사진은 다시 받지 않고
+// 그 자리에서 바로 보인다. 다시 받는 동안 어두운 바탕이 보였다가 서서히 나타나 깜빡였다. 최근 SHOT_CACHE_MAX 장까지 두고
+// 밀려난 것만 해제한다(이미 그려진 사진은 그대로 보인다). 로그아웃하면 비운다(다음 계정이 서버 권한 확인 없이 보지 않게)
+const SHOT_CACHE_MAX = 24;
+const shotCache = new Map<string, Frame>();
+const shotKey = (caseId: string, name: string) => `${caseId}/${name}`;
+function cachedShot(caseId: string, name: string): Frame | null {
+  const k = shotKey(caseId, name);
+  const f = shotCache.get(k);
+  if (!f) return null;
+  shotCache.delete(k); // 최근에 쓴 것을 뒤로
+  shotCache.set(k, f);
+  return f;
+}
+function rememberShot(caseId: string, f: Frame) {
+  const k = shotKey(caseId, f.name);
+  const old = shotCache.get(k);
+  if (old && old.url !== f.url) URL.revokeObjectURL(old.url);
+  shotCache.delete(k);
+  shotCache.set(k, f);
+  for (const [key, v] of shotCache) {
+    if (shotCache.size <= SHOT_CACHE_MAX) break;
+    shotCache.delete(key);
+    URL.revokeObjectURL(v.url);
+  }
+}
+function clearShotCache() {
+  for (const v of shotCache.values()) URL.revokeObjectURL(v.url);
+  shotCache.clear();
+}
 // strict: 증거 화면 보기용. 받거나 그리지 못하면 실패를 표시한다(실시간 화면은 이전 화면을 유지)
 function LiveScreen({ caseId, name, strict = false, overlay = null }: { caseId: string; name: string; strict?: boolean; overlay?: Overlay | null }) {
-  const [cur, setCur] = useState<Frame | null>(null);
+  // 기억해 둔 사진이면 처음부터 그 사진을 서서히 나타나지 않고 바로 보인다
+  const [cur, setCur] = useState<Frame | null>(() => cachedShot(caseId, name));
+  const [instant] = useState(() => cur?.url ?? "");
   const [failed, setFailed] = useState(false);
   const [prev, setPrev] = useState<Frame | null>(null);
   const [atEnd, setAtEnd] = useState(true);
-  const curRef = useRef<Frame | null>(null);
+  const curRef = useRef<Frame | null>(cur);
   const prevRef = useRef<Frame | null>(null);
   const box = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLDivElement>(null);
@@ -2838,6 +2886,19 @@ function LiveScreen({ caseId, name, strict = false, overlay = null }: { caseId: 
 
   useEffect(() => {
     let alive = true;
+    const show = (f: Frame) => {
+      if (curRef.current?.url === f.url) return;
+      prevRef.current = curRef.current;
+      curRef.current = f;
+      setPrev(prevRef.current);
+      setCur(f);
+      box.current?.scrollTo({ top: 0, behavior: "smooth" });
+    };
+    const hit = cachedShot(caseId, name);
+    if (hit) {
+      show(hit);
+      return;
+    }
     (async () => {
       let url = "";
       const img = new Image();
@@ -2850,16 +2911,10 @@ function LiveScreen({ caseId, name, strict = false, overlay = null }: { caseId: 
         if (strict && alive) setFailed(true);
         return; // 실시간 화면은 못 받으면 이전 화면 유지
       }
-      if (!alive) {
-        URL.revokeObjectURL(url);
-        return;
-      }
-      if (prevRef.current) URL.revokeObjectURL(prevRef.current.url);
-      prevRef.current = curRef.current;
-      curRef.current = { url, name, w: img.naturalWidth, h: img.naturalHeight };
-      setPrev(prevRef.current);
-      setCur(curRef.current);
-      box.current?.scrollTo({ top: 0, behavior: "smooth" });
+      // 사진(blob URL)은 기억 장소가 갖는다: 화면을 떠나도 해제하지 않고 다음에 바로 쓴다
+      const f = { url, name, w: img.naturalWidth, h: img.naturalHeight };
+      rememberShot(caseId, f);
+      if (alive) show(f);
     })();
     return () => {
       alive = false;
@@ -2880,25 +2935,17 @@ function LiveScreen({ caseId, name, strict = false, overlay = null }: { caseId: 
     }
   }, [cur?.name, focus?.x, focus?.y, focus?.h]);
 
-  // 교차 페이드가 끝나면 이전 화면을 치운다
+  // 교차 페이드가 끝나면 이전 화면을 치운다(사진 자체는 기억 장소가 갖고 있다가 밀려날 때 해제)
   useEffect(() => {
     if (!prev) return;
     const t = setTimeout(() => {
       if (prevRef.current === prev) {
-        URL.revokeObjectURL(prev.url);
         prevRef.current = null;
         setPrev(null);
       }
     }, 260);
     return () => clearTimeout(t);
   }, [prev]);
-
-  useEffect(
-    () => () => {
-      for (const f of [curRef.current, prevRef.current]) if (f) URL.revokeObjectURL(f.url);
-    },
-    [],
-  );
 
   const openOriginal = async () => {
     if (!cur) return;
@@ -2922,7 +2969,7 @@ function LiveScreen({ caseId, name, strict = false, overlay = null }: { caseId: 
         {/* 이전 화면은 불투명하게 아래에 두고 새 화면만 위에서 나타나게 한다(둘 다 반투명해지면 어두운 바탕이 비쳐 깜빡임) */}
         <div ref={frame} className="frame">
           {prev && <img key={prev.url} className="frame-img under" src={prev.url} alt="" aria-hidden="true" />}
-          <img key={cur.url} className="frame-img enter" src={cur.url} alt={`증거 화면 ${cur.name}`} onLoad={measure} />
+          <img key={cur.url} className={cur.url === instant ? "frame-img" : "frame-img enter"} src={cur.url} alt={`증거 화면 ${cur.name}`} onLoad={measure} />
           {marks && <Marks o={marks} />}
         </div>
         {!atEnd && <div className="more-hint" aria-hidden="true" />}
