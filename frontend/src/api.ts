@@ -276,6 +276,35 @@ export async function fileUrl(caseId: string, name: string, preview = false): Pr
   return URL.createObjectURL(await r.blob());
 }
 
+// 증거 파일을 maxBytes 까지만 받는다(넘으면 413). 여러 파일을 미리 받을 때 합계를 묶는 데 쓴다.
+// 크기 머리글을 먼저 보고, 없거나 틀려도 받은 만큼 세어 넘는 순간 끊는다
+export async function fileBlob(caseId: string, name: string, maxBytes: number): Promise<Blob> {
+  if (maxBytes <= 0) throw new ApiError(413, "파일이 너무 큼");
+  const r = await fetch(`/api/cases/${encodeURIComponent(caseId)}/files/${encodeURIComponent(name)}`, {
+    headers: { Authorization: `Bearer ${getToken()}` },
+  });
+  if (!r.ok) throw new ApiError(r.status, "파일을 불러오지 못함");
+  const len = Number(r.headers.get("Content-Length") ?? "");
+  if ((Number.isFinite(len) && len > maxBytes) || !r.body) {
+    await r.body?.cancel().catch(() => undefined);
+    throw new ApiError(413, "파일이 너무 큼");
+  }
+  const reader = r.body.getReader();
+  const parts: Uint8Array[] = [];
+  let n = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    n += value.byteLength;
+    if (n > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new ApiError(413, "파일이 너무 큼");
+    }
+    parts.push(value);
+  }
+  return new Blob(parts as BlobPart[], { type: r.headers.get("Content-Type") ?? "" });
+}
+
 // SSE: EventSource 는 헤더를 못 붙이므로 fetch 스트림을 직접 파싱한다
 export async function streamEvents(caseId: string, onEvent: (e: AgentEvent) => void, signal: AbortSignal) {
   const r = await fetch(`/api/cases/${encodeURIComponent(caseId)}/events`, {

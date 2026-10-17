@@ -341,13 +341,16 @@ export function recordingClicks(events: EvidenceEvent[], rec: EvidenceEvent | un
 // 조사 녹화 목록: 원래 주소(sub 없음)와 연관 후보 하위 조사(sub 1~)마다 하나씩. 실시간 화면은 하위 조사까지 이어지므로
 // 녹화도 모두 고를 수 있게 한다(예전엔 첫 녹화만 보여 후보 조사 부분이 콘솔에서 빠졌다). 주소는 같은 조사의 시작 기록에서
 export type RecItem = { ev: EvidenceEvent; file: string; sub: number; host: string; seconds: number | null };
+// 녹화 파일 이름: 서버의 증거 파일 이름 규칙(evidence._SAFE_NAME)과 같게. 워커가 보낸 값이라 줄바꿈 등으로 요청을 불리지 못하게
+export const MAX_RECORDINGS = 10;
+const REC_NAME = /^[a-z0-9_-]{1,64}\.webm$/;
 export function recordings(events: EvidenceEvent[]): RecItem[] {
   const out: RecItem[] = [];
   const seen = new Set<number>();
   for (const e of events) {
     if (e.kind !== "recording") continue;
     const sub = isSub(e) ? (e.data.sub as number) : 0;
-    const file = e.files.find((f) => f.endsWith(".webm"));
+    const file = e.files.find((f) => REC_NAME.test(f));
     if (!file || !Number.isInteger(sub) || sub < 0 || sub > 99 || seen.has(sub)) continue;
     seen.add(sub);
     const start = events.find((x) => x.kind === "start" && (sub ? x.data.sub === sub : !isSub(x)));
@@ -356,7 +359,27 @@ export function recordings(events: EvidenceEvent[]): RecItem[] {
       ev: e, file, sub, host: hostOrFile(str(start?.data.url, 300)),
       seconds: typeof d === "number" && Number.isFinite(d) && d >= 0 ? d : null,
     });
-    if (out.length >= 10) break;
+    if (out.length >= MAX_RECORDINGS) break;
   }
   return out.sort((a, b) => a.sub - b.sub);
+}
+
+// 녹화 이어 재생: 구간(녹화)마다 전체 막대에서의 시작 위치. 길이를 모르는 구간은 0
+export function segStarts(durs: number[]): number[] {
+  const out: number[] = [];
+  let s = 0;
+  for (const d of durs) {
+    out.push(s);
+    s += d;
+  }
+  return out;
+}
+// 전체 위치 g(초)가 몇 번째 구간의 몇 초인지. 길이 0 인 구간은 건너뛰고, 끝을 넘으면 마지막 구간의 끝
+export function locateSeg(durs: number[], g: number): { i: number; local: number } {
+  let s = 0;
+  for (let i = 0; i < durs.length; i++) {
+    if (g < s + durs[i] || i === durs.length - 1) return { i, local: Math.min(Math.max(0, g - s), durs[i]) };
+    s += durs[i];
+  }
+  return { i: 0, local: 0 };
 }

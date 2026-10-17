@@ -24,6 +24,7 @@ import {
   type RelatedGroup,
   dict,
   downloadExport,
+  fileBlob,
   fileUrl,
   getCase,
   getToken,
@@ -44,8 +45,8 @@ import {
   verifyCase,
 } from "./api";
 import {
-  buildOverlay, buildPath, buildReasons, buildScreens, clip, hostOrFile, hostPath, jpegSize, liveClick, recordingClicks, recordings, SCREEN_H, SCREEN_W,
-  type ClickPoint, type Overlay, type Reason, type RecClick, type Screen, type Tone,
+  buildOverlay, buildPath, buildReasons, buildScreens, clip, hostOrFile, hostPath, jpegSize, liveClick, locateSeg, MAX_RECORDINGS, recordingClicks, recordings, SCREEN_H,
+  SCREEN_W, segStarts, type ClickPoint, type Overlay, type Reason, type RecItem, type Screen, type Tone,
 } from "./evidence";
 import { ACTION_LABEL, NET_CATEGORY_LABEL, overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
 
@@ -1565,11 +1566,8 @@ function CaseTabs({
   onChanged: () => void;
 }) {
   const nCands = (c?.candidates ?? []).filter((x) => typeof x !== "string").length;
-  // 녹화: 원래 주소와 연관 후보 하위 조사마다 하나씩(고른 것은 사건이 바뀌면 원래 주소로)
+  // 녹화: 원래 주소와 연관 후보 하위 조사마다 하나씩. 한 재생 막대로 이어 재생한다(사건이 바뀌면 처음부터)
   const recs = useMemo(() => recordings(events), [events]);
-  const [recPick, setRecPick] = useState({ id, sub: 0 });
-  const rec = recs.find((r) => r.sub === (recPick.id === id ? recPick.sub : 0)) ?? recs[0];
-  const recClicks = useMemo(() => recordingClicks(events, rec?.ev), [events, rec]);
   const tabs: [TabId, string][] = [
     ["screens", `근거 화면 ${screens.length}`],
     ["path", "경로 지도"],
@@ -1625,18 +1623,13 @@ function CaseTabs({
         {tab === "related" && c && <RelatedTab id={id} c={c} events={events} related={related} canCreate={canCreate} onOpen={onOpen} onChanged={onChanged} />}
         {tab === "rec" && (
           <div className="floor">
-            {recs.length > 1 && (
-              <div className="rec-pick" role="group" aria-label="녹화 고르기">
-                {recs.map((r) => (
-                  <button key={r.sub} type="button" className="chip-filter" aria-pressed={r === rec} onClick={() => setRecPick({ id, sub: r.sub })}>
-                    {r.sub ? `후보 ${r.sub}` : "원래 주소"}
-                    {r.host && <> · <span className="mono">{clip(r.host, 40)}</span></>}
-                    {r.seconds !== null && ` · ${r.seconds.toFixed(1)}초`}
-                  </button>
-                ))}
+            {recs.length ? (
+              <RecordingPlayer key={id} caseId={id} recs={recs} events={events} />
+            ) : (
+              <div className="rec-box">
+                <span className="small">녹화 없음</span>
               </div>
             )}
-            <div className="rec-box">{rec ? <Recording key={rec.file} caseId={id} name={rec.file} clicks={recClicks} /> : <span className="small">녹화 없음</span>}</div>
           </div>
         )}
         {tab === "log" && (
@@ -2277,59 +2270,296 @@ function CaseFooterBar({
 
 // 증거 파일은 인증 헤더가 필요하므로 blob URL 로 보여 준다
 // 조사 녹화(영상)
-// 조사 녹화 재생. clicks: 영상 시간으로 바꾼 클릭(커서는 누르기 0.6초 전에 그 버튼으로 미끄러져 가고, 누르는 순간 물결)
-function Recording({ caseId, name, clicks = [] }: { caseId: string; name: string; clicks?: RecClick[] }) {
-  const [src, setSrc] = useState("");
-  const [t, setT] = useState(0);
-  const video = useRef<HTMLVideoElement>(null);
+// 조사 녹화 이어 재생: 원래 주소와 연관 후보 하위 조사의 녹화를 한 재생 막대로 잇는다. 파일은 증거라 합치지 않고 따로 둔 채
+// 구간마다 <video> 를 겹쳐 두고 구간 순서대로 미리 받아 두었다가, 한 구간이 끝나면 다음 구간을 위로 올려 이어 튼다(받는 동안
+// 끊기지 않게). 위쪽 버튼은 구간 바로가기. 클릭 표시는 구간마다 그 녹화의 0초 시각(t0)으로 맞춘다(커서는 누르기 0.6초 전에
+// 그 버튼으로 미끄러져 가고, 누르는 순간 물결)
+const REC_RATES = [0.5, 1, 1.5, 2];
+const REC_MAX_S = 3600; // 구간 길이 상한(기록·파일 값을 믿지 않는다)
+// 미리 받는 녹화 합계 상한: 예전에 한 번에 하나만 보던 녹화 파일의 상한(서버 FILE_MAX_BYTES)과 같게. 정상 녹화는 후보 5개여도
+// 200MB 남짓(5Mbps · 원래 주소 120초 + 후보 40초씩)이고, 뚫린 조사 컨테이너가 큰 녹화를 여러 개 만들어도 담당자 브라우저가 버틴다
+const REC_BUDGET = 512 << 20;
+const recLabel = (r: RecItem) => (r.sub ? `후보 ${r.sub}` : "원래 주소");
+const mmss = (s: number) => {
+  const t = Math.max(0, Math.floor(s));
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`;
+};
+function RecordingPlayer({ caseId, recs, events }: { caseId: string; recs: RecItem[]; events: EvidenceEvent[] }) {
+  // 파일마다 blob URL(없으면 받는 중)·받지 못한 까닭, 파일에서 읽은 길이(초)
+  const [urls, setUrls] = useState<Record<string, string>>({});
+  const [fail, setFail] = useState<Record<string, string>>({});
+  const [lens, setLens] = useState<Record<string, number>>({});
+  const [cur, setCur] = useState(0);
+  const [local, setLocal] = useState(0); // 지금 구간 안의 재생 위치(초)
+  const [playing, setPlaying] = useState(false);
+  const [rate, setRate] = useState(1);
+  const [full, setFull] = useState(false);
+  const vids = useRef<(HTMLVideoElement | null)[]>([]);
+  const wrap = useRef<HTMLDivElement>(null);
+  const curRef = useRef(0); // 이벤트 처리기에서 볼 지금 구간(상태는 다음 그리기 때 바뀐다)
+  const wantPlay = useRef(false); // 재생하려는 중(다음 구간을 아직 받는 중이어도)
+  // 받기: 한 줄로 차례대로(합계 상한을 지키고 앞 구간부터 준비되게). 지워지면(gen 증가) 받는 중이던 것은 버린다
+  const store = useRef({ gen: 0, got: {} as Record<string, string | undefined>, queue: [] as string[], busy: false, used: 0 });
+
+  // 조사 중에는 녹화가 늘어난다: 새 파일만 줄에 넣는다. 이름을 이어 붙였다 나누지 않고(이름 안의 구분자로 요청이 불어나지 않게)
+  // 받기 시도는 실패를 포함해 녹화 수 상한까지만
+  const files = JSON.stringify(recs.map((r) => r.file));
   useEffect(() => {
-    let alive = true;
-    let u = "";
-    fileUrl(caseId, name)
-      .then((x) => {
-        u = x;
-        if (alive) setSrc(x);
-        else URL.revokeObjectURL(x);
-      })
-      .catch(() => undefined);
+    const s = store.current;
+    for (const f of JSON.parse(files) as string[]) {
+      if (f in s.got || Object.keys(s.got).length >= MAX_RECORDINGS) continue;
+      s.got[f] = undefined;
+      s.queue.push(f);
+    }
+    if (s.busy) return;
+    s.busy = true;
+    const gen = s.gen;
+    void (async () => {
+      while (s.queue.length && s.gen === gen) {
+        const f = s.queue.shift()!;
+        try {
+          const b = await fileBlob(caseId, f, REC_BUDGET - s.used);
+          if (s.gen !== gen) break;
+          s.used += b.size;
+          const u = URL.createObjectURL(b);
+          s.got[f] = u;
+          setUrls((m) => ({ ...m, [f]: u }));
+        } catch (e) {
+          if (s.gen !== gen) break;
+          const why = e instanceof ApiError && e.status === 413 ? "녹화가 커서 이어 재생에 넣지 않음" : "이 구간의 녹화를 불러오지 못함";
+          setFail((m) => ({ ...m, [f]: why }));
+        }
+      }
+      if (s.gen === gen) s.busy = false;
+    })();
+  }, [caseId, files]);
+  useEffect(() => {
+    const s = store.current;
     return () => {
-      alive = false;
-      if (u) URL.revokeObjectURL(u);
+      s.gen++;
+      for (const u of Object.values(s.got)) if (u) URL.revokeObjectURL(u);
+      Object.assign(s, { got: {}, queue: [], busy: false, used: 0 });
     };
-  }, [caseId, name]);
-  // 재생 중에는 화면 주기마다 재생 위치를 읽어 커서를 영상과 맞춘다(timeupdate 는 초당 4번뿐)
+  }, []);
+  // 재생 중에는 화면 주기마다 재생 위치를 읽는다(timeupdate 는 초당 4번뿐)
   useEffect(() => {
-    const v = video.current;
-    if (!v || clicks.length === 0) return;
+    if (!playing) return;
     let raf = 0;
     const tick = () => {
-      setT(v.currentTime);
-      if (!v.paused && !v.ended) raf = requestAnimationFrame(tick);
+      const v = vids.current[curRef.current];
+      if (v) setLocal(v.currentTime);
+      raf = requestAnimationFrame(tick);
     };
-    const start = () => {
-      cancelAnimationFrame(raf);
-      tick();
-    };
-    v.addEventListener("play", start);
-    v.addEventListener("seeked", start);
-    v.addEventListener("timeupdate", start);
-    return () => {
-      cancelAnimationFrame(raf);
-      v.removeEventListener("play", start);
-      v.removeEventListener("seeked", start);
-      v.removeEventListener("timeupdate", start);
-    };
-  }, [src, clicks]);
-  if (!src) return <span className="muted small">불러오는 중…</span>;
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing]);
+  useEffect(() => {
+    const on = () => setFull(!!wrap.current && document.fullscreenElement === wrap.current);
+    document.addEventListener("fullscreenchange", on);
+    return () => document.removeEventListener("fullscreenchange", on);
+  }, []);
+  const clicks = useMemo(() => recs.map((r) => recordingClicks(events, r.ev)), [events, recs]);
+
+  // 구간 길이: 파일에서 읽은 길이(재생되는 실제 길이), 아직 모르면 서명 기록의 길이
+  const durs = recs.map((r) => Math.min(Math.max(lens[r.file] ?? r.seconds ?? 0, 0), REC_MAX_S));
+  const starts = segStarts(durs);
+  const n = recs.length;
+  const total = starts[n - 1] + durs[n - 1];
+  const ci = Math.min(cur, n - 1);
+  const pos = Math.min(starts[ci] + Math.min(local, durs[ci]), total);
+  const failed = (i: number) => recs[i].file in fail;
+  const nextPlayable = (i: number) => {
+    for (let j = i + 1; j < n; j++) if (!failed(j)) return j;
+    return -1;
+  };
+  const segName = (i: number) => `${recLabel(recs[i])}${recs[i].host ? ` · ${clip(recs[i].host, 40)}` : ""}`;
+
+  // i 번째 구간의 t 초로 옮긴다(play: 이어서 재생). 못 받은 구간을 재생하려 하면 다음 구간으로
+  const go = (i: number, t: number, play: boolean) => {
+    if (play && failed(i)) {
+      const j = nextPlayable(i);
+      if (j >= 0) return go(j, 0, true);
+      play = false;
+    }
+    const prev = vids.current[curRef.current];
+    const v = vids.current[i];
+    curRef.current = i; // 앞 구간을 멈출 때 나는 pause 이벤트는 무시된다
+    wantPlay.current = play;
+    if (prev && prev !== v) prev.pause();
+    setCur(i);
+    setLocal(t);
+    if (!play) setPlaying(false);
+    if (!v) return;
+    if (Math.abs(v.currentTime - t) > 0.05) v.currentTime = t;
+    if (!play) v.pause();
+    else if (v.readyState >= 2) v.play().catch(() => undefined); // 아직 받는 중이면 canplay 때 재생
+  };
+  const toggle = () => {
+    if (playing || wantPlay.current) {
+      wantPlay.current = false;
+      vids.current[curRef.current]?.pause();
+      setPlaying(false);
+      return;
+    }
+    if (pos >= total - 0.05) return go(0, 0, true); // 끝에서 누르면 처음부터
+    go(ci, vids.current[ci]?.currentTime ?? local, true);
+  };
+  const seek = (g: number) => {
+    const { i, local: t } = locateSeg(durs, Math.min(Math.max(g, 0), total));
+    go(i, t, wantPlay.current);
+  };
+  const onRangeKey = (e: React.KeyboardEvent) => {
+    let g: number | null = null;
+    if (e.key === "ArrowRight" || e.key === "ArrowUp") g = pos + 5;
+    else if (e.key === "ArrowLeft" || e.key === "ArrowDown") g = pos - 5;
+    else if (e.key === "PageDown") g = ci + 1 < n ? starts[ci + 1] : total; // 다음 구간 처음
+    else if (e.key === "PageUp") g = local > 1 || ci === 0 ? starts[ci] : starts[ci - 1]; // 이 구간 처음(처음이면 앞 구간)
+    else if (e.key === "Home") g = 0;
+    else if (e.key === "End") g = total;
+    else if (e.key === " " || e.key === "k") {
+      e.preventDefault();
+      toggle();
+      return;
+    }
+    if (g === null) return;
+    e.preventDefault();
+    seek(g);
+  };
+  const changeRate = (r: number) => {
+    setRate(r);
+    for (const v of vids.current) {
+      if (!v) continue;
+      v.defaultPlaybackRate = r;
+      v.playbackRate = r;
+    }
+  };
+  const toggleFull = () => {
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => undefined);
+    else wrap.current?.requestFullscreen().catch(() => undefined);
+  };
+
+  // 영상 이벤트는 지금 구간의 것만 본다
+  const onMeta = (i: number, v: HTMLVideoElement) => {
+    v.defaultPlaybackRate = rate;
+    v.playbackRate = rate;
+    const d = v.duration;
+    if (Number.isFinite(d) && d > 0) setLens((m) => ({ ...m, [recs[i].file]: d }));
+  };
+  const onPause = (i: number, v: HTMLVideoElement) => {
+    if (i !== curRef.current) return;
+    if (v.ended && wantPlay.current && nextPlayable(i) >= 0) return; // 다음 구간으로 넘어가는 중(ended 가 곧 온다)
+    wantPlay.current = false;
+    setPlaying(false);
+  };
+  const onEnded = (i: number) => {
+    if (i !== curRef.current) return;
+    const j = nextPlayable(i);
+    if (j >= 0 && wantPlay.current) return go(j, 0, true);
+    wantPlay.current = false;
+    setPlaying(false);
+    setLocal(durs[i]);
+  };
+  const sync = (i: number, v: HTMLVideoElement) => {
+    if (i === curRef.current && v.paused) setLocal(v.currentTime);
+  };
+
+  const msg = fail[recs[ci].file] ?? (urls[recs[ci].file] ? "" : "불러오는 중…");
   // 커서 위치: 0.6초 안에 누를 클릭(없으면 마지막으로 누른 곳). 물결은 누른 뒤 0.7초 동안
-  let cur = -1;
-  for (let i = 0; i < clicks.length; i++) if (t >= clicks[i].t - 0.6) cur = i;
-  const c = cur >= 0 ? clicks[cur] : null;
+  const cl = clicks[ci] ?? [];
+  let k = -1;
+  for (let j = 0; j < cl.length; j++) if (local >= cl[j].t - 0.6) k = j;
+  const mark = k >= 0 ? cl[k] : null;
   return (
-    <>
-      <video ref={video} src={src} controls />
-      {c && <ClickMark p={c} hitKey={t >= c.t && t <= c.t + 0.7 ? cur : null} align="middle" />}
-    </>
+    <div className="rec-player" ref={wrap}>
+      {n > 1 && (
+        <div className="rec-pick" role="group" aria-label="녹화 구간 바로가기">
+          {recs.map((r, i) => (
+            <button key={r.file} type="button" className="chip-filter" aria-pressed={i === ci} onClick={() => go(i, 0, wantPlay.current)}>
+              {recLabel(r)}
+              {r.host && <> · <span className="mono">{clip(r.host, 40)}</span></>}
+              {r.seconds !== null && ` · ${r.seconds.toFixed(1)}초`}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="rec-box">
+        {recs.map((r, i) => (
+          <video
+            key={r.file}
+            ref={(el) => {
+              vids.current[i] = el;
+            }}
+            src={urls[r.file]}
+            className={i === ci ? "on" : undefined}
+            preload="auto"
+            muted
+            playsInline
+            aria-hidden={i !== ci}
+            onClick={toggle}
+            onLoadedMetadata={(e) => onMeta(i, e.currentTarget)}
+            onCanPlay={(e) => {
+              if (i === curRef.current && wantPlay.current && e.currentTarget.paused) e.currentTarget.play().catch(() => undefined);
+            }}
+            onPlay={() => i === curRef.current && setPlaying(true)}
+            onPause={(e) => onPause(i, e.currentTarget)}
+            onEnded={() => onEnded(i)}
+            onSeeked={(e) => sync(i, e.currentTarget)}
+            onTimeUpdate={(e) => sync(i, e.currentTarget)}
+          />
+        ))}
+        {msg && <span className="small rec-msg">{msg}</span>}
+        {n > 1 && <span className="rec-seg-label">{segName(ci)}</span>}
+        {mark && <ClickMark p={mark} hitKey={local >= mark.t && local <= mark.t + 0.7 ? k : null} align="middle" />}
+      </div>
+      <div className="rec-ctl">
+        <button type="button" className="btn btn-ghost btn-sm rec-btn rec-play" aria-label={playing ? "일시정지" : "재생"} title={playing ? "일시정지" : "재생"} onClick={toggle}>
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            {playing ? <path d="M3 2h4v12H3zM9 2h4v12H9z" /> : <path d="M4 2l10 6-10 6z" />}
+          </svg>
+        </button>
+        <div className="rec-track">
+          <div className="rec-segs" aria-hidden="true">
+            {recs.map((r, i) => {
+              const w = total > 0 ? (durs[i] / total) * 100 : 100 / n;
+              const f = durs[i] > 0 ? Math.min(Math.max((pos - starts[i]) / durs[i], 0), 1) : 0;
+              return (
+                <span key={r.file} className={`rec-seg${i === ci ? " on" : ""}${failed(i) ? " err" : ""}`} style={{ width: `${w}%` }} title={segName(i)}>
+                  <span className="rec-seg-fill" style={{ width: `${f * 100}%` }} />
+                </span>
+              );
+            })}
+          </div>
+          <input
+            type="range"
+            className="rec-range"
+            min={0}
+            max={total}
+            step="any"
+            value={pos}
+            disabled={total <= 0}
+            onChange={(e) => seek(Number(e.target.value))}
+            onKeyDown={onRangeKey}
+            aria-label="재생 위치"
+            aria-valuetext={`${n > 1 ? `${segName(ci)}, ` : ""}${mmss(pos)} / ${mmss(total)}`}
+          />
+        </div>
+        <span className="mono small rec-time">
+          {mmss(pos)} / {mmss(total)}
+        </span>
+        <select className="field rec-rate" aria-label="재생 속도" value={rate} onChange={(e) => changeRate(Number(e.target.value))}>
+          {REC_RATES.map((r) => (
+            <option key={r} value={r}>
+              {r}×
+            </option>
+          ))}
+        </select>
+        <button type="button" className="btn btn-ghost btn-sm rec-btn" aria-label={full ? "전체 화면 끝내기" : "전체 화면"} title={full ? "전체 화면 끝내기" : "전체 화면"} onClick={toggleFull}>
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            {full ? <path d="M6 1v5H1V4h3V1zM10 1h2v3h3v2h-5zM1 10h5v5H4v-3H1zM10 10h5v2h-3v3h-2z" /> : <path d="M1 1h5v2H3v3H1zM10 1h5v5h-2V3h-3zM1 10h2v3h3v2H1zM13 10h2v5h-5v-2h3z" />}
+          </svg>
+        </button>
+      </div>
+    </div>
   );
 }
 

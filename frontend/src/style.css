@@ -262,6 +262,38 @@ button.reason:hover { border-color: var(--line-strong); }
 .rec-box { position: relative; height: 300px; border-radius: var(--r-panel); background: var(--screen-bg); box-shadow: var(--inset-screen); display: grid; place-items: center; color: var(--header-muted); overflow: hidden; }
 .rec-box video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }  /* 칸(grid)의 행 높이가 영상 크기를 따라가 넘치던 것(잘려서 확대돼 보이고 재생 막대가 가려짐)을 칸에 고정 */
 .rec-pick { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+/* 녹화 이어 재생: 구간마다 겹친 영상 중 지금 구간만 보인다(나머지는 미리 받아 첫 화면을 띄워 둔 채 투명) */
+.rec-player { display: flex; flex-direction: column; }
+.rec-box video { opacity: 0; }
+.rec-box video.on { opacity: 1; }
+.rec-msg { position: relative; z-index: 2; }
+.rec-seg-label { position: absolute; top: 10px; left: 10px; z-index: 4; max-width: calc(100% - 20px); padding: 3px 8px; border-radius: var(--r-ctl); background: rgba(16, 33, 63, .78); color: #fff; font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+.rec-ctl { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.rec-btn { display: inline-grid; place-items: center; width: 32px; height: 30px; padding: 0; flex: none; }
+.rec-btn svg { width: 14px; height: 14px; fill: currentColor; }
+.rec-track { position: relative; flex: 1; min-width: 120px; height: 24px; }
+/* 구간 막대: 손잡이 중심이 다니는 폭(양끝 8px 안쪽)에 맞춰 그린다. 구간 경계는 2px 틈 */
+.rec-segs { position: absolute; left: 8px; right: 8px; top: 8px; height: 8px; display: flex; }
+.rec-seg { position: relative; height: 100%; background: var(--line-strong); overflow: hidden; }
+.rec-seg:first-child { border-radius: 4px 0 0 4px; }
+.rec-seg:last-child { border-radius: 0 4px 4px 0; }
+.rec-seg:only-child { border-radius: 4px; }
+.rec-seg + .rec-seg::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2px; background: var(--sunken); }
+.rec-seg.on { background: #B9C8E6; }
+.rec-seg.err { background: repeating-linear-gradient(45deg, var(--line-strong) 0 4px, var(--sunken) 4px 8px); }
+.rec-seg-fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--primary); }
+.rec-range { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; background: transparent; -webkit-appearance: none; appearance: none; cursor: pointer; }
+.rec-range:disabled { cursor: default; }
+.rec-range::-webkit-slider-runnable-track { height: 24px; background: transparent; }
+.rec-range::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; box-sizing: border-box; width: 16px; height: 16px; margin-top: 4px; border-radius: 50%; background: var(--primary); border: 2px solid #fff; box-shadow: 0 1px 3px rgba(16, 33, 63, .45); }
+.rec-range::-moz-range-track { height: 24px; background: transparent; }
+.rec-range::-moz-range-thumb { box-sizing: border-box; width: 16px; height: 16px; border-radius: 50%; background: var(--primary); border: 2px solid #fff; box-shadow: 0 1px 3px rgba(16, 33, 63, .45); }
+.rec-time { flex: none; min-width: 84px; text-align: right; color: var(--ink-2); }
+.rec-rate { width: auto; flex: none; padding: 5px 6px; font-size: 12px; }
+.rec-player:fullscreen { background: var(--screen-bg); padding: 16px; }
+.rec-player:fullscreen .rec-box { flex: 1; height: auto; min-height: 0; }
+.rec-player:fullscreen .rec-time { color: var(--header-muted); }
+.rec-player:fullscreen .rec-seg + .rec-seg::after { background: var(--screen-bg); }
 .progress-panel .log { border-top: 0; max-height: 520px; overflow-y: auto; }
 
 /* 경로 지도 */
