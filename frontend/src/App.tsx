@@ -2838,6 +2838,8 @@ type Frame = { url: string; name: string; w: number; h: number };
 // 밀려난 것만 해제한다(이미 그려진 사진은 그대로 보인다). 로그아웃하면 비운다(다음 계정이 서버 권한 확인 없이 보지 않게)
 const SHOT_CACHE_MAX = 24;
 const shotCache = new Map<string, Frame>();
+// 로그아웃할 때 올린다: 그 전에 시작한 요청이 로그아웃 뒤에 끝나도 기억하지 않고 버린다(Codex 지적: 이전 세션 사진이 남았다)
+let shotGen = 0;
 const shotKey = (caseId: string, name: string) => `${caseId}/${name}`;
 function cachedShot(caseId: string, name: string): Frame | null {
   const k = shotKey(caseId, name);
@@ -2860,6 +2862,7 @@ function rememberShot(caseId: string, f: Frame) {
   }
 }
 function clearShotCache() {
+  shotGen++;
   for (const v of shotCache.values()) URL.revokeObjectURL(v.url);
   shotCache.clear();
 }
@@ -2899,6 +2902,7 @@ function LiveScreen({ caseId, name, strict = false, overlay = null }: { caseId: 
       show(hit);
       return;
     }
+    const gen = shotGen;
     (async () => {
       let url = "";
       const img = new Image();
@@ -2910,6 +2914,10 @@ function LiveScreen({ caseId, name, strict = false, overlay = null }: { caseId: 
         if (url) URL.revokeObjectURL(url);
         if (strict && alive) setFailed(true);
         return; // 실시간 화면은 못 받으면 이전 화면 유지
+      }
+      if (gen !== shotGen) {
+        URL.revokeObjectURL(url); // 받는 사이 로그아웃했다: 이전 세션의 사진은 기억하지도 보이지도 않는다
+        return;
       }
       // 사진(blob URL)은 기억 장소가 갖는다: 화면을 떠나도 해제하지 않고 다음에 바로 쓴다
       const f = { url, name, w: img.naturalWidth, h: img.naturalHeight };
