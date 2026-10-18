@@ -324,6 +324,11 @@ def run_inside(args) -> None:
                     rec.update(status=final["status"], reason=final["reason"], threat=th.get("threat"),
                                probability=th.get("probability"), hold=th.get("hold"),
                                final_url=(final.get("final_url") or "")[:200])
+                    # 코드 규칙이 모델 판단을 바꿨으면 그 규칙과 모델의 원래 판단(실사이트 누적의 '이전에 고친 유형' 칸)
+                    ov = th.get("override") if isinstance(th.get("override"), dict) else {}
+                    orig = ov.get("original") if isinstance(ov.get("original"), dict) else {}
+                    rec["rule"] = str(ov["reason"])[:40] if isinstance(ov.get("reason"), str) else None
+                    rec["rule_original"] = str(orig["threat"])[:20] if isinstance(orig.get("threat"), str) else None
                     chain = s.evidence_dir / cid / "chain.jsonl"
                     kinds = [json.loads(x) for x in chain.read_text(encoding="utf-8").splitlines()]
                     fin = next((k["data"] for k in kinds if k["kind"] == "finish"), {})

@@ -27,9 +27,11 @@ from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(ROOT / "backend"))  # 브랜드 공식 도메인 목록(표준 라이브러리만 쓰는 모듈)
 
 import eval_agent  # noqa: E402
 import probe_urls  # noqa: E402
+from safetrace.decision.brands import official_brand  # noqa: E402
 
 FRESH = ROOT / "var" / "fresh"
 EVAL = ROOT / "var" / "eval"
@@ -39,6 +41,7 @@ MAX_FEED = 2000
 REPEAT = 3
 SAME_TITLE_MAX = 2  # 같은 제목(같은 피싱 도구로 찍어 낸 화면)은 하루에 2개까지만 Y
 _DATE = re.compile(r"\d{8}")
+_RULE_NAME = re.compile(r"[a-z_]{1,40}")  # 판단 엔진의 코드 규칙 이름 모양(override.reason)
 # 1차 거르기(제안일 뿐, 최종 판단은 사람이 candidates.csv 에서): 봇 확인·학생용 클론·이동 중 화면은 정답을 정할 수 없다
 _SKIP = re.compile(r"verify you are human|verification required|verifying|just a moment|attention required|"
                    r"checking your browser|captcha|"
@@ -232,11 +235,37 @@ def fresh_runs() -> list[tuple[dict, list[dict]]]:
     return out
 
 
+def rule_of(r: dict) -> str | None:
+    """이 회차에서 코드 규칙이 모델 판단(정상·판단 불가)을 바꿨으면 규칙 이름. 평가 도구가 규칙 이름을 남기기 전 기록(rule 칸 없음)은
+    규칙이 남기는 모양(위협·확률 1.0·보류)으로 세고, 도착 주소가 브랜드 공식 사이트면 official_redirect 로 본다."""
+    if "rule" in r:  # 조사 컨테이너가 쓴 값이라 믿지 않는다: 규칙 이름 모양이 아니면 '코드 규칙'(표가 깨지지 않게)
+        name = r.get("rule")
+        if not isinstance(name, str) or not name:
+            return None
+        return name if _RULE_NAME.fullmatch(name) else "코드 규칙"
+    p = r.get("probability")
+    if not (r.get("hold") is True and r.get("threat") not in (None, "benign", "unknown")
+            and isinstance(p, (int, float)) and not isinstance(p, bool) and p >= 0.999):
+        return None
+    moved = official_brand(_host(str(r.get("final_url") or ""))) and not official_brand(_host(str(r.get("url") or "")))
+    return "official_redirect" if moved else "코드 규칙"
+
+
 def summary_md(runs: list[tuple[dict, list[dict]]]) -> str:
+    """날마다 사이트가 달라 정답률은 개선 추세가 아니다. 품질 지표로 '검토 없이 끝난 비율'(담당자가 모르고 넘어간 놓침)과
+    '코드 규칙이 잡은 회차'(이전에 놓쳐 고친 유형이 새 사이트에서 다시 나왔을 때 잡았는지)를 함께 본다."""
     lines = ["# 오늘의 실사이트 세트 누적", "",
              "OpenPhish 무료 피드에서 그날 살아 있던 피싱 사이트를 골라 같은 날 3회 조사한 결과. 주소는 git 밖(var/fresh).", "",
-             "| 날짜 | 사이트 | 채점 | 정답 | 놓침(검토 없이 끝남) | 담당자 검토로 감 | 제외 |", "|---|---|---|---|---|---|---|"]
-    tot, sites = Counter(), set()
+             "| 날짜 | 사이트 | 채점 | 정답 | 놓침(검토 없이 끝남) | 검토 없이 끝난 비율 | 담당자 검토로 감 | 코드 규칙이 잡음(이전에 고친 유형) | 제외 |",
+             "|---|---|---|---|---|---|---|---|---|"]
+    tot, sites, rules_all, rule_sites_all = Counter(), set(), Counter(), set()
+
+    def rule_cell(rules: Counter, rsites: set) -> str:
+        if not rules:
+            return "0"
+        names = ", ".join(f"{k} {v}" for k, v in rules.most_common())
+        return f"{sum(rules.values())}회 · {len(rsites)}곳 ({names})"
+
     for meta, recs in runs:
         m = eval_agent.summarize(recs).get("전체")
         if not m:
@@ -245,12 +274,27 @@ def summary_md(runs: list[tuple[dict, list[dict]]]) -> str:
         sites |= urls
         for k in ("scored", "correct", "missed", "missed_auto", "review", "skipped"):
             tot[k] += m[k]
+        rules, rsites = Counter(), set()
+        for r in recs:
+            name = rule_of(r)
+            if name:
+                rules[name] += 1
+                rsites.add(r["url"])
+        rules_all.update(rules)
+        rule_sites_all |= rsites
         lines.append(f"| {str(meta.get('started', ''))[:10]} | {len(urls)} | {m['scored']} | "
                      f"{m['correct']} ({eval_agent._pct(m['correct'], m['scored'])}) | {m['missed']} ({m['missed_auto']}) | "
-                     f"{m['review']} | {m['skipped']} |")
+                     f"{eval_agent._pct(m['missed_auto'], m['scored'])} | {m['review']} | {rule_cell(rules, rsites)} | {m['skipped']} |")
     lines.append(f"| **누적** | **{len(sites)}** | {tot['scored']} | **{tot['correct']} "
                  f"({eval_agent._pct(tot['correct'], tot['scored'])})** | {tot['missed']} ({tot['missed_auto']}) | "
-                 f"{tot['review']} | {tot['skipped']} |")
+                 f"**{eval_agent._pct(tot['missed_auto'], tot['scored'])}** | {tot['review']} | "
+                 f"**{rule_cell(rules_all, rule_sites_all)}** | {tot['skipped']} |")
+    lines += ["",
+              "- 날마다 사이트가 달라 정답률은 개선 추세가 아니다. 품질은 **검토 없이 끝난 비율**(담당자가 모르고 넘어간 놓침)과 "
+              "**코드 규칙이 잡음**(전에 놓쳐서 고친 유형이 그날의 새 사이트에서 다시 나왔을 때, 모델은 정상·판단 불가로 봤지만 규칙이 "
+              "담당자 검토로 보낸 회차)으로 본다. 모델이 스스로 위협으로 본 회차는 규칙 칸에 세지 않는다.",
+              "- 평가 도구가 규칙 이름을 남기기 전 기록은 규칙이 남기는 모양(위협·확률 1.0·보류)으로 세고, 도착 주소가 브랜드 공식 사이트면 "
+              "official_redirect 로 본다(그 밖은 '코드 규칙')."]
     return "\n".join(lines) + "\n"
 
 
