@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from urllib.parse import urlsplit
 
 # 브랜드 → 공식 도메인(그 하위 도메인 포함). 문자 사칭에 자주 쓰이는 이름만 둔다
@@ -36,6 +37,11 @@ OFFICIAL_BRAND_DOMAINS: dict[str, tuple[str, ...]] = {
     "trezor": ("trezor.io",),
     "ledger": ("ledger.com",),
     "steam": ("steampowered.com", "steamcommunity.com", "steamstatic.com", "steamusercontent.com"),
+    # 가상자산 지갑·거래소 사칭(OpenPhish 2026-10-17·18): MetaMask·Coinbase 사칭 GitBook('MetaMask® Login', 'Çoinbase Pro | Login'),
+    # Coinbase 사칭 zapier.app. Gemini 거래소 사칭도 보였지만 Google Gemini(gemini.google.com)가 이름 조각 규칙(lookalike_brand)에
+    # 걸리므로 넣지 않는다
+    "metamask": ("metamask.io",),
+    "coinbase": ("coinbase.com",),
 }
 # 단축 URL 서비스: 평가 세트·KISA 신고 자료(var/probe)에서 실제로 본 것만. 남의 주소로 넘기는 것이 본업이라 넘긴 곳을
 # 근거로 삼지 않는다(gourl.kr·vo.la 는 사라진 링크를 naver.com·쿠팡 검색으로 넘긴다)
@@ -50,6 +56,7 @@ SHARED_HOSTING: tuple[str, ...] = (
     "framer.app",                    # OpenPhish 2026-10-16(브랜드 없는 로그인 화면)
     "dothome.co.kr",                 # OpenPhish 2026-10-14·15
     "creatorlink.net",               # KISA 2024
+    "zapier.app",                    # OpenPhish 2026-10-18(Coinbase 사칭 3곳)
 )
 THIN_TEXT_CHARS = 200  # 조사한 화면 글자를 다 합쳐 이보다 적으면 '내용이 거의 없음'
 _TOKEN = re.compile(r"[.\-_]")
@@ -172,10 +179,17 @@ def _host(url: str) -> str:
     return (urlsplit(url).hostname or "").lower().rstrip(".")
 
 
+def _plain(text: str) -> str:
+    """비교용 제목 글자: 꾸민 글자(수학 기호 글꼴 𝓮, 악센트 Ç·ñ)를 기본 글자로 풀고 소문자로. 브랜드 이름을 비틀어 규칙을
+    피하는 제목('G𝓮miñi Login', 'Çoinbase Pro | Login' — OpenPhish 2026-10-17·18)을 잡는다. 한글은 풀었다가 다시 묶는다."""
+    t = unicodedata.normalize("NFKD", text)
+    return unicodedata.normalize("NFKC", "".join(ch for ch in t if not unicodedata.combining(ch))).lower()
+
+
 def claimed_brands(title: str) -> list[str]:
     """제목이 내세우는 브랜드(영문 이름이 한 낱말로 들어 있음, 예: 'Steam Community', 'Trezor® Hardware').
     모두 돌려준다: 하나만 고르면 제목에 다른 브랜드를 덧붙여('Trezor Hardware | Naver') 규칙을 피할 수 있다(Codex 지적)."""
-    t = title.lower()
+    t = _plain(title)
     return [b for b in OFFICIAL_BRAND_DOMAINS if re.search(rf"(?<![a-z0-9]){b}(?![a-z0-9])", t)]
 
 

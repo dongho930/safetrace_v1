@@ -865,6 +865,9 @@ def test_brand_claim_needs_per_screen_pairs():
     assert brand_typo_claim(["x", "Trezor Hardware"], [url]) is None
     assert brand_login_on_shared_hosting(["Steam Community"], ["https://x.netlify.app/"], [["login:a:Sign in"]])
     assert brand_login_on_shared_hosting(["Steam Community"], ["https://x.netlify.app/"], []) is None
+    from safetrace.decision.brands import claimed_brands
+    # 꾸민 글자로 브랜드 이름을 비튼 제목(OpenPhish 2026-10-17·18 의 'Çoinbase', 'G𝓮miñi' 모양)도 같은 브랜드로 본다
+    assert claimed_brands("Çoinbase Pro | Login") == ["coinbase"] and claimed_brands("Tr𝓮zor® Hardware") == ["trezor"]
 
 
 def _claim_req(url, title, forbidden=()):
@@ -878,6 +881,15 @@ def _claim_req(url, title, forbidden=()):
     ("benign", "https://sample-site-1234.netlify.app/", "Steam Community :: Sienna", ["login:a:Sign in"],
      "brand_login_shared_hosting"),
     ("unknown", "https://x.github.io/", "Facebook", ["input:password:Password"], "brand_login_shared_hosting"),
+    # 가상자산 지갑·거래소 사칭(OpenPhish 2026-10-17·18): GitBook 문서에 로그인 링크, 꾸민 글자 제목, zapier.app
+    ("benign", "https://sample-doc-1234.gitbook.io/us", "MetaMask® Login | us", ["login:a:Login"], "brand_login_shared_hosting"),
+    ("benign", "https://sample-doc-5678.gitbook.io/", "Çoinbase Pro | Login", ["login:a:Sign in"], "brand_login_shared_hosting"),
+    ("unknown", "https://sample-app-42.zapier.app/", "Log In | Coinbase pro login®:", ["input:password:Password"],
+     "brand_login_shared_hosting"),
+    # 로그인 요소가 없으면(제목만으로는 보지 않는다), 공용 호스팅이 아니거나 공식 도메인이면 그대로
+    ("benign", "https://sample-doc-9012.gitbook.io/", "MetaMask® Login | us", [], None),
+    ("benign", "https://example.com/wallet", "MetaMask Login", ["login:a:Login"], None),
+    ("benign", "https://support.metamask.io/start/login", "MetaMask Login", ["login:a:Login"], None),
     # 로그인 요소가 없으면(블로그·문서, 가계부 앱의 낱말 'Ledger') 그대로
     ("benign", "https://x.github.io/", "Steam deck tips", [], None),
     ("benign", "https://budget-sample.github.io/", "Dirham Rupee Ledger", [], None),
