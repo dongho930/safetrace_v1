@@ -34,7 +34,7 @@ from ..evidence import EvidenceWriter
 from ..masking import mask_pii
 from ..proxy.egress import EGRESS_HEADER
 from . import netfilter
-from .candidates import TEXT_MAX
+from .candidates import TEXT_MAX, platform_link
 from .candidates import select as select_candidates
 from .gate import Budget, ElementInfo, SafetyGate, classify_forbidden
 from .observe import CLOSE_POPUP_JS, COLLECT_JS, READ_ONE_JS, RECTS_JS
@@ -547,6 +547,8 @@ class AgentRun:
             host = urlsplit(info.href).hostname if info.href.startswith("http") else None
             if (page.url, mask_pii(text)[:40]) in self._dead_links or host in dead_hosts:
                 continue  # 이미 막다른 곳으로 이어진 버튼·링크(글자는 기록과 같은 40자로 비교)는 다시 내놓지 않는다
+            if platform_link(page.url, info.href):
+                continue  # 사이트 빌더 배지('Made in Framer')·'만든 곳' 링크: 누르면 조사 대상을 떠나 플랫폼 홍보 화면만 본다
             infos[eid] = info
             prio = (0 if item.get("inView") else 1, -int(item.get("area") or 0))
             cands.append((prio, Candidate(id=eid, tag=info.tag[:16], text=mask_pii(text)[:120],

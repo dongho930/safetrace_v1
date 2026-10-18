@@ -1,6 +1,8 @@
 """연관 후보: 고르기(순수 함수), API 가 받는 후보 목록 검증, 하위 조사 여부."""
 
-from safetrace.agent.candidates import MAX_FOUND, select, site_of
+import pytest
+
+from safetrace.agent.candidates import MAX_FOUND, platform_link, select, site_of
 from safetrace.agent.runner import _needs_followup
 
 PORTS = [80, 443]
@@ -428,3 +430,23 @@ def test_no_main_result_event_without_subinvestigation(settings, monkeypatch):
     events: list[dict] = []
     runner.investigate(str(uuid.uuid4()), "https://start.example/", settings, events.append, decider=object())
     assert not any(e.get("phase") for e in events)
+
+
+@pytest.mark.parametrize("page, href, skip", [
+    # 사이트 빌더 배지·'만든 곳' 링크: 조사 대상을 떠나 플랫폼 홍보 화면으로 간다(OpenPhish 2026-10-15 Framer 3/3)
+    ("https://sample-1234.framer.website/", "https://www.framer.com/?utm_source=framer-badge", True),
+    ("https://sample-doc.gitbook.io/us", "https://www.gitbook.com/powered-by", True),
+    ("https://sample-blog.blogspot.com/", "https://www.blogger.com/about/?bpli=1", True),
+    ("https://sample-app.zapier.app/", "https://zapier.com/", True),
+    # 조사 대상이 그 서비스 사이트 자체면 그 안의 링크는 그대로 누른다
+    ("https://www.framer.com/pricing", "https://www.framer.com/", False),
+    # 다른 사이트·같은 사이트 안·주소가 아닌 링크는 그대로
+    ("https://sample-1234.framer.website/", "https://example.com/next", False),
+    ("https://sample-1234.framer.website/", "https://sample-1234.framer.website/login", False),
+    ("https://sample-1234.framer.website/", "/relative", False),
+    ("https://sample-1234.framer.website/", "javascript:void(0)", False),
+    ("https://sample-1234.framer.website/", "", False),
+])
+def test_platform_link(page, href, skip):
+    assert platform_link(page, href) is skip
+

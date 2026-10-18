@@ -557,6 +557,17 @@ def test_related_links_collected_apart_from_click_candidates(settings, testpages
     assert "1234-5678" not in blob and "alice@example.com" not in blob
 
 
+def test_platform_badge_is_not_a_click_candidate(settings, testpages):
+    """사이트 빌더로 만든 브랜드 없는 로그인 화면의 'Made in Framer' 배지는 클릭 후보로 내놓지 않는다(누르면 조사 대상을 떠나
+    www.framer.com 만 보고 정상으로 끝났다, OpenPhish 2026-10-15 3/3). 입력 칸·제출 버튼은 그대로 금지 요소로 남긴다."""
+    settings.max_steps = 1
+    _, final, chain, _ = run(f"{BASE}/phish/builder.html", settings, testpages)
+    obs = next(r for r in chain if r["kind"] == "observe")
+    assert not any(c.get("href_host") == "www.framer.com" for c in obs["data"]["candidates"]), obs["data"]["candidates"]
+    assert any(f.startswith(("input:", "login:", "submit:")) for f in obs["data"]["forbidden"]), obs["data"]["forbidden"]
+    assert "framer.com" not in (final.get("final_url") or "")
+
+
 def test_forbidden_links_never_become_related_candidates(settings, testpages):
     """Codex(PR 2) F1: 클릭 후보에서 막는 결제·다운로드 링크는 연관 후보로도 고르지 않는다(하위 조사가 그 주소를 열면
     클릭 금지를 우회한다). 시험 서버의 금지 경로 기록으로 확인한다."""

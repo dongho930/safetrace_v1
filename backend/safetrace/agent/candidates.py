@@ -41,12 +41,31 @@ SERVICE_HOMES: frozenset[str] = frozenset({
     "bitly.com", "mu-star.net", "sdu.sk",                       # 단축 서비스 홈(정지 안내 화면의 링크, KISA)
     "typedream.com", "webflow.com", "gitbook.com", "jimdo.com",  # 사이트 빌더 홈(실사이트의 '만든 곳' 링크)
 })
+# 사이트 빌더·게시 서비스 자체 사이트: 그 위에 올린 사이트의 'Made in Framer'·'Powered by GitBook' 같은 배지·'만든 곳' 링크가
+# 가는 곳이다. 조사 대상 운영자의 증거가 아니라서 클릭 후보로 내놓지 않는다(platform_link). 오늘의 실사이트 세트에서 본 것만:
+# Framer 로그인 화면에서 배지를 눌러 www.framer.com 을 보고 정상으로 끝남 3/3(OpenPhish 2026-10-15), Jimdo 로그인 화면·
+# zapier.app 에서 플랫폼 사이트로 나감(10/15·10/18), GitBook·Blogger·Webflow·Typedream 의 '만든 곳' 링크(10/15~18)
+PLATFORM_SITES: frozenset[str] = frozenset({
+    "framer.com", "webflow.com", "typedream.com", "gitbook.com", "jimdo.com", "zapier.com", "blogger.com",
+})
 # 위협 단서: 판단 규칙(decision/providers.py)에 이미 있는 단어만 쓴다. 'input:'·'download:' 는 화면 요소 표시라 뺀다
 _CLUES: tuple[str, ...] = tuple(w.lower() for ws in _THREAT_SIGNS.values() for w in ws if ":" not in w)
 # 이름 조각: 하이픈·점·밑줄로 나눈 4글자 이상. 관찰한 피싱 호스트 이름에 흔히 붙던 낱말은 조각으로 치지 않는다
 _FRAG_SPLIT = re.compile(r"[.\-_]")
 _COMMON_FRAGS = frozenset({"shop", "online", "login", "live", "support", "docs", "static", "website", "server",
                            "page", "security", "secure", "auth", "sign", "mail", "service"})
+
+
+def platform_link(page_url: str, href: str) -> bool:
+    """href 가 사이트 빌더·게시 서비스 자체 사이트(PLATFORM_SITES)로 가는 링크인지. 지금 화면이 그 서비스 사이트 자체면
+    (신고 대상이 framer.com 인 경우 등) 빼지 않는다."""
+    try:
+        host = (urlsplit(href).hostname or "") if href.startswith(("http://", "https://")) else ""
+        here = urlsplit(page_url).hostname or ""
+    except ValueError:
+        return False
+    site = site_of(host) if host else ""
+    return site in PLATFORM_SITES and site != site_of(here)
 
 
 def _official(host: str) -> bool:
