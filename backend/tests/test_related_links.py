@@ -65,6 +65,36 @@ def test_link_key():
     assert related.link_key("www.dgjlc.com") == ("dgjlc.com", False)
 
 
+def test_link_key_ignores_operator_free_keys():
+    """개선 후보 5: 운영자와 무관한 열쇠로 사건을 잇지 않는다(로컬 DB 의 연관 묶음에서 관찰).
+    ① nip.io(와일드카드 DNS)는 이름에 든 IP 마다 다른 호스트다 — 공격 시나리오 사건 24건이 호스트 2개인데 nip.io 하나로
+    묶였다. 공용 호스팅처럼 호스트가 같을 때만 잇는다 ② 내부·예약 IP 주소는 같은 조직의 증거가 아니다 — 시험 페이지의
+    내부망 링크(127.0.0.1·10.0.0.1·169.254.169.254)로 서로 다른 공격 시나리오 11건이 묶였다. 공인 IP 는 같은 서버라 잇는다."""
+    assert related.link_key("127.0.0.1.nip.io") == ("127.0.0.1.nip.io", True)
+    assert related.link_key("169.254.169.254.nip.io") == ("169.254.169.254.nip.io", True)
+    for ip in ("127.0.0.1", "10.0.0.1", "10.255.255.1", "169.254.169.254", "192.168.0.10", "100.64.1.1", "0.0.0.0",
+               "::1", "fe80::1", "::ffff:127.0.0.1"):
+        assert related.link_key(ip) is None, ip
+    assert related.link_key("8.8.8.8") == ("8.8.8.8", False)
+    assert related.link_key("1.1.1.1.example") == ("1.example", False)  # 숫자로 시작하는 이름은 IP 가 아니다
+
+
+def test_operator_free_keys_make_no_group(client, store):
+    k = uniq()
+    inner = [{"url": "http://127.0.0.1/admin", "host": "127.0.0.1", "source": "link"},
+             {"url": "http://169.254.169.254/latest/meta-data/", "host": "169.254.169.254", "source": "link"}]
+    a = finished(store, f"http://inner-a-{k}.example/", inner)
+    b = finished(store, f"http://inner-b-{k}.example/", inner)
+    c = finished(store, "http://127.0.0.1.nip.io/", [])
+    d = finished(store, "http://169.254.169.254.nip.io/", [])
+    assert client.get(f"/api/cases/{a}/links", headers=h(VIEWER)).json()["shared"] == []
+    shared_c = client.get(f"/api/cases/{c}/links", headers=h(VIEWER)).json()["shared"]
+    assert d not in {y["id"] for x in shared_c for y in x["cases"]}
+    groups = client.get("/api/related-groups?min=2&limit=50", headers=h(VIEWER)).json()["groups"]
+    assert not [g for g in groups if {a, b} <= {x["id"] for x in g["cases"]}]
+    assert not [g for g in groups if {c, d} <= {x["id"] for x in g["cases"]}]
+
+
 def test_case_sites_shape():
     rows = related.case_sites("http://kc.example/", "https://kc.example/x", {"threat": "illegal_gambling"}, [
         {"url": "https://bit.ly/abc", "host": "bit.ly", "source": "link"},

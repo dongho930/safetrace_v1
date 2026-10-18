@@ -14,6 +14,7 @@ from __future__ import annotations
 from urllib.parse import urlsplit
 
 from .decision.brands import SHARED_HOSTING, SHORTENER_HOSTS, on_domain
+from .netguard import is_public_ip
 
 AUTO_ACTOR = "system:related"  # 자동 생성 주체(사람 계정·자동화 토큰 이름과 겹치지 않는 내부 이름)
 _NOT_THREAT = (None, "benign", "unknown")
@@ -67,6 +68,17 @@ def auto_targets(parent_source: str, candidates: list, *, enabled: bool, threat_
 
 # ── 사건 간 연결(related-sites PR 5, §7) ─────────────────────────
 SITES_PER_CASE = 30  # 사건 하나에서 남기는 호스트
+# 와일드카드 DNS(이름에 든 IP 로 해석되는 서비스): 하위 도메인마다 가리키는 서버가 달라 공용 호스팅처럼 호스트가 같을 때만
+# 잇는다. 관찰한 것만: 로컬 DB 의 공격 시나리오 사건(127.0.0.1.nip.io·169.254.169.254.nip.io 24건이 nip.io 하나로 묶였다)
+WILDCARD_DNS: tuple[str, ...] = ("nip.io",)
+
+
+def _non_public_ip(host: str) -> bool:
+    """내부·예약 IP 주소(127.0.0.1·10.x·169.254.x·::1 등, SSRF 검사와 같은 기준). 이름이면 False."""
+    try:
+        return not is_public_ip(host)
+    except ValueError:
+        return False
 
 
 def link_key(host: str) -> tuple[str, bool] | None:
@@ -75,13 +87,15 @@ def link_key(host: str) -> tuple[str, bool] | None:
     - 단축 서비스는 잇지 않는다(같은 단축 서비스를 썼다고 같은 조직이 아니다)
     - 공식 브랜드·사행사업자 도메인, 흔한 대형 사이트, 서비스 홈도 잇지 않는다(피싱 키트가 봇을 진짜 사이트로 보내거나
       꾸밈으로 단다)
-    - 공용 호스팅은 하위 도메인이 다르면 다른 운영자라 호스트가 정확히 같을 때만, 나머지는 등록 도메인으로 잇는다"""
+    - 내부·예약 IP 주소도 잇지 않는다(피싱 키트에 남은 개발용 링크·내부망으로 넘기는 링크는 운영자의 흔적이 아니다)
+    - 공용 호스팅·와일드카드 DNS 는 하위 도메인이 다르면 다른 운영자·서버라 호스트가 정확히 같을 때만, 나머지는 등록
+      도메인으로 잇는다"""
     from .agent.candidates import GENERIC_SITES, SERVICE_HOMES, _official, site_of  # 사이트 계산은 후보 고르기와 같게
 
     h = (host or "").lower().rstrip(".")[:253]
-    if not h or on_domain(h, SHORTENER_HOSTS) or _official(h):
+    if not h or on_domain(h, SHORTENER_HOSTS) or _official(h) or _non_public_ip(h):
         return None
-    if on_domain(h, SHARED_HOSTING):
+    if on_domain(h, SHARED_HOSTING) or on_domain(h, WILDCARD_DNS):
         return h, True
     site = site_of(h)
     # 서비스 홈(단축 서비스·사이트 빌더의 본 도메인)도 잇지 않는다: 같은 서비스를 썼다고 같은 조직이 아니다
