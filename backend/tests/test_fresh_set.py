@@ -91,7 +91,40 @@ def test_summary_counts_without_urls(fresh):
     md = fresh_set.summary_md(fresh_set.fresh_runs())
     assert "https://" not in md
     assert md.count("| 2026-10-15 |") == 1, md
-    assert "| **누적** | **3** | 4 | **3 (75%)** | 1 (0) | 1 | 0 |" in md, md
+    assert "| **누적** | **3** | 4 | **3 (75%)** | 1 (0) | **0%** | 1 | **0** | 0 |" in md, md
+
+
+def test_summary_quality_columns(fresh):
+    """검토 없이 끝난 비율과 코드 규칙이 잡은 회차(이전에 고친 유형). 규칙 이름을 남기기 전 기록은 모양(위협·확률 1.0·보류)으로
+    세고 도착 주소가 브랜드 공식 사이트면 official_redirect. 규칙 이름을 남긴 뒤 기록은 그 이름만 믿는다."""
+    def run(name, started, recs):
+        meta = {"meta": True, "started": started, "label": name}
+        (fresh.parent / "eval" / f"{name}.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in [meta, *recs]), encoding="utf-8")
+
+    base = {"group": "fresh", "expected": "malicious", "status": "COMPLETED", "seconds": 5.0}
+    old = [  # 규칙 이름 칸이 없던 때
+        {**base, "url": "https://m.pages.dev/", "threat": "phishing", "probability": 1.0, "hold": True,
+         "status": "REVIEW_REQUIRED", "final_url": "https://www.facebook.com/"},
+        {**base, "url": "https://x.example/", "threat": "phishing", "probability": 1.0, "hold": True,
+         "status": "REVIEW_REQUIRED", "final_url": "https://x.example/login"},
+        {**base, "url": "https://y.example/", "threat": "phishing", "probability": 1.0, "hold": False},  # 모델이 스스로
+        {**base, "url": "https://z.example/", "threat": "benign", "probability": 0.7, "hold": False},  # 검토 없이 끝남
+    ]
+    new = [  # 규칙 이름을 남긴 뒤
+        {**base, "url": "https://t.gitbook.io/", "threat": "phishing", "probability": 1.0, "hold": True,
+         "status": "REVIEW_REQUIRED", "rule": "brand_typo_domain", "rule_original": "benign"},
+        {**base, "url": "https://s.example/", "threat": "phishing", "probability": 1.0, "hold": True,
+         "status": "REVIEW_REQUIRED", "rule": None},  # 평판 일치 등: 모양이 같아도 규칙이 아니다
+    ]
+    # 조사 컨테이너가 쓴 규칙 이름은 믿지 않는다: 표를 깨는 글자는 '코드 규칙'으로
+    assert fresh_set.rule_of({**base, "url": "https://q/", "rule": "x | **조작** |"}) == "코드 규칙"
+    run("fresh_20261016", "2026-10-16T00:00", old)
+    run("fresh_20261018", "2026-10-18T00:00", new)
+    md = fresh_set.summary_md(fresh_set.fresh_runs())
+    assert "| 2026-10-16 | 4 | 4 | 3 (75%) | 1 (1) | 25% | 2 | 2회 · 2곳 (official_redirect 1, 코드 규칙 1) | 0 |" in md, md
+    assert "| 2026-10-18 | 2 | 2 | 2 (100%) | 0 (0) | 0% | 2 | 1회 · 1곳 (brand_typo_domain 1) | 0 |" in md, md
+    assert "**3회 · 3곳 (official_redirect 1, 코드 규칙 1, brand_typo_domain 1)**" in md, md
 
 
 def test_date_must_be_digits():
