@@ -33,9 +33,10 @@ def is_control(item: bytes) -> bool:
 
 
 # API 가 콘솔로 넘기는 상한(Codex 지적: 침해된 에이전트가 통로로 메시지를 쏟아내도 콘솔·연결이 버티게).
-# 정상 프레임은 1280×800 JPEG 수백 KB, LiveSink 가 초당 30장 이하로 보낸다(클릭 표시는 단계마다 1개)
+# 정상 프레임은 1280×800 JPEG 수백 KB, LiveSink 가 초당 60장 이하로 보낸다(클릭 표시는 단계마다 1개).
+# 프레임만으로 상한을 채우면 클릭 표시가 버려지므로 프레임 속도의 2배로 둔다(1초 칸 경계에서 몰려도 여유)
 MAX_MESSAGE_BYTES = 2 * 1024 * 1024
-MAX_MESSAGES_PER_S = 60
+MAX_MESSAGES_PER_S = 120
 
 
 class ForwardLimit:
@@ -143,7 +144,7 @@ class LiveSink:
     """녹화기의 화면 전송 프레임을 받아, 시청 중일 때만 최대 max_fps 로 발행한다.
     발행은 별도 스레드에서 한다(에이전트의 이벤트 루프를 막지 않음). 밀리면 오래된 프레임을 버린다(클릭 표시는 버리지 않는다)."""
 
-    def __init__(self, publisher: LivePublisher, case_id: str, max_fps: int = 30):
+    def __init__(self, publisher: LivePublisher, case_id: str, max_fps: int = 60):
         self.pub, self.case_id = publisher, case_id
         self.min_interval = 1 / max_fps
         self._last_sent = 0.0
@@ -166,7 +167,7 @@ class LiveSink:
         if not self._was_watching or now >= self._next_slot:
             self._was_watching = True
             self._last_sent = now
-            # 프레임이 30fps 근처로 들쑥날쑥 와도 버리지 않도록, 직전 발행 시각이 아니라 일정한 칸 단위로 센다
+            # 프레임이 max_fps 근처로 들쑥날쑥 와도 버리지 않도록, 직전 발행 시각이 아니라 일정한 칸 단위로 센다
             self._next_slot = max(self._next_slot, now - self.min_interval) + self.min_interval
             self._offer(jpeg)
 
