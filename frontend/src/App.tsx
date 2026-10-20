@@ -45,8 +45,8 @@ import {
   verifyCase,
 } from "./api";
 import {
-  buildOverlay, buildPath, buildReasons, buildScreens, clip, CURSOR_IN, cursorTravel, hostOrFile, hostPath, jpegSize, liveClick, locateSeg, MAX_RECORDINGS, recCursor, recordingClicks, recordings, SCREEN_H,
-  SCREEN_W, segStarts, type ClickPoint, type Overlay, type Reason, type RecItem, type Screen, type Tone,
+  buildOverlay, buildPath, buildReasons, buildScreens, clip, CURSOR_IN, cursorTravel, hostOrFile, hostPath, jpegSize, liveActivity, liveClick, locateSeg, MAX_RECORDINGS, recCursor, recordingClicks, recordings, SCREEN_H,
+  SCREEN_W, segStarts, type Activity, type ClickPoint, type Overlay, type Reason, type RecItem, type Screen, type Tone,
 } from "./evidence";
 import { ACTION_LABEL, NET_CATEGORY_LABEL, overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
 
@@ -751,6 +751,9 @@ function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) 
   // 연관 사이트 하위 조사는 새 브라우저에서 다른 사이트를 연다: 앞 조사에서 누른 자리의 커서를 지우고, 그 조사의 첫 클릭 때
   // 그 자리에서 다시 나타낸다(지우지 않으면 클릭 없이 스크롤만 하는 하위 조사 내내 다른 사이트 위에 커서가 멈춰 있었다)
   useEffect(() => setClick(null), [view.sub]);
+  // 지금 하는 일: 화면이 멈춘 동안(관찰·판단·로딩 대기) 에이전트가 무엇을 하는지 실시간 화면 위에 보인다. since 는 바뀐 시각(경과 초)
+  const [activity, setActivity] = useState<{ label: string; since: number } | null>(null);
+  const onActivity = useCallback((a: Activity) => setActivity({ label: a.label, since: performance.now() }), []);
   const still = shot ? <LiveScreen caseId={c.id} name={shot} /> : <span className="small">첫 화면을 기다리는 중…</span>;
   return (
     <>
@@ -770,11 +773,20 @@ function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) 
       <div className="monitor-screen screen-body">
         {/* 조사가 끝나도 영상이 그려졌으면 마지막 프레임을 둔다(정지 화면으로 바꾸면 다시 받는 동안 어두운 바탕이 보였다) */}
         {!videoOff && (!ended || videoShown) ? (
-          <LiveVideo caseId={c.id} onFps={setFps} onEnd={() => setVideoOff(true)} onShown={() => setVideoShown(true)} onClick={onClick} fallback={still} />
+          <LiveVideo
+            caseId={c.id}
+            onFps={setFps}
+            onEnd={() => setVideoOff(true)}
+            onShown={() => setVideoShown(true)}
+            onClick={onClick}
+            onActivity={onActivity}
+            fallback={still}
+          />
         ) : (
           still
         )}
         {click && !ended && !videoOff && <ClickMark p={click.p} hitKey={click.n} align="top" travel={click.travel} hitDelay={click.travel} />}
+        {activity && !ended && !videoOff && <ActivityChip label={activity.label} since={activity.since} />}
         <span className="monitor-meta">
           {fps > 0 && !videoOff ? `${fps}fps · ` : ""}
           {String(steps).padStart(2, "0")}/{Math.max(MAX_STEPS, steps)}
@@ -795,6 +807,23 @@ function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) 
         )}
       </div>
     </>
+  );
+}
+
+// 실시간 화면 왼쪽 아래: 에이전트가 지금 하는 일(고정 문구)과 그 일을 시작한 뒤 지난 초(1초부터). 초가 늘어 멈춘 화면도 조사가 계속되는 것을 보인다
+function ActivityChip({ label, since }: { label: string; since: number }) {
+  const [now, setNow] = useState(() => performance.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(performance.now()), 500);
+    return () => clearInterval(t);
+  }, []);
+  const sec = Math.floor((now - since) / 1000);
+  return (
+    <span className="monitor-activity" role="status" aria-live="polite">
+      <span className="pulse" aria-hidden="true" />
+      {label}
+      {sec >= 1 && <span className="monitor-activity-sec">{sec}초</span>}
+    </span>
   );
 }
 
@@ -2598,6 +2627,7 @@ function LiveVideo({
   onEnd,
   onShown,
   onClick,
+  onActivity,
   fallback,
 }: {
   caseId: string;
@@ -2605,14 +2635,15 @@ function LiveVideo({
   onEnd: () => void;
   onShown?: () => void;
   onClick?: (p: ClickPoint) => void;
+  onActivity?: (a: Activity) => void;
   fallback: React.ReactNode;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   // 캔버스는 첫 프레임을 실제로 그린 뒤에 보인다(그 전에는 fallback). 메시지가 오자마자 바꾸면 재생 버퍼(LIVE_DELAY_MS)와
   // 디코드 동안 빈 캔버스(어두운 바탕)가 보여 깜빡였다
   const [hasFrame, setHasFrame] = useState(false);
-  const cb = useRef({ onFps, onEnd, onShown, onClick });
-  cb.current = { onFps, onEnd, onShown, onClick };
+  const cb = useRef({ onFps, onEnd, onShown, onClick, onActivity });
+  cb.current = { onFps, onEnd, onShown, onClick, onActivity };
 
   useEffect(() => {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -2626,6 +2657,7 @@ function LiveVideo({
     // 받은 프레임(디코드 끝남)을 받은 시각과 함께 쌓아 두고, 화면 주기마다 꺼내 그린다
     const queue: { bmp: ImageBitmap; at: number }[] = [];
     const clicks: { p: ClickPoint; at: number }[] = []; // 클릭 표시: 프레임과 같은 지연으로 내보낸다
+    const acts: { a: Activity; at: number }[] = []; // 지금 하는 일: 클릭 표시처럼 프레임과 같은 지연으로(받은 순서대로)
     let shown: ImageBitmap | null = null; // 지금 그린 프레임
     let shownAt = 0; // 그 프레임을 받은 시각
     let lastPresent = 0;
@@ -2711,6 +2743,7 @@ function LiveVideo({
       // 너무 밀렸으면(받은 지 오래된 프레임) 최근 것만 남긴다
       while (queue.length > 1 && now - queue[0].at > LIVE_DELAY_MS + LIVE_MAX_LAG_MS) queue.shift()!.bmp.close();
       while (clicks.length && now >= clicks[0].at + LIVE_DELAY_MS) cb.current.onClick?.(clicks.shift()!.p);
+      while (acts.length && now >= acts[0].at + LIVE_DELAY_MS) cb.current.onActivity?.(acts.shift()!.a);
       if (lastRaf) vsync = Math.min(50, Math.max(4, vsync * 0.9 + (now - lastRaf) * 0.1));
       lastRaf = now;
       // 받은 뒤 LIVE_DELAY_MS 가 지났고, 앞 프레임에서 평균 간격만큼 지났을 때(재생 버퍼에 머물 만큼보다 쌓이면 조금 빨리) 다음 프레임.
@@ -2737,14 +2770,21 @@ function LiveVideo({
       const at = performance.now();
       if (!(blob instanceof Blob) || blob.size > LIVE_MAX_BYTES) return;
       if (blob.size < 256) {
-        // JPEG 프레임이 아닌 작은 메시지: 클릭 표시 {"click":[...]}. 모양이 틀리면 버린다. 몰려오면 읽기 전에 버린다
-        if (reading >= 2 || clicks.length >= 20) return;
+        // JPEG 프레임이 아닌 작은 메시지: 클릭 표시 {"click":[...]}, 지금 하는 일 {"act":...}. 모양이 틀리면 버린다.
+        // 몰려오면 읽기 전에 버린다(지금 하는 일은 단계마다 몇 개라 동시에 읽는 수를 클릭 표시만 있을 때보다 조금 넉넉히)
+        if (reading >= 4 || clicks.length >= 20 || acts.length >= 20) return;
         reading += 1;
         void blob
           .text()
           .then((t) => {
             const p = liveClick(t);
             if (p && alive && clicks.length < 20) clicks.push({ p, at });
+            const a = p ? null : liveActivity(t);
+            if (a && alive && acts.length < 20) {
+              let i = acts.length; // 읽기가 순서를 바꿔 끝내도 받은 순서대로
+              while (i > 0 && acts[i - 1].at > at) i--;
+              acts.splice(i, 0, { a, at });
+            }
           }, () => undefined)
           .finally(() => {
             reading -= 1;

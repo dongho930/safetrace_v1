@@ -149,6 +149,8 @@ def _investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], Non
     # 시작·경유 주소도 같다: 연관 후보가 새 사건이 되면 페이지가 정한 주소가 시작 주소가 된다(Codex 지적)
     own = [u for u in dict.fromkeys([url, *result.nav_chain[-10:]]) if u]
     own_ok = [u for u in own if not _has_pii(u)]
+    if sink:
+        sink.activity("reputation")
     sb = lookup([*own_ok, *cand_urls], s.safebrowsing_api_key.get_secret_value(), transport=transport)
     _append(writer, emit, "safebrowsing", {**sb, "excluded_pii": sum(1 for c in cands[:10] if _has_pii(c["url"]))
                                            + len(own) - len(own_ok)})
@@ -197,6 +199,8 @@ def _investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], Non
                               "reputation_unchecked": c["url"] not in first_checked} for c in cands]})
     results = _investigate_candidates(chosen, s, decider, writer, emit, resolver, sink) if chosen else []
     if results:
+        if sink:
+            sink.activity("reputation")
         _check_candidate_reputation(results, hits, first_checked, s, transport, writer, emit)
         _append(writer, emit, "candidate_results", {"results": results})
     by_url = {r["url"]: r for r in results}

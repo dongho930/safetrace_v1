@@ -297,6 +297,68 @@ def test_live_click_survives_slow_viewer():
     assert pub2.got == []
 
 
+def test_live_activity_sent_on_change_and_resent_to_new_viewer():
+    """'지금 하는 일'은 바뀔 때만, 시청 중일 때만 보낸다. 시청을 시작한 사람에게는 첫 프레임 앞에 마지막 것을 다시 보낸다.
+    정해 둔 이름만 받고, 개수는 0~99 로 자른다(콘솔이 고정 문구로 보이므로 에이전트 글자는 통로에 싣지 않는다)."""
+    import threading
+
+    from safetrace import live
+
+    class Pub:
+        def __init__(self):
+            self.got, self.watch = [], False
+            self.lock = threading.Lock()
+
+        def watching(self, case_id):
+            return self.watch
+
+        def publish(self, case_id, item):
+            with self.lock:
+                self.got.append(item)
+
+        def end(self, case_id):
+            pass
+
+    pub = Pub()
+    sink = live.LiveSink(pub, "c")
+    sink.activity("open")  # 아무도 안 봄: 보내지 않고 기억만
+    sink.activity("read")
+    pub.watch = True
+    sink.on_frame(b"\xff\xd8f1")  # 시청 시작: 마지막 일(read)을 프레임 앞에
+    sink.activity("read")  # 같은 일: 다시 보내지 않음
+    sink.activity("ocr", 500)
+    with pytest.raises(ValueError):
+        sink.activity("<b>x</b>")
+    # 화면이 멈춘 채(프레임 없음) 시청자가 나갔다 돌아오면 keepalive 가 마지막 일과 마지막 프레임을 다시 보낸다
+    pub.watch = False
+    sink.keepalive()
+    pub.watch = True
+    sink.keepalive()
+    sink.close()
+    assert pub.got == [b'{"act":"read"}', b"\xff\xd8f1", b'{"act":"ocr","n":99}',
+                       b'{"act":"ocr","n":99}', b"\xff\xd8f1"], pub.got
+
+
+def test_agent_activity_names_are_known():
+    """에이전트 코드가 알리는 '지금 하는 일' 이름은 모두 live.ACTIVITIES 에 있다(없으면 조사 중에 ValueError 로 실패한다).
+    콘솔 문구표(evidence.ts ACTIVITY_LABEL)도 같은 이름을 모두 갖는다."""
+    import re
+    from pathlib import Path
+
+    from safetrace import live
+
+    root = Path(__file__).resolve().parents[1] / "safetrace" / "agent"
+    used = set()
+    for f in ("loop.py", "runner.py"):
+        used |= set(re.findall(r'(?:_act|\.activity)\("([a-z_]+)"', (root / f).read_text(encoding="utf-8")))
+    assert used and used <= live.ACTIVITIES, used - live.ACTIVITIES
+    assert used == live.ACTIVITIES, live.ACTIVITIES - used  # 쓰지 않는 이름을 남겨 두지 않는다
+    ts = (Path(__file__).resolve().parents[2] / "frontend" / "src" / "evidence.ts").read_text(encoding="utf-8")
+    table = ts[ts.index("const ACTIVITY_LABEL"):]
+    table = table[: table.index("};")]
+    assert set(re.findall(r"^\s+([a-z_]+):", table, re.M)) == live.ACTIVITIES
+
+
 def test_forward_limit_drops_oversized_and_flood(monkeypatch):
     """Codex 지적: 침해된 에이전트가 통로로 쏟아내도 API 는 너무 큰 메시지와 1초에 상한(120개)을 넘는 메시지를 넘기지 않는다."""
     from safetrace import live

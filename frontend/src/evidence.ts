@@ -319,6 +319,37 @@ export function liveClick(text: string): ClickPoint | null {
     return null;
   }
 }
+// 실시간 화면 통로로 온 '지금 하는 일' {"act":"decide"} / {"act":"ocr","n":3}(에이전트가 보낸 값, 믿지 않음).
+// 화면에 보이는 글자는 아래 표의 고정 문구뿐이다(에이전트가 보낸 글자를 그대로 쓰지 않는다). 모르는 이름은 버린다
+const ACTIVITY_LABEL: Record<string, string> = {
+  open: "페이지 여는 중",
+  load: "화면이 뜨기를 기다리는 중",
+  read: "화면 읽는 중",
+  ocr: "이미지 버튼 글자 읽는 중",
+  capture: "화면 전체 기록 중",
+  decide: "Jev가 다음 행동 고르는 중",
+  click: "버튼을 누르고 응답 기다리는 중",
+  scroll: "아래로 내리는 중",
+  back: "이전 화면으로 돌아가는 중",
+  redirect_wait: "자동 이동 기다리는 중",
+  nav_check: "이동할 주소 검사 중",
+  judge: "위협 판단 중",
+  reputation: "외부 평판 조회 중",
+};
+export type Activity = { code: string; label: string };
+export function liveActivity(text: string): Activity | null {
+  try {
+    const v: unknown = JSON.parse(text);
+    if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+    const { act, n } = v as { act?: unknown; n?: unknown };
+    if (typeof act !== "string" || !Object.hasOwn(ACTIVITY_LABEL, act)) return null;
+    const count = typeof n === "number" && Number.isInteger(n) && n > 0 && n <= 99 ? n : 0;
+    const label = act === "ocr" && count ? `이미지 버튼 ${count}개 글자 읽는 중` : ACTIVITY_LABEL[act];
+    return { code: act, label };
+  } catch {
+    return null;
+  }
+}
 // scrolled: 누르려고 요소를 창 안으로 옮기느라 화면이 움직였다(에이전트 기록). 예전 기록에는 없어 false
 export type RecClick = ClickPoint & { t: number; scrolled: boolean };
 // 녹화 위 클릭: 게이트 기록의 클릭 시각(at) - 녹화 0초 시각(t0) = 영상 시간(초). 둘 다 에이전트 쪽 같은 시계(epoch 초)
