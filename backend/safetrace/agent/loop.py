@@ -358,6 +358,11 @@ class AgentRun:
         self._waited: set[str] = set()  # 자동 이동을 기다려 본 대기 화면 주소(한 번만 기다린다)
         self._nav_checks = 0  # 검사 중인 주 화면 이동 요청 수
 
+    def _act(self, code: str, n: int | None = None):
+        """콘솔 실시간 화면에 '지금 하는 일'을 알린다(live.ACTIVITIES, 보기용이며 증거 기록이 아니다)."""
+        if self.live:
+            self.live.activity(code, n)
+
     # ── 기록 ──────────────────────────────────────────
     def _record(self, kind: str, data: dict, files: list[str] | None = None) -> int:
         if self.sub:
@@ -370,6 +375,7 @@ class AgentRun:
     @contextlib.asynccontextmanager
     async def _capture_layout(self, page: Page):
         """페이지 전체 캡처 준비(full_layout). 펼친 모습이 녹화·실시간 화면에 찍히지 않게 그동안 녹화를 멈춘다."""
+        self._act("capture")
         if self.rec:
             self.rec.pause()
         try:
@@ -385,6 +391,7 @@ class AgentRun:
         name = f"{self._tag}s{self._shot:03d}_{label}.png"
         try:
             if full:
+                self._act("capture")
                 if self.rec:
                     self.rec.pause()  # 페이지 전체 캡처 중에는 창 크기가 잠시 바뀌어 녹화 프레임이 어긋난다
                 try:  # 크기 조회(페이지가 망칠 수 있음)부터 감싸 멈춤이 남지 않게(남으면 녹화가 조사 끝까지 멈춘다)
@@ -483,6 +490,7 @@ class AgentRun:
 
     # ── 관찰 ──────────────────────────────────────────
     async def _observe(self, page: Page, step: int) -> _Observation:
+        self._act("read")
         try:
             raw = await page.evaluate(COLLECT_JS, [self.attr, self.s.max_candidates])
         except PWError:
@@ -587,6 +595,8 @@ class AgentRun:
         """이미지 버튼들을 캡처한다(_capture_many_unpaused). 버튼을 찾아 위아래로 스크롤했다가 되돌리는 장면이
         콘솔 실시간 화면에서 튀지 않게 그동안 실시간 중계만 멈춘다(콘솔은 마지막 화면 유지). 녹화(증거)는 계속한다:
         스크롤하는 동안에만 보이는 내용이 있을 수 있어 증거에서는 빼지 않는다(Codex 지적)."""
+        if need:
+            self._act("ocr", len(need))
         if not need or not self.rec:
             return await self._capture_many_unpaused(page, need, until)
         self.rec.pause_live()
@@ -696,6 +706,7 @@ class AgentRun:
 
     async def _leave_dead_end(self, page: Page, back_to: Page, url: str) -> Page | None:
         """막다른 곳에서 마지막 실제 페이지로 돌아간다. 돌아가지 못하면 None."""
+        self._act("back")
         if page is not back_to:  # 새 창이 막다른 곳: 닫고 원래 창으로
             if self.rec:
                 await self.rec.switch(back_to)
@@ -719,6 +730,7 @@ class AgentRun:
         if url in self._waited or not is_auto_redirect_page(state.text):
             return False
         self._waited.add(url)
+        self._act("redirect_wait")
         t0 = time.monotonic()
         until = t0 + min(_AUTO_REDIRECT_WAIT, max(0.0, self.budget.remaining() - 5))
         while time.monotonic() < until:
@@ -741,6 +753,7 @@ class AgentRun:
         검사 중에 관찰하면 넘어가기 전 화면을 보고, 끝내면 목적지를 기록하기 전에 조사를 마친다."""
         if not self._nav_checks:
             return
+        self._act("nav_check")
         t0 = time.monotonic()
         while self._nav_checks and time.monotonic() - t0 < _NAV_CHECK_TIMEOUT + 1:
             await asyncio.sleep(0.05)
@@ -749,6 +762,7 @@ class AgentRun:
                                         "pending": self._nav_checks})
 
     async def _settle(self, page: Page):
+        self._act("load")
         try:
             await page.wait_for_load_state("domcontentloaded", timeout=5000)
             await page.wait_for_load_state("networkidle", timeout=3000)
@@ -802,6 +816,7 @@ class AgentRun:
         except (PWError, PWTimeout) as e:
             failed = True
             self._record("action_error", {"element": eid, "error": type(e).__name__})
+        self._act("load")
         # 느린 사이트: 새 창은 첫 응답이 와야 잡히고 이동도 늦게 시작한다. 주소가 바뀌거나 새 창이 생길 때까지 최대 3초
         new_pages: list[Page] = []
         for _ in range(12):
@@ -920,6 +935,7 @@ class AgentRun:
             self._save_recording(self.ev.dir / f"{self._tag}recording.tmp.webm", rec_info)
         else:
             self._save_video(video_tmp)
+        self._act("judge")
         await asyncio.to_thread(self._judge)
         return self.result
 
@@ -941,6 +957,7 @@ class AgentRun:
         page.on("framenavigated", track)
         # 첫 접속은 두 단계로 본다. 서버 응답(헤더)이 제한 안에 오지 않을 때만 접속 불가다.
         # 응답은 왔는데 화면 구성이 늦는 사이트(무거운 첫 화면, 부하 중인 조사 서버)는 기다린 만큼 보고 조사를 이어 간다
+        self._act("open")
         try:
             resp = await page.goto(self.start_url, timeout=self.s.nav_timeout_ms, wait_until="commit")
         except (PWError, PWTimeout) as e:
@@ -1041,6 +1058,7 @@ class AgentRun:
                 self.result.status, self.result.finish_reason = "COMPLETED", over
                 break
 
+            self._act("decide")
             try:
                 decision = await asyncio.to_thread(self.decider.action, obs.state)
             except DecisionUnavailable as e:
@@ -1087,6 +1105,7 @@ class AgentRun:
             if decision.action == ActionKind.CLICK:
                 # 클릭 표시 좌표는 게이트 검사 전에 잰다: 누르려고 창 안으로 옮기는 스크롤에 페이지가 반응해 요소를 바꿔도
                 # (결제 버튼으로 바꿔치기) 검사가 스크롤 뒤의 요소를 본다(Codex 지적: 검사 뒤에 스크롤하면 바뀐 요소를 눌렀다)
+                self._act("click")
                 point, scrolled = await self._click_point(page, decision.element_id or "")
                 cur = await self._read_element(page, decision.element_id or "")
                 gate = self.gate.check_click(offered, decision.element_id, obs.infos.get(decision.element_id or ""), cur)
@@ -1113,13 +1132,16 @@ class AgentRun:
                     page.on("framenavigated", track)
                 outcome = f"click:{decision.element_id}" + ("" if click_result == "ok" else f":{click_result}")
             elif decision.action == ActionKind.SCROLL:
+                self._act("scroll")
                 y0 = await self._scroll_y(page)
                 await page.mouse.wheel(0, 700)
                 await asyncio.sleep(0.5)
                 outcome = "scroll" if await self._scroll_y(page) != y0 else "scroll_no_effect"  # 더 내려갈 곳 없음
             elif decision.action == ActionKind.CLOSE_POPUP:
+                self._act("click")
                 outcome = "close_popup:" + await self._close_popup(page, offered, obs)
             elif decision.action == ActionKind.BACK:
+                self._act("back")
                 url0 = page.url
                 try:
                     await page.go_back(timeout=self.s.nav_timeout_ms)

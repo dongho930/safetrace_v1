@@ -32,6 +32,27 @@ def is_control(item: bytes) -> bool:
     return item == END or item[:1] == b"{"
 
 
+# 에이전트가 지금 하는 일: {"act":"decide"}, {"act":"ocr","n":3}. 콘솔이 정해 둔 문구로 실시간 화면 위에 보인다.
+# 화면이 멈춘 동안(관찰·판단·로딩 대기) 무엇을 하는지 알리려는 것이며 증거가 아니다(서명 체인에 넣지 않는다).
+# 클릭 표시처럼 영상과 같은 통로·같은 재생 버퍼를 타서 그 순간의 화면과 함께 보인다
+ACTIVITIES = frozenset({
+    "open",           # 시작 주소를 연다
+    "load",           # 화면이 다 뜨기를 기다린다(클릭·이동 뒤)
+    "read",           # 화면의 버튼·글자를 읽는다(관찰)
+    "ocr",            # 글자 없는 이미지 버튼을 OCR 로 읽는다(그동안 실시간 중계는 멈춤), n = 버튼 수
+    "capture",        # 페이지 전체를 증거로 찍는다(그동안 녹화·실시간 모두 멈춤)
+    "decide",         # Jev 가 다음 행동을 고른다
+    "click",          # 고른 버튼을 다시 확인하고(안전 게이트) 누른다. 누른 뒤 이동이 시작될 때까지(서버 응답) 기다리는 시간도 여기 든다
+    "scroll",
+    "back",           # 이전 화면으로 돌아간다(막다른 곳·뒤로)
+    "redirect_wait",  # 단축 서비스 대기 화면의 자동 이동을 기다린다
+    "nav_check",      # 이동할 주소를 검사한다(이름 해석)
+    "judge",          # 위협 판단
+    "reputation",     # 외부 평판(Safe Browsing) 조회
+})
+MAX_ACTIVITY_N = 99
+
+
 # API 가 콘솔로 넘기는 상한(Codex 지적: 침해된 에이전트가 통로로 메시지를 쏟아내도 콘솔·연결이 버티게).
 # 정상 프레임은 1280×800 JPEG 수백 KB, LiveSink 가 초당 60장 이하로 보낸다(클릭 표시는 단계마다 1개).
 # 프레임만으로 상한을 채우면 클릭 표시가 버려지므로 프레임 속도의 2배로 둔다(1초 칸 경계에서 몰려도 여유)
@@ -150,6 +171,8 @@ class LiveSink:
         self._last_sent = 0.0
         self._next_slot = 0.0  # 다음 발행 가능 시각(간격이 조금 흔들려도 평균 max_fps 를 지키게)
         self._last_frame: bytes | None = None
+        self._activity: bytes | None = None  # 마지막으로 알린 '지금 하는 일'(새로 들어온 시청자에게 다시 보낸다)
+        self._activity_sent = False  # 그것을 지금 시청 중인 사람에게 이미 보냈다
         self._was_watching = False
         self._cv = threading.Condition()
         self._items: collections.deque[bytes | None] = collections.deque()  # 보낼 것(프레임은 최대 2장, None 은 끝)
@@ -162,9 +185,11 @@ class LiveSink:
         now = time.monotonic()
         watching = self.pub.watching(self.case_id)
         if not watching:
-            self._was_watching = False
+            self._was_watching = self._activity_sent = False
             return
         if not self._was_watching or now >= self._next_slot:
+            if not self._was_watching:
+                self._resend_activity()
             self._was_watching = True
             self._last_sent = now
             # 프레임이 max_fps 근처로 들쑥날쑥 와도 버리지 않도록, 직전 발행 시각이 아니라 일정한 칸 단위로 센다
@@ -173,8 +198,13 @@ class LiveSink:
 
     def keepalive(self):
         """화면이 멈춰 있어도 새로 들어온 시청자가 볼 수 있게 마지막 프레임을 가끔 다시 보낸다."""
-        if self._last_frame is not None and self.pub.watching(self.case_id):
+        if not self.pub.watching(self.case_id):
+            self._was_watching = self._activity_sent = False  # 화면이 멈춘 채 시청자가 나갔다 돌아와도 다시 보내게
+            return
+        if self._last_frame is not None:
             if not self._was_watching or time.monotonic() - self._last_sent >= 1.0:
+                if not self._was_watching:
+                    self._resend_activity()
                 self._was_watching = True
                 self._last_sent = time.monotonic()
                 self._offer(self._last_frame)
@@ -191,8 +221,31 @@ class LiveSink:
         """에이전트가 누르기 직전의 버튼 상자. 시청 중일 때만, 프레임 속도 제한 없이 보낸다."""
         if not self.pub.watching(self.case_id):
             return
+        self._control(json.dumps({"click": point}, separators=(",", ":")).encode())
+
+    def activity(self, code: str, n: int | None = None):
+        """지금 하는 일(ACTIVITIES). 바뀔 때만, 시청 중일 때만 보낸다. 정해 둔 이름이 아니면 보내지 않는다."""
+        if code not in ACTIVITIES:
+            raise ValueError(f"unknown activity: {code}")
+        msg = {"act": code}
+        if n is not None:
+            msg["n"] = max(0, min(int(n), MAX_ACTIVITY_N))
+        item = json.dumps(msg, separators=(",", ":")).encode()
+        if item == self._activity:
+            return
+        self._activity = item
+        self._activity_sent = self.pub.watching(self.case_id)
+        if self._activity_sent:
+            self._control(item)
+
+    def _resend_activity(self):
+        if self._activity is not None and not self._activity_sent:
+            self._activity_sent = True
+            self._control(self._activity)
+
+    def _control(self, item: bytes):
         with self._cv:
-            self._items.append(json.dumps({"click": point}, separators=(",", ":")).encode())
+            self._items.append(item)
             self._cv.notify()
 
     def _run(self):

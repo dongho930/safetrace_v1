@@ -389,6 +389,12 @@ button.reason:hover { border-color: var(--line-strong); }
 .monitor-screen { position: relative; flex: 0 1 auto; aspect-ratio: 16 / 10; min-height: 180px; background: var(--screen-bg); box-shadow: var(--inset-screen); }
 .monitor-empty { display: grid; place-items: center; color: var(--header-muted); font-size: 13px; }
 .monitor-meta { position: absolute; right: 8px; bottom: 6px; z-index: 2; font-size: 11px; color: var(--header-muted); }
+/* 지금 하는 일: 조사 대상 화면(밝기 제각각) 위에서도 읽히게 어두운 반투명 바탕 */
+.monitor-activity { position: absolute; left: 8px; bottom: 6px; z-index: 2; max-width: calc(100% - 120px); display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 7px; border-radius: var(--r-ctl); background: rgba(16, 33, 63, .82); color: var(--header-ink); font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: 0 2px 8px rgba(0, 0, 0, .25); }
+.monitor-activity .pulse { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--header-accent); animation: activity-pulse 1.2s ease-in-out infinite; }
+.monitor-activity-sec { color: var(--header-muted); font-weight: 400; }
+@keyframes activity-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .monitor-activity .pulse { animation: none; } }
 .monitor .open-orig { display: none; }
 .monitor-foot { flex: none; display: flex; gap: 6px; align-items: baseline; padding: 8px 10px; font-size: 12px; min-height: 34px; }
 .monitor-jev { color: var(--primary); font-weight: 700; flex: none; }

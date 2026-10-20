@@ -120,11 +120,27 @@ def test_live_websocket_streams_frames(client, testpages):
             while True:
                 frames.append(ws.receive_bytes())
         assert e.value.code == 1000
-    clicks = [json.loads(f) for f in frames if f[:1] == b"{"]  # 클릭 표시(누르기 직전 버튼 상자)
+    from safetrace.live import ACTIVITIES
+
+    controls = [json.loads(f) for f in frames if f[:1] == b"{"]
+    clicks = [c for c in controls if "click" in c]  # 클릭 표시(누르기 직전 버튼 상자)
+    acts = [c for c in controls if "act" in c]  # 지금 하는 일
+    assert len(clicks) + len(acts) == len(controls), controls
     frames = [f for f in frames if f[:1] != b"{"]
     assert len(frames) >= 10, len(frames)
     assert all(f[:3] == bytes([0xFF, 0xD8, 0xFF]) for f in frames)  # JPEG
     assert clicks and all(list(c) == ["click"] and len(c["click"]) == 4 and all(isinstance(v, int) for v in c["click"]) for c in clicks), clicks
+    codes = [a["act"] for a in acts]
+    assert set(codes) <= ACTIVITIES and all(set(a) <= {"act", "n"} for a in acts), acts
+    assert {"read", "capture", "decide", "click", "load", "judge", "reputation"} <= set(codes), codes
+    assert all(a != b for a, b in zip(codes, codes[1:])), codes  # 바뀔 때만 보낸다
+    # 클릭 표시마다 바로 앞의 '지금 하는 일'은 클릭(버튼을 누르고 응답 기다리는 중)이다(시청을 시작하기 전에 알린 것은 못 받았을 수 있다)
+    last = None
+    for c in controls:
+        if "act" in c:
+            last = c["act"]
+        else:
+            assert last in ("click", None), controls
     # 라이브 끝 신호 뒤에 최종 상태(Safe Browsing 등)가 기록되므로 이벤트 스트림으로 끝까지 기다린다
     with client.stream("GET", f"/api/cases/{cid}/events", headers=h(VIEWER)) as st:
         for _ in st.iter_lines():

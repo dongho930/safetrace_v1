@@ -142,6 +142,7 @@ def test_capture_error_releases_pause(tmp_path):
 
     run = AgentRun.__new__(AgentRun)
     run.rec = ScreencastRecorder("ffmpeg", None)
+    run.live = None  # 실시간 화면을 보는 사람 없음(지금 하는 일 알림은 보내지 않는다)
     run._shot, run._tag, run.attr = 0, "", "data-st-test"
     run.s = SimpleNamespace(screenshot_max_height=6000)
     run.ev = SimpleNamespace(file_path=lambda n: tmp_path / n)
@@ -177,6 +178,7 @@ def test_ocr_capture_pauses_live_only():
 
     run = AgentRun.__new__(AgentRun)
     run.rec = ScreencastRecorder("ffmpeg", None)
+    run.live = None  # 실시간 화면을 보는 사람 없음(지금 하는 일 알림은 보내지 않는다)
     seen = []
 
     async def inner(page, need, until):
