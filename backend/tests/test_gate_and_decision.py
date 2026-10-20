@@ -206,8 +206,13 @@ def test_only_finish_left_skips_model():
     assert d.choice == "finish" and d.provider == "exhausted"
 
 
-def test_live_sink_keeps_30fps_with_jittery_frames(monkeypatch):
-    """프레임이 30fps 근처로 들쑥날쑥 와도(31~36ms 간격) 발행이 크게 줄지 않는다."""
+@pytest.mark.parametrize("fps,lo,hi,floor", [
+    (30, 0.031, 0.036, 27),
+    # 기본값 60: 브라우저 화면 전송은 움직일 때 약 18ms 간격(녹화 41건 중앙값)으로 들쑥날쑥 온다
+    (60, 0.0155, 0.0185, 54),
+])
+def test_live_sink_keeps_fps_with_jittery_frames(monkeypatch, fps, lo, hi, floor):
+    """프레임이 max_fps 근처로 들쑥날쑥 와도 발행이 크게 줄지 않는다."""
     import random
 
     from safetrace import live
@@ -227,16 +232,28 @@ def test_live_sink_keeps_30fps_with_jittery_frames(monkeypatch):
 
     clock = [100.0]
     monkeypatch.setattr(live.time, "monotonic", lambda: clock[0])
-    sink = live.LiveSink(Pub(), "c", max_fps=30)
+    sink = live.LiveSink(Pub(), "c", max_fps=fps)
     offered = []
     monkeypatch.setattr(sink, "_offer", lambda f: offered.append(f))
     rnd = random.Random(1)
-    for _ in range(300):  # 약 10초
-        clock[0] += rnd.uniform(0.031, 0.036)
+    for _ in range(fps * 10):  # 약 10초
+        clock[0] += rnd.uniform(lo, hi)
         sink.on_frame(b"x")
     seconds = clock[0] - 100.0
-    assert len(offered) / seconds >= 27, len(offered) / seconds
+    assert floor <= len(offered) / seconds <= fps + 1, len(offered) / seconds
     sink.close()
+
+
+def test_live_defaults_leave_room_for_click_marks():
+    """기본 실시간 화면 속도(60)로 프레임을 보내도 API 상한(1초 칸)에 클릭 표시가 들어갈 자리가 남는다.
+    상한이 프레임 속도와 같으면 1초 칸 경계에 몰린 프레임이 상한을 채워 클릭 표시가 버려진다."""
+    from safetrace import live
+    from safetrace.config import Settings
+
+    fps = Settings().live_max_fps
+    assert fps == 60
+    assert live.MAX_MESSAGES_PER_S >= 2 * fps
+    assert live.LiveSink.__init__.__defaults__[0] == fps  # LiveSink 를 직접 만들 때도 같은 속도
 
 
 def test_live_click_survives_slow_viewer():
@@ -281,7 +298,7 @@ def test_live_click_survives_slow_viewer():
 
 
 def test_forward_limit_drops_oversized_and_flood(monkeypatch):
-    """Codex 지적: 침해된 에이전트가 통로로 쏟아내도 API 는 너무 큰 메시지와 1초에 60개를 넘는 메시지를 넘기지 않는다."""
+    """Codex 지적: 침해된 에이전트가 통로로 쏟아내도 API 는 너무 큰 메시지와 1초에 상한(120개)을 넘는 메시지를 넘기지 않는다."""
     from safetrace import live
 
     clock = [10.0]

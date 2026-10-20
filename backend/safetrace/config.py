@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     egress_proxy: str | None = None  # 예: http://egress:3128
     resolver_url: str | None = None  # 격리망에서 1차 IP 확인용 DNS 조회. 예: http://egress:3129
     record_video: bool = True
-    live_max_fps: int = 30  # 콘솔 실시간 화면(보는 사람이 있을 때만 전송)
+    live_max_fps: int = 60  # 콘솔 실시간 화면(보는 사람이 있을 때만 전송). 브라우저 화면 전송은 움직일 때 초당 약 56장
     ffmpeg_path: str = ""  # 비우면 PATH·Playwright 가 받아 둔 ffmpeg 를 찾는다. 없으면 Playwright 내장 녹화
     ocr_enabled: bool = True
     # 관찰 한 번에 이미지 버튼 OCR 에 쓰는 최대 시간(초). 이미지가 많은 첫 화면이 조사 시간을 다 쓰지 않게 한다

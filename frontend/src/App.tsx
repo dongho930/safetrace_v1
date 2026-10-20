@@ -2582,10 +2582,10 @@ function RecordingPlayer({ caseId, recs, events }: { caseId: string; recs: RecIt
 const LIVE_DELAY_MS = 150;
 const LIVE_GAP_MS = 250;
 const LIVE_FADE_MS = 150;
-const LIVE_MAX_QUEUE = 8;
+const LIVE_MAX_QUEUE = 12; // 초당 60장이면 재생 버퍼(LIVE_DELAY_MS)에 약 9장이 머문다
 const LIVE_MAX_LAG_MS = 450;
 // 받는 쪽 상한(Codex 지적: 침해된 에이전트가 통로로 메시지를 쏟아내도 콘솔이 디코딩을 끝없이 시작하지 않게).
-// 정상 프레임은 1280×800 JPEG 수백 KB, 초당 30장 이하
+// 정상 프레임은 1280×800 JPEG 수백 KB, 초당 60장 이하
 const LIVE_MAX_BYTES = 2 * 1024 * 1024;
 const LIVE_MAX_DECODING = 2;
 // 디코드 전에 JPEG 머리로 해상도를 본다: 2MiB 안에 압축된 초고해상도 이미지는 디코드하면 장당 수백 MB 다(Codex 지적).
@@ -2631,7 +2631,9 @@ function LiveVideo({
     let lastPresent = 0;
     let fadeFrom: ImageBitmap | null = null; // 겹쳐 바꾸는 중인 이전 프레임
     let fadeStart = 0;
-    let iv = 33; // 이어서 올 때의 프레임 간격(ms, 이동 평균)
+    let iv = 1000 / 60; // 이어서 올 때의 프레임 간격(ms, 이동 평균)
+    let vsync = 1000 / 60; // 화면 주기(ms, 이동 평균)
+    let lastRaf = 0;
     let lastArrival = 0;
     let raf = 0;
     let decoding = 0; // 디코드 중인 프레임 수(최대 LIVE_MAX_DECODING)
@@ -2709,8 +2711,12 @@ function LiveVideo({
       // 너무 밀렸으면(받은 지 오래된 프레임) 최근 것만 남긴다
       while (queue.length > 1 && now - queue[0].at > LIVE_DELAY_MS + LIVE_MAX_LAG_MS) queue.shift()!.bmp.close();
       while (clicks.length && now >= clicks[0].at + LIVE_DELAY_MS) cb.current.onClick?.(clicks.shift()!.p);
-      // 받은 뒤 LIVE_DELAY_MS 가 지났고, 앞 프레임에서 평균 간격만큼 지났을 때(쌓이면 조금 빨리) 다음 프레임
-      if (queue.length && now >= Math.max(queue[0].at + LIVE_DELAY_MS, lastPresent + iv * (queue.length > 3 ? 0.7 : 1))) {
+      if (lastRaf) vsync = Math.min(50, Math.max(4, vsync * 0.9 + (now - lastRaf) * 0.1));
+      lastRaf = now;
+      // 받은 뒤 LIVE_DELAY_MS 가 지났고, 앞 프레임에서 평균 간격만큼 지났을 때(재생 버퍼에 머물 만큼보다 쌓이면 조금 빨리) 다음 프레임.
+      // 화면 주기 반만큼 일찍 와도 그린다: 프레임 간격이 화면 주기와 같으면(60장·60Hz) 흔들림으로 한 주기씩 건너뛰어 30장처럼 보였다
+      const backlog = queue.length > LIVE_DELAY_MS / iv + 2;
+      if (queue.length && now + vsync / 2 >= Math.max(queue[0].at + LIVE_DELAY_MS, lastPresent + iv * (backlog ? 0.7 : 1))) {
         present(queue.shift()!, now);
       } else if (fadeFrom) {
         paint(now);
