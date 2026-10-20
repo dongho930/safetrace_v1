@@ -12,6 +12,8 @@
 정답(expected): phishing·scam·illegal_gambling·malware·benign, 또는 유형을 가리지 않는 malicious.
 연관 사이트 발견(docs/related-sites.md): 하위 조사는 원래 판정을 바꾸지 않으므로 정답률과 따로 잰다
 (하위 조사 비율, 위협 발견 비율, 발견 사이트 수, 회선 차단 추정 아닌 비율, 후보 1곳당 시간, 원래 결과까지 시간).
+외부 평판 비교: 조사할 때 SafeTrace 가 받은 Safe Browsing 조회 결과를 기록(sb)에 남겨, 같은 순간에
+'Safe Browsing 만 썼다면'과 SafeTrace 의 판단을 견준다(나중에 다시 조회하면 그사이 목록이 늘어 Safe Browsing 에 유리하다).
 조사 증거는 컨테이너의 임시 폴더에 쓴다(콘솔 사건 목록·증거 볼륨을 더럽히지 않음).
 
 평가 목록 관리: KISA 주소는 시간이 지나면 사라진다. 접속 불가(UNREACHABLE)는 채점에서 빼고 따로 세므로,
@@ -176,6 +178,68 @@ def _related_rows(m: dict) -> list[tuple[str, str]]:
     ]
 
 
+# ── 외부 평판 비교(순수 함수) ───────────────────────────────
+def sb_record(data: object, start: str, nav: object) -> dict:
+    """원래 조사의 safebrowsing 기록(조사 당시 SafeTrace 가 받은 조회 결과)을 평가 기록용으로 줄인다.
+    start: 신고 주소가 일치, own: 신고·경유·최종 주소(브라우저가 실제로 연 주소) 중 하나라도 일치,
+    cand: 연관 후보 주소만 일치. 조회하지 못했으면 status 가 match·no_match 가 아니다(비교에서 뺀다)."""
+    if not isinstance(data, dict):
+        return {"status": "none"}
+    status = str(data.get("status") or "")[:20]
+    matches = [m for m in data.get("matches") or [] if isinstance(m, dict)] if status == "match" else []
+    hits = {str(m.get("url") or "") for m in matches}
+    own = {start, *(u for u in (nav if isinstance(nav, list) else []) if isinstance(u, str))}
+    return {"status": status, "start": start in hits, "own": bool(hits & own), "cand": bool(hits - own),
+            "types": sorted({str(m.get("threat_type") or "")[:40] for m in matches})[:4]}
+
+
+def sb_measured(r: dict) -> bool:
+    sb = r.get("sb")
+    return isinstance(sb, dict) and sb.get("status") in ("match", "no_match")
+
+
+def sb_summary(recs: list[dict]) -> dict[str, dict]:
+    """그룹별(+전체): 같은 회차에서 Safe Browsing 만 썼을 때(신고·경유·최종 주소 일치)와 SafeTrace 의 위협 판단.
+    정상 사이트 그룹에서는 둘 다 오탐이다. 기록에 sb 가 없으면(이전 평가) measured 가 0 이다."""
+    groups: dict[str, list[dict]] = {}
+    for r in recs:
+        groups.setdefault(r["group"], []).append(r)
+        groups.setdefault("전체", []).append(r)
+    out = {}
+    for g, rs in groups.items():
+        scored = [r for r in rs if outcome(r["expected"], r) != "skipped"]
+        ms = [r for r in scored if sb_measured(r)]
+        st = [r.get("threat") in MALICIOUS for r in ms]
+        sb = [bool(r["sb"].get("own")) for r in ms]
+        out[g] = {"scored": len(scored), "measured": len(ms),
+                  "sb_start": sum(1 for r in ms if r["sb"].get("start")), "sb_own": sum(sb),
+                  "st": sum(st), "st_or_review": sum(1 for r, t in zip(ms, st) if t or r.get("status") == "REVIEW_REQUIRED"),
+                  "only_st": sum(1 for a, b in zip(sb, st) if b and not a), "only_sb": sum(1 for a, b in zip(sb, st) if a and not b),
+                  "both": sum(1 for a, b in zip(sb, st) if a and b), "neither": sum(1 for a, b in zip(sb, st) if not a and not b),
+                  "sb_only_auto": sum(1 for r, a, b in zip(ms, sb, st) if a and not b and r.get("status") == "COMPLETED")}
+    return out
+
+
+_SB_NAMES = ["조회한 회차", "Safe Browsing 일치(신고 주소)", "Safe Browsing 일치(신고·경유·최종)", "SafeTrace 위협 판단",
+             "SafeTrace 위협 또는 담당자 검토", "SafeTrace 만 / Safe Browsing 만 / 둘 다 / 둘 다 아님",
+             "Safe Browsing 만 잡았는데 검토 없이 끝남"]
+
+
+def _sb_rows(m: dict) -> list[tuple[str, str]]:
+    n = m["measured"]
+    if not n:
+        return [(name, "측정 안 함") for name in _SB_NAMES]
+    return [
+        ("조회한 회차", f"{n}/{m['scored']}"),
+        ("Safe Browsing 일치(신고 주소)", f"{m['sb_start']} ({_pct(m['sb_start'], n)})"),
+        ("Safe Browsing 일치(신고·경유·최종)", f"{m['sb_own']} ({_pct(m['sb_own'], n)})"),
+        ("SafeTrace 위협 판단", f"{m['st']} ({_pct(m['st'], n)})"),
+        ("SafeTrace 위협 또는 담당자 검토", f"{m['st_or_review']} ({_pct(m['st_or_review'], n)})"),
+        ("SafeTrace 만 / Safe Browsing 만 / 둘 다 / 둘 다 아님", f"{m['only_st']} / {m['only_sb']} / {m['both']} / {m['neither']}"),
+        ("Safe Browsing 만 잡았는데 검토 없이 끝남", str(m["sb_only_auto"])),
+    ]
+
+
 def _metric_rows(m: dict) -> list[tuple[str, str]]:
     n = m["scored"]
     return [
@@ -213,6 +277,15 @@ def report(recs: list[dict], meta: dict | None = None) -> str:
     autos = {g: rel[g]["auto_sites"] for g in groups if g != "전체" and rel[g]["measured"] and rel[g]["auto_sites"]}
     if autos:  # 자동 접수 대상(PR 4b 조건 1~6). 정상 사이트 그룹에 나오면 오탐이다
         lines += ["", "자동 접수 대상 사이트: " + " · ".join(f"{g} {', '.join(s)}" for g, s in autos.items())]
+    sbs = sb_summary(recs)
+    lines += ["", "## 외부 평판 비교 (Safe Browsing, 조사 당시)", "",
+              "같은 회차에서 Safe Browsing 만 썼다면(신고 주소 또는 브라우저가 연 경유·최종 주소가 일치)과 SafeTrace 의 위협 판단을 "
+              "견준다. 조회는 SafeTrace 가 조사할 때 한 것이다. 정상 사이트 그룹에서는 둘 다 오탐이다. SafeTrace 는 AI 가 정상으로 봐도 "
+              "Safe Browsing 이 일치하면 담당자 검토로 보낸다.", "",
+              "| 지표 | " + " | ".join(groups) + " |", "|---|" + "---|" * len(groups)]
+    srows = {g: _sb_rows(sbs[g]) for g in groups}
+    for i, name in enumerate(_SB_NAMES):
+        lines.append(f"| {name} | " + " | ".join(srows[g][i][1] for g in groups) + " |")
     lines += ["", "## URL별", "", "| 그룹 | 정답 | URL | 판정(반복) | 채점 |", "|---|---|---|---|---|"]
     by_url: dict[str, list[dict]] = {}
     for r in recs:
@@ -229,6 +302,7 @@ def report(recs: list[dict], meta: dict | None = None) -> str:
 def compare(a: list[dict], b: list[dict], name_a: str, name_b: str) -> str:
     sa, sb = summarize(a), summarize(b)
     ra_rel, rb_rel = related_summary(a), related_summary(b)
+    ra_sb, rb_sb = sb_summary(a), sb_summary(b)
     lines = [f"# 평가 비교: {name_a} → {name_b}", ""]
     for g in [g for g in sb if g != "전체"] + ["전체"]:
         if g not in sa:
@@ -238,6 +312,8 @@ def compare(a: list[dict], b: list[dict], name_a: str, name_b: str) -> str:
             lines.append(f"| {name} | {va} | {vb} |")
         for (name, va), (_, vb) in zip(_related_rows(ra_rel[g]), _related_rows(rb_rel[g])):
             lines.append(f"| 연관 · {name} | {va} | {vb} |")
+        for (name, va), (_, vb) in zip(_sb_rows(ra_sb[g]), _sb_rows(rb_sb[g])):
+            lines.append(f"| 평판 · {name} | {va} | {vb} |")
         lines.append("")
     # URL별로 정답 비율이 달라진 것
     def rate(recs):
@@ -334,6 +410,9 @@ def run_inside(args) -> None:
                     fin = next((k["data"] for k in kinds if k["kind"] == "finish"), {})
                     rec["steps"] = sum(1 for k in kinds if k["kind"] == "action")
                     rec["blocked_destinations"] = [b["host"] for b in fin.get("blocked_destinations", [])]
+                    # 조사 당시 받은 Safe Browsing 조회(원래 조사, 하위 조사의 조회는 candidate_safebrowsing)
+                    sbr = next((k["data"] for k in kinds if k["kind"] == "safebrowsing"), None)
+                    rec["sb"] = sb_record(sbr, row["url"], fin.get("nav_chain"))
                     cands = final.get("candidates") or []
                     rec["candidates"] = len(cands)
                     rec["candidates_investigated"] = sum(1 for c in cands if isinstance(c, dict) and c.get("sub"))

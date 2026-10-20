@@ -155,3 +155,54 @@ def test_related_summary_counts_auto_targets():
     m = related_summary(recs)
     assert (m["kisa"]["auto"], m["kisa"]["auto_sites"]) == (1, ["g.example"])
     assert m["normal"]["auto"] == 0
+
+
+def test_sb_record_flags():
+    """조사 당시 Safe Browsing 조회를 줄여 남긴다: 신고 주소·브라우저가 연 주소·연관 후보 일치를 나눠 센다.
+    조회하지 못한 것(오류·키 없음·기록 없음)은 일치로 세지 않는다. 값은 조사 컨테이너가 쓴 것이라 모양을 믿지 않는다."""
+    from eval_agent import sb_record, sb_measured
+
+    data = {"status": "match", "matches": [{"url": "https://a.example/", "threat_type": "SOCIAL_ENGINEERING"},
+                                           {"url": "https://cand.example/", "threat_type": "MALWARE"}]}
+    r = sb_record(data, "https://a.example/", ["https://a.example/", "https://b.example/"])
+    assert r == {"status": "match", "start": True, "own": True, "cand": True, "types": ["MALWARE", "SOCIAL_ENGINEERING"]}
+    # 신고 주소는 아니지만 브라우저가 넘어간 최종 주소가 일치
+    r = sb_record({"status": "match", "matches": [{"url": "https://b.example/", "threat_type": "SOCIAL_ENGINEERING"}]},
+                  "https://short.example/x", ["https://short.example/x", "https://b.example/"])
+    assert (r["start"], r["own"], r["cand"]) == (False, True, False)
+    err = sb_record({"status": "error", "matches": [{"url": "https://a.example/"}]}, "https://a.example/", [])
+    assert (err["start"], err["own"]) == (False, False) and not sb_measured({"sb": err})
+    assert sb_record(None, "https://a.example/", []) == {"status": "none"}
+    assert sb_record({"status": "match", "matches": "x"}, "https://a.example/", "not-a-list")["own"] is False
+    assert not sb_measured({}) and not sb_measured({"sb": "match"})
+
+
+def test_sb_summary_and_report_compare_safebrowsing_with_safetrace():
+    """같은 회차의 'Safe Browsing 만'(신고·경유·최종 일치)과 SafeTrace 위협 판단을 견준다. 조회 기록이 없는 이전 회차는 뺀다."""
+    from eval_agent import compare, report, sb_summary
+
+    def sb(own, start=None):
+        return {"status": "match" if own else "no_match", "start": own if start is None else start, "own": own,
+                "cand": False, "types": []}
+
+    base = {"group": "fresh", "expected": "malicious", "seconds": 5.0}
+    recs = [
+        {**base, "url": "u1", "threat": "phishing", "status": "COMPLETED", "sb": sb(True)},            # 둘 다
+        {**base, "url": "u2", "threat": "phishing", "status": "COMPLETED", "sb": sb(False)},           # SafeTrace 만
+        {**base, "url": "u3", "threat": "benign", "status": "REVIEW_REQUIRED", "sb": sb(True, False)},  # SB 만(최종 주소), 검토로 감
+        {**base, "url": "u4", "threat": "benign", "status": "COMPLETED", "sb": sb(False)},             # 둘 다 아님
+        {**base, "url": "u5", "threat": "phishing", "status": "COMPLETED"},                            # 이전 기록: 뺌
+        {**base, "url": "u6", "threat": "phishing", "status": "UNREACHABLE", "sb": sb(True)},           # 채점 제외
+        {"group": "normal", "expected": "benign", "url": "n1", "threat": "benign", "status": "COMPLETED", "seconds": 3.0,
+         "sb": sb(False)},
+    ]
+    m = sb_summary(recs)["fresh"]
+    assert (m["scored"], m["measured"], m["sb_start"], m["sb_own"], m["st"], m["st_or_review"]) == (5, 4, 1, 2, 2, 3), m
+    assert (m["only_st"], m["only_sb"], m["both"], m["neither"], m["sb_only_auto"]) == (1, 1, 1, 1, 0), m
+    md = report(recs)
+    assert "## 외부 평판 비교 (Safe Browsing, 조사 당시)" in md
+    assert "| Safe Browsing 일치(신고·경유·최종) | 2 (50%) | 0 (0%) | 2 (40%) |" in md, md
+    assert "| SafeTrace 만 / Safe Browsing 만 / 둘 다 / 둘 다 아님 | 1 / 1 / 1 / 1 | 0 / 0 / 0 / 1 | 1 / 1 / 1 / 2 |" in md, md
+    old = [{k: v for k, v in r.items() if k != "sb"} for r in recs]
+    assert "| 조회한 회차 | 측정 안 함 |" in report(old)
+    assert "| 평판 · Safe Browsing 일치(신고·경유·최종) | 측정 안 함 | 2 (50%) |" in compare(old, recs, "a", "b")
