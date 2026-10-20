@@ -161,5 +161,8 @@ KISA 남은 오답:
 cd backend && ../.venv/Scripts/python -m pytest -q
 ```
 
+- 로컬 시험 DB(`var/test.db`, git 밖)는 실행 사이에 남는다. 끝나지 않은 사건이 쌓여 시험 계정 `investigator-0` 이 접수 한도(20)에 닿으면 `test_related_links.py::test_parent_and_children_in_links` 가 429 로 `KeyError: 'id'` 를 낸다 — 코드 문제가 아니다. 지우지 말고 옮긴 뒤 다시 돌린다(`var/test.db.bak-20261018`·`-20261020`).
+- `test_slow_dns_does_not_lose_destination[short-wait…]` 는 원래 가끔 실패한다(10/20 main 단독 5회 중 4회 통과). 혼자 다시 돌려 확인한다.
+
 ---
 이 파일은 작업 상태가 바뀔 때(PR 머지, 새 baseline, 과제 결정) 함께 갱신한다.
