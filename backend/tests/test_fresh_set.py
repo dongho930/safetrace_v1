@@ -91,7 +91,7 @@ def test_summary_counts_without_urls(fresh):
     md = fresh_set.summary_md(fresh_set.fresh_runs())
     assert "https://" not in md
     assert md.count("| 2026-10-15 |") == 1, md
-    assert "| **누적** | **3** | 4 | **3 (75%)** | 1 (0) | **0%** | 1 | **0** | 0 |" in md, md
+    assert "| **누적** | **3** | 4 | **3 (75%)** | 1 (0) | **0%** | 1 | **0** | - | 0 |" in md, md
 
 
 def test_summary_quality_columns(fresh):
@@ -111,20 +111,23 @@ def test_summary_quality_columns(fresh):
         {**base, "url": "https://y.example/", "threat": "phishing", "probability": 1.0, "hold": False},  # 모델이 스스로
         {**base, "url": "https://z.example/", "threat": "benign", "probability": 0.7, "hold": False},  # 검토 없이 끝남
     ]
-    new = [  # 규칙 이름을 남긴 뒤
+    new = [  # 규칙 이름·조사 당시 Safe Browsing 조회(sb)를 남긴 뒤
         {**base, "url": "https://t.gitbook.io/", "threat": "phishing", "probability": 1.0, "hold": True,
-         "status": "REVIEW_REQUIRED", "rule": "brand_typo_domain", "rule_original": "benign"},
+         "status": "REVIEW_REQUIRED", "rule": "brand_typo_domain", "rule_original": "benign",
+         "sb": {"status": "no_match", "start": False, "own": False, "cand": False, "types": []}},
         {**base, "url": "https://s.example/", "threat": "phishing", "probability": 1.0, "hold": True,
-         "status": "REVIEW_REQUIRED", "rule": None},  # 평판 일치 등: 모양이 같아도 규칙이 아니다
+         "status": "REVIEW_REQUIRED", "rule": None,  # 평판 일치 등: 모양이 같아도 규칙이 아니다
+         "sb": {"status": "match", "start": True, "own": True, "cand": False, "types": ["SOCIAL_ENGINEERING"]}},
     ]
     # 조사 컨테이너가 쓴 규칙 이름은 믿지 않는다: 표를 깨는 글자는 '코드 규칙'으로
     assert fresh_set.rule_of({**base, "url": "https://q/", "rule": "x | **조작** |"}) == "코드 규칙"
     run("fresh_20261016", "2026-10-16T00:00", old)
     run("fresh_20261018", "2026-10-18T00:00", new)
     md = fresh_set.summary_md(fresh_set.fresh_runs())
-    assert "| 2026-10-16 | 4 | 4 | 3 (75%) | 1 (1) | 25% | 2 | 2회 · 2곳 (official_redirect 1, 코드 규칙 1) | 0 |" in md, md
-    assert "| 2026-10-18 | 2 | 2 | 2 (100%) | 0 (0) | 0% | 2 | 1회 · 1곳 (brand_typo_domain 1) | 0 |" in md, md
-    assert "**3회 · 3곳 (official_redirect 1, 코드 규칙 1, brand_typo_domain 1)**" in md, md
+    assert "| 2026-10-16 | 4 | 4 | 3 (75%) | 1 (1) | 25% | 2 | 2회 · 2곳 (official_redirect 1, 코드 규칙 1) | - | 0 |" in md, md
+    assert "| 2026-10-18 | 2 | 2 | 2 (100%) | 0 (0) | 0% | 2 | 1회 · 1곳 (brand_typo_domain 1) | 1/2 (50%) | 0 |" in md, md
+    # 누적의 Safe Browsing 칸은 조회를 남긴 회차만 센다(이전 기록을 일치 없음으로 세지 않는다)
+    assert "**3회 · 3곳 (official_redirect 1, 코드 규칙 1, brand_typo_domain 1)** | 1/2 (50%) | 0 |" in md, md
 
 
 def test_date_must_be_digits():

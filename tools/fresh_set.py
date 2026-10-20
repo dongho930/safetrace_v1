@@ -256,9 +256,16 @@ def summary_md(runs: list[tuple[dict, list[dict]]]) -> str:
     '코드 규칙이 잡은 회차'(이전에 놓쳐 고친 유형이 새 사이트에서 다시 나왔을 때 잡았는지)를 함께 본다."""
     lines = ["# 오늘의 실사이트 세트 누적", "",
              "OpenPhish 무료 피드에서 그날 살아 있던 피싱 사이트를 골라 같은 날 3회 조사한 결과. 주소는 git 밖(var/fresh).", "",
-             "| 날짜 | 사이트 | 채점 | 정답 | 놓침(검토 없이 끝남) | 검토 없이 끝난 비율 | 담당자 검토로 감 | 코드 규칙이 잡음(이전에 고친 유형) | 제외 |",
-             "|---|---|---|---|---|---|---|---|---|"]
+             "| 날짜 | 사이트 | 채점 | 정답 | 놓침(검토 없이 끝남) | 검토 없이 끝난 비율 | 담당자 검토로 감 | 코드 규칙이 잡음(이전에 고친 유형) "
+             "| Safe Browsing 일치(조사 당시) | 제외 |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
     tot, sites, rules_all, rule_sites_all = Counter(), set(), Counter(), set()
+
+    def sb_cell(m: dict) -> str:
+        """조사 당시 Safe Browsing 만 썼다면 위협으로 표시됐을 회차. 평가 도구가 sb 를 남기기 전 기록은 '-'."""
+        if not m["measured"]:
+            return "-"
+        return f"{m['sb_own']}/{m['measured']} ({eval_agent._pct(m['sb_own'], m['measured'])})"
 
     def rule_cell(rules: Counter, rsites: set) -> str:
         if not rules:
@@ -282,19 +289,26 @@ def summary_md(runs: list[tuple[dict, list[dict]]]) -> str:
                 rsites.add(r["url"])
         rules_all.update(rules)
         rule_sites_all |= rsites
+        sb = eval_agent.sb_summary(recs)["전체"]
+        tot["sb_measured"] += sb["measured"]
+        tot["sb_own"] += sb["sb_own"]
         lines.append(f"| {str(meta.get('started', ''))[:10]} | {len(urls)} | {m['scored']} | "
                      f"{m['correct']} ({eval_agent._pct(m['correct'], m['scored'])}) | {m['missed']} ({m['missed_auto']}) | "
-                     f"{eval_agent._pct(m['missed_auto'], m['scored'])} | {m['review']} | {rule_cell(rules, rsites)} | {m['skipped']} |")
+                     f"{eval_agent._pct(m['missed_auto'], m['scored'])} | {m['review']} | {rule_cell(rules, rsites)} | "
+                     f"{sb_cell(sb)} | {m['skipped']} |")
     lines.append(f"| **누적** | **{len(sites)}** | {tot['scored']} | **{tot['correct']} "
                  f"({eval_agent._pct(tot['correct'], tot['scored'])})** | {tot['missed']} ({tot['missed_auto']}) | "
                  f"**{eval_agent._pct(tot['missed_auto'], tot['scored'])}** | {tot['review']} | "
-                 f"**{rule_cell(rules_all, rule_sites_all)}** | {tot['skipped']} |")
+                 f"**{rule_cell(rules_all, rule_sites_all)}** | "
+                 f"{sb_cell({'measured': tot['sb_measured'], 'sb_own': tot['sb_own']})} | {tot['skipped']} |")
     lines += ["",
               "- 날마다 사이트가 달라 정답률은 개선 추세가 아니다. 품질은 **검토 없이 끝난 비율**(담당자가 모르고 넘어간 놓침)과 "
               "**코드 규칙이 잡음**(전에 놓쳐서 고친 유형이 그날의 새 사이트에서 다시 나왔을 때, 모델은 정상·판단 불가로 봤지만 규칙이 "
               "담당자 검토로 보낸 회차)으로 본다. 모델이 스스로 위협으로 본 회차는 규칙 칸에 세지 않는다.",
               "- 평가 도구가 규칙 이름을 남기기 전 기록은 규칙이 남기는 모양(위협·확률 1.0·보류)으로 세고, 도착 주소가 브랜드 공식 사이트면 "
-              "official_redirect 로 본다(그 밖은 '코드 규칙')."]
+              "official_redirect 로 본다(그 밖은 '코드 규칙').",
+              "- **Safe Browsing 일치(조사 당시)**: 그 회차에 SafeTrace 가 조사하며 받은 Safe Browsing 조회에서 신고·경유·최종 주소가 "
+              "일치한 회차(Safe Browsing 만 썼다면 위협으로 표시됐을 것). 정답 칸과 견준다. 평가 도구가 이 값을 남기기 전 회차는 '-'."]
     return "\n".join(lines) + "\n"
 
 
