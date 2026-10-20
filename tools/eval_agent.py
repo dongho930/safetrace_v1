@@ -6,6 +6,8 @@
       에이전트 컨테이너 안에서 조사하고 결과를 var/eval/<시각>_<메모>.jsonl 과 .md 로 받아 온다
   python tools/eval_agent.py report var/eval/A.jsonl
   python tools/eval_agent.py compare var/eval/A.jsonl var/eval/B.jsonl
+  python tools/eval_agent.py run --repeat 1 --set data/normal_sites.csv --label normal168
+      정상 사이트 168곳 목록으로 오탐률(모두 정답 benign)
   python tools/eval_agent.py related var/eval/A.jsonl
       연관 후보 하위 조사 결과를 사람이 확인할 표본 목록으로 낸다(var/eval/A_related.csv, git 밖)
 
@@ -367,7 +369,12 @@ def write_related_csv(recs: list[dict], path: Path) -> int:
 
 # ── 실행 ────────────────────────────────────────────────
 def load_set(path: Path, group: str | None) -> list[dict]:
-    rows = list(csv.DictReader(path.open(encoding="utf-8")))
+    """평가 목록(group,expected,url,note). 정상 사이트 목록(data/normal_sites.csv: category,name,url)도 그대로 받는다 —
+    모두 정답 benign·그룹 normal 이다(평가 목록의 정상 16곳보다 넓은 표본으로 오탐률을 잴 때)."""
+    rows = list(csv.DictReader(path.open(encoding="utf-8-sig")))
+    if rows and "expected" not in rows[0] and {"category", "url"} <= set(rows[0]):
+        rows = [{"group": "normal", "expected": "benign", "url": r["url"], "note": f"{r['category']} · {r.get('name') or ''}"}
+                for r in rows]
     return [r for r in rows if not group or r["group"] == group]
 
 

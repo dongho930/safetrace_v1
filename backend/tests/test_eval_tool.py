@@ -206,3 +206,20 @@ def test_sb_summary_and_report_compare_safebrowsing_with_safetrace():
     old = [{k: v for k, v in r.items() if k != "sb"} for r in recs]
     assert "| 조회한 회차 | 측정 안 함 |" in report(old)
     assert "| 평판 · Safe Browsing 일치(신고·경유·최종) | 측정 안 함 | 2 (50%) |" in compare(old, recs, "a", "b")
+
+
+def test_load_set_reads_normal_sites_list(tmp_path):
+    """정상 사이트 목록(category,name,url)을 그대로 평가 목록으로 받는다: 모두 정답 benign·그룹 normal. 평가 목록 형식은 그대로."""
+    from eval_agent import load_set
+
+    p = tmp_path / "normal.csv"
+    p.write_text("﻿category,name,url\n공공,정부24,https://www.gov.kr/\n금융,토스,https://toss.im/\n", encoding="utf-8")
+    rows = load_set(p, None)
+    assert [(r["group"], r["expected"], r["url"]) for r in rows] == [
+        ("normal", "benign", "https://www.gov.kr/"), ("normal", "benign", "https://toss.im/")]
+    assert rows[0]["note"] == "공공 · 정부24" and load_set(p, "kisa") == []
+    q = tmp_path / "set.csv"
+    q.write_text("group,expected,url,note\nkisa,phishing,http://x.example/,메모\n", encoding="utf-8")
+    assert load_set(q, None) == [{"group": "kisa", "expected": "phishing", "url": "http://x.example/", "note": "메모"}]
+    real = Path(__file__).resolve().parents[2] / "data" / "normal_sites.csv"
+    assert len(load_set(real, None)) == 168
