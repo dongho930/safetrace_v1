@@ -206,8 +206,10 @@ def _related_rows(m: dict) -> list[tuple[str, str]]:
 
 
 # ── 운영 정보·키트 지문(순수 함수) ───────────────────────────────
-def intel_record(kinds: list, url: str, final_url: object, site_of) -> dict:
-    """원래 조사의 intel 기록을 평가 기록용으로: intel(종류:값), kit(dom:해시·res:해시), site(최종 주소의 등록 도메인)."""
+def intel_record(kinds: list, url: str, final_url: object, site_key) -> dict:
+    """원래 조사의 intel 기록을 평가 기록용으로: intel(종류:값), kit(dom:해시·res:해시), site(최종 주소의 연결 열쇠).
+    site_key(host) 는 서비스의 사건 연결 열쇠(related.link_key: 등록 도메인, 공용 호스팅은 호스트)이고 잇지 않는 호스트
+    (공식·단축 서비스 등)면 None 이다. 키트 지문도 서비스와 같게 그런 화면의 것은 넣지 않는다."""
     items, kits = set(), set()
     for k in kinds:
         d = k.get("data") if isinstance(k, dict) else None
@@ -217,9 +219,11 @@ def intel_record(kinds: list, url: str, final_url: object, site_of) -> dict:
             if isinstance(x, dict) and isinstance(x.get("kind"), str) and isinstance(x.get("value"), str):
                 items.add(f"{x['kind'][:16]}:{x['value'][:200]}")
         kit = d.get("kit") if isinstance(d.get("kit"), dict) else {}
-        kits.update(f"{part}:{kit[part]}" for part in ("dom", "res") if isinstance(kit.get(part), str))
+        page = urlsplit(d["url"]).hostname if isinstance(d.get("url"), str) else None
+        if page and site_key(page):
+            kits.update(f"{part}:{kit[part]}" for part in ("dom", "res") if isinstance(kit.get(part), str))
     host = urlsplit(final_url if isinstance(final_url, str) and final_url else url).hostname or ""
-    return {"intel": sorted(items)[:40], "kit": sorted(kits)[:20], "site": site_of(host) if host else ""}
+    return {"intel": sorted(items)[:40], "kit": sorted(kits)[:20], "site": (site_key(host) or host) if host else ""}
 
 
 def intel_summary(recs: list[dict]) -> dict:
@@ -279,7 +283,7 @@ def _intel_rows(m: dict | None) -> list[tuple[str, str]]:
     if not m or not m["measured"]:
         return [(n, "측정 안 함") for n in names]
     from_ko = {"telegram": "텔레그램", "kakao": "카톡", "line": "라인", "whatsapp": "왓츠앱", "discord": "디스코드", "phone": "휴대전화",
-               "account": "계좌", "form": "수집 서버"}
+               "account": "계좌", "form": "다른 사이트로 보내는 양식"}
     kinds = ", ".join(f"{from_ko.get(k, k)} {n}" for k, n in m["kinds"].most_common()) or "-"
     return [("운영 정보가 나온 회차", f"{m['with_intel']}/{m['measured']} ({_pct(m['with_intel'], m['measured'])})"),
             ("종류(회차)", kinds), ("키트 지문이 있는 회차", f"{m['with_kit']}/{m['measured']}")]
@@ -507,6 +511,7 @@ def run_inside(args) -> None:
     sys.path.insert(0, "/app")
     from safetrace.agent.candidates import site_of
     from safetrace.agent.runner import investigate
+    from safetrace.related import link_key
     from safetrace.config import Settings
 
     rows = load_set(Path(args.set), args.group)
@@ -549,7 +554,8 @@ def run_inside(args) -> None:
                     rec["candidates_investigated"] = sum(1 for c in cands if isinstance(c, dict) and c.get("sub"))
                     rec["related"] = [related_item(c, site_of) for c in cands if isinstance(c, dict)][:20]
                     # 운영 정보·키트 지문(원래 조사의 intel 기록). 살아 있는 운영자 값이라 결과 파일은 git 밖에만 둔다
-                    rec.update(intel_record(kinds, row["url"], final.get("final_url"), site_of))
+                    rec.update(intel_record(kinds, row["url"], final.get("final_url"),
+                                            lambda h: (link_key(h) or (None,))[0]))
                 except Exception as e:  # 한 건 실패로 전체를 멈추지 않는다
                     rec["error"] = f"{type(e).__name__}: {str(e)[:200]}"
                 rec["seconds"] = round(time.monotonic() - t, 1)

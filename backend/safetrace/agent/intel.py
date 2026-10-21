@@ -17,6 +17,7 @@ import hashlib
 import re
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from ..decision.brands import SHARED_HOSTING, on_domain, site_of
 from ..masking import mask_pii
 
 MAX_ITEMS = 20       # 관찰 하나에서 남기는 운영 정보
@@ -116,8 +117,17 @@ def from_text(snippets: list) -> list[dict]:
 
 
 def from_forms(forms: list, page_url: str) -> list[dict]:
-    """다른 호스트로 입력값을 보내는 양식(피싱 키트의 수집 서버). 같은 호스트로 보내는 양식은 운영자를 가리키지 않는다."""
+    """다른 사이트로 입력값을 보내는 양식(피싱 키트의 수집 서버). 같은 사이트(등록 도메인, 공용 호스팅은 호스트)로 보내는
+    양식은 운영자를 가리키지 않는다(정상 사이트의 www → service 하위 도메인 양식, 2026-10-22 정상 16곳 평가에서 관찰)."""
     page_host = (urlsplit(page_url).hostname or "").lower()
+
+    def same_site(host: str) -> bool:
+        if host == page_host:
+            return True
+        if on_domain(host, SHARED_HOSTING) or on_domain(page_host, SHARED_HOSTING):
+            return False
+        return site_of(host) == site_of(page_host)
+
     out = []
     for f in forms[:10] if isinstance(forms, list) else []:
         a = f.get("action") if isinstance(f, dict) else None
@@ -125,7 +135,7 @@ def from_forms(forms: list, page_url: str) -> list[dict]:
             continue
         u = urlsplit(a)
         host = (u.hostname or "").lower()
-        if host and host != page_host:
+        if host and not same_site(host):
             # 쿼리·사용자 정보에는 받는 사람·번호가 들어갈 수 있다(열람자에게도 보인다, Codex 지적): 주소만, 경로는 가려서
             port = f":{u.port}" if u.port else ""
             out.append(_item("form", f"{u.scheme}://{host}{port}{mask_pii(u.path or '/')[:200]}", "form"))

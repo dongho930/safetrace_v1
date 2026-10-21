@@ -58,9 +58,13 @@ def test_text_cues_only():
 def test_forms_only_other_hosts():
     forms = [{"action": "https://collect.evil.example/p.php", "method": "post"},
              {"action": "https://site.example/login", "method": "post"},
+             {"action": "https://service.site.example/login", "method": "post"},  # 같은 등록 도메인(정상 사이트에서 관찰)
+             {"action": "https://other.pages.dev/p", "method": "post"},  # 공용 호스팅은 호스트가 다르면 다른 사이트
              {"action": "javascript:void(0)"}, {"action": 5}, "x"]
-    assert intel.from_forms(forms, "https://site.example/") == [
-        {"kind": "form", "value": "https://collect.evil.example/p.php", "src": "form"}]
+    assert intel.from_forms(forms, "https://www.site.example/") == [
+        {"kind": "form", "value": "https://collect.evil.example/p.php", "src": "form"},
+        {"kind": "form", "value": "https://other.pages.dev/p", "src": "form"}]
+    assert intel.from_forms([{"action": "https://b.pages.dev/x"}], "https://a.pages.dev/") != []
 
 
 def test_extract_dedup_and_cap():
