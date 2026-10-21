@@ -19,6 +19,7 @@ from pathlib import Path
 from PIL import Image as PILImage
 
 from . import preview as _preview  # noqa: F401  Image.MAX_IMAGE_PIXELS 제한을 함께 쓴다
+from . import referral
 from .evidence import _SAFE_NAME, read_evidence, sha256_bytes
 from .package import clean_records
 
@@ -89,7 +90,13 @@ def _ai(threat: dict | None) -> dict | None:
     return {"threat": threat.get("threat"), "threat_ko": THREAT_KO.get(threat.get("threat"), threat.get("threat")),
             "probability": threat.get("probability"), "hold": bool(threat.get("hold")),
             "override": _override_ko(threat.get("override")), "provider": threat.get("provider"),
-            "model": threat.get("model")}
+            "model": threat.get("model"), "brand": _brand(threat.get("override"))}
+
+
+def _brand(o: object) -> str | None:
+    """코드 규칙이 찾은 사칭 브랜드 이름(처리 요청서의 '사칭 대상'). 글자만 받는다."""
+    b = o.get("brand") if isinstance(o, dict) else None
+    return _cut(b, 40) if isinstance(b, str) and b else None
 
 
 # 회선 차단은 '추정'이다: 이름으로 연결하면 끊기고 다른 이름으로는 응답하는 동작을 조사 대상 서버가 흉내 낼 수 있다(Codex 지적)
@@ -201,7 +208,7 @@ def build(pkg: dict, records: list[dict]) -> dict:
                         "blocked": r.get("blocked") is True,
                         "status": r.get("status"), "error": bool(c.get("error"))})
     integ = pkg["integrity"]
-    return {
+    rep = {
         "format": FORMAT,
         "generated_at": pkg["generated_at"],
         "generated_by": pkg["generated_by"],
@@ -242,6 +249,8 @@ def build(pkg: dict, records: list[dict]) -> dict:
                       "head_seq": integ["head_seq"], "head_hash": integ["head_hash"], "key_id": integ["key_id"],
                       "method": integ["method"]},
     }
+    rep["referral"] = referral.build(rep)  # 처리 기관 안내·요청서 초안(위 요약에서만 만든다)
+    return rep
 
 
 # ── PDF ─────────────────────────────────────────────────
@@ -439,6 +448,19 @@ def render_pdf(rep: dict, evidence_dir: Path) -> bytes:
         out.append(t)
 
     n = 4 + bool(screens) + bool(rel and rel["investigated"])
+    ref = rep.get("referral") or {}
+    if ref.get("applicable"):
+        out.append(P(f"{n}. 처리 요청 안내" + (" (초안 · 담당자 판정 전)" if ref.get("draft") else ""), h2))
+        ag = ref["agency"]
+        out.append(kv([
+            ("요청 유형", f"{ref['threat_ko']} — " + ("담당자 판정" if ref["basis"] == "confirmed" else "AI 판단(담당자 확인 필요)")),
+            ("처리 기관", f"{ag['name']} · {ag['phone']} · {ag['url']} — {ag['does']}"),
+            ("함께 알릴 곳", P("<br/>".join(_t(f"{x['name']} · {x['phone']} · {x['url']}" + (f" — {x['when']}" if x["when"] else ""))
+                                       for x in ref["also"]) or "-", base)),
+            ("참고 조문", P("<br/>".join(_t(f"{x['cite']}: {x['text']}") for x in ref["laws"]), base)),
+            ("요청서 초안", "콘솔 '처리 요청' 탭 또는 report.json 의 referral.text (조문 해당 여부는 받는 기관이 판단)"),
+        ]))
+        n += 1
     out.append(P(f"{n}. 증거 무결성", h2))
     i = rep["integrity"]
     out.append(kv([
