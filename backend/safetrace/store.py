@@ -6,8 +6,8 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import (JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint,
-                        create_engine, delete, select)
+from sqlalchemy import (JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint,
+                        create_engine, delete, select, text)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
@@ -155,6 +155,9 @@ class CaseCheck(Base):
     줄을 먼저 만들고, 조사 컨테이너는 그 번호의 결과만 채울 수 있다. 증거 체인(서명)에는 넣지 않는다(접속 결과만)."""
 
     __tablename__ = "case_checks"
+    # 한 사건에 대기 중인 재확인은 하나만(동시 요청 경쟁을 DB 가 막는다)
+    __table_args__ = (Index("uq_case_checks_pending", "case_id", unique=True, sqlite_where=text("state = 'pending'"),
+                            postgresql_where=text("state = 'pending'")),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), index=True)
     state: Mapped[str] = mapped_column(String(12), default="pending", index=True)  # pending | done | expired

@@ -28,6 +28,9 @@ SYSTEM_ACTOR = "system:recheck"
 REF_MAX = 100
 PENDING_TTL = timedelta(minutes=15)  # 이보다 오래 결과가 없는 대기 줄은 만료(조사 컨테이너가 죽었거나 밀렸다)
 MIN_GAP = timedelta(minutes=2)  # 같은 사건을 이보다 자주 재확인하지 않는다(담당자 버튼)
+# 재확인은 조사와 같은 워커가 한다: 쌓아 두면 사람 신고 조사가 밀린다(Codex 지적). 주체별·전체 대기 상한
+MAX_PENDING_PER_ACTOR = 10
+MAX_PENDING_TOTAL = 30
 
 
 class ActionError(ValueError):
@@ -109,22 +112,36 @@ def checks(store: Store, case_id: str, limit: int = 20) -> list[CaseCheck]:
 
 
 def request_check(store: Store, case_id: str, actor: str, *, at: datetime | None = None) -> CaseCheck:
-    """재확인 대기 줄을 만든다(접속은 조사 컨테이너가). 끝나지 않은 재확인이 있거나 방금 했으면 ActionError."""
+    """재확인 대기 줄을 만든다(접속은 조사 컨테이너가). 끝나지 않은 재확인이 있거나 방금 했거나 대기가 많으면 ActionError.
+    사건 줄을 잠그고 검사·접수하며, 한 사건에 대기 줄은 하나만이라는 것을 DB 제약(부분 유일 색인)으로도 막는다(Codex 지적)."""
     at = at or now()
+    fresh = at - PENDING_TTL
     with store.session() as s:
-        c = s.get(Case, case_id)
+        c = s.get(Case, case_id, with_for_update=True)
         if c is None:
             raise LookupError(case_id)
         if c.status not in TERMINAL:
             raise ActionError("조사가 끝난 뒤에 재확인할 수 있습니다")
         last = s.scalar(select(CaseCheck).where(CaseCheck.case_id == case_id).order_by(CaseCheck.id.desc()).limit(1))
-        if last is not None and last.state == "pending" and _aware(last.requested_at) > at - PENDING_TTL:
+        if last is not None and last.state == "pending" and _aware(last.requested_at) > fresh:
             raise ActionError("재확인이 이미 진행 중입니다")
         if last is not None and _aware(last.requested_at) > at - MIN_GAP:
             raise ActionError("방금 재확인했습니다. 잠시 뒤 다시 시도하세요")
+        pending = select(func.count()).select_from(CaseCheck).where(CaseCheck.state == "pending",
+                                                                    CaseCheck.requested_at > fresh)
+        mine = pending.where(CaseCheck.requested_by == actor[:64])
+        if (s.scalar(pending) or 0) >= MAX_PENDING_TOTAL or (s.scalar(mine) or 0) >= MAX_PENDING_PER_ACTOR:
+            raise ActionError("재확인 대기가 많습니다. 잠시 뒤 다시 시도하세요")
+        for old in s.scalars(select(CaseCheck).where(CaseCheck.case_id == case_id, CaseCheck.state == "pending")):
+            old.state = "expired"  # 오래된 대기 줄(위에서 결과를 기다리는 것은 거절했다)
+        s.flush()
         ck = CaseCheck(case_id=case_id, state="pending", requested_by=actor[:64], requested_at=at)
         s.add(ck)
-        s.commit()
+        try:
+            s.commit()
+        except IntegrityError:  # 같은 순간 다른 요청이 먼저 대기 줄을 만들었다
+            s.rollback()
+            raise ActionError("재확인이 이미 진행 중입니다") from None
         return ck
 
 

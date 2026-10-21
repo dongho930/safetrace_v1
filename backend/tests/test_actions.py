@@ -7,6 +7,7 @@ from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from safetrace import accounts, actions
 from safetrace.agent import recheck
@@ -32,6 +33,16 @@ def _store():
     from safetrace.api.main import store
 
     return store
+
+
+@pytest.fixture
+def no_pending():
+    """시험 DB 는 실행 사이에 남는다: 대기 상한을 재는 시험 전에 남은 대기 줄을 만료시킨다."""
+    store = _store()
+    with store.session() as s:
+        for ck in s.scalars(select(CaseCheck).where(CaseCheck.state == "pending")):
+            ck.state = "expired"
+        s.commit()
 
 
 def _case(status="COMPLETED", verdict: str | None = "threat") -> str:
@@ -119,9 +130,21 @@ def test_recheck_results(testpages):
     r = recheck.check("http://127.0.0.1:8900/smish/", None, allow)
     assert r["result"] == "alive" and r["http_status"] == 200 and r["final_host"] == "127.0.0.1"
     assert recheck.check("http://127.0.0.1:8900/no-such-page-404", None, allow)["result"] == "gone"
-    assert recheck.check("http://10.0.0.1/", None, allow)["result"] == "refused"  # 내부 주소(검문 프록시가 없을 때도)
-    assert recheck.check("http://no-such-host.invalid/", None, allow)["result"] == "gone"
+    # 검문 프록시가 없으면(개발 모드) 시험 허용 목록 밖으로는 접속하지 않는다
+    assert recheck.check("http://10.0.0.1/", None, allow) | {"seconds": 0} == {
+        "result": "refused", "reason": "no_egress_proxy", "http_status": None, "final_host": "10.0.0.1", "title": "", "seconds": 0}
+    assert recheck.check("http://example.com/", None, allow)["result"] == "refused"
     assert recheck.check("ftp://x.example/", None, allow)["result"] == "error"
+
+
+def test_recheck_reads_refusal_from_proxy_connect():
+    """검문 프록시가 CONNECT 에 답한 거부 사유로 사라짐(도메인 없음)·정책 거부를 가른다."""
+    for reason, want in (("dns_failure", "gone"), ("non_public_ip", "refused")):
+        crlf = chr(13) + chr(10)
+        port = _serve_once(lambda c, r=reason, nl=crlf: c.sendall(
+            f"HTTP/1.1 403 Forbidden{nl}X-SafeTrace-Egress: {r}{nl}Connection: close{nl}{nl}".encode()))
+        got = recheck.check("https://gone.example/", f"http://127.0.0.1:{port}")
+        assert (got["result"], got["reason"]) == (want, reason)
 
 
 def test_api_actions_and_recheck(client, testpages):
@@ -162,21 +185,113 @@ def test_api_actions_and_recheck(client, testpages):
         assert s.get(CaseCheck, 999999) is None
 
 
-def test_scheduler_round(client):
+def test_scheduler_round(client, no_pending):
     from safetrace.api import main as m
 
     store = _store()
     cid = _case()
     actions.save(store, cid, expected_rev=0, state="blocked", agency=None, ref=None, note=None, actor="a")
-    sent = []
-    real = m.enqueue_check
+    sent, asked = [], {}
+    real_enqueue, real_due = m.enqueue_check, m.actions.due
     m.enqueue_check = lambda case_id, check_id, url: sent.append((case_id, check_id, url))
+    # 시험 DB 에는 이전 실행의 추적 사건이 남는다: 고르는 규칙(due)은 따로 시험하고 여기서는 한 바퀴의 연결만 본다
+    m.actions.due = lambda store, **kw: (asked.update(kw), [(cid, "http://127.0.0.1:8900/smish/")])[1]
     try:
-        later = now() + timedelta(days=400)  # 다른 시험 사건보다 늦게: 이 사건이 맡겨질 차례가 오도록 한도를 넉넉히
-        m.settings.recheck_batch, old = 100, m.settings.recheck_batch
-        n = m.recheck_due(at=later)
-        m.settings.recheck_batch = old
+        n = m.recheck_due()
     finally:
-        m.enqueue_check = real
-    assert n >= 1 and cid in [x for x, _, _ in sent]
-    assert any(x == cid and u == "http://127.0.0.1:8900/smish/" for x, _, u in sent)
+        m.enqueue_check, m.actions.due = real_enqueue, real_due
+    assert n == 1 and sent[0][0] == cid and sent[0][2] == "http://127.0.0.1:8900/smish/"
+    assert asked["interval"] == timedelta(hours=m.settings.recheck_interval_hours) and asked["limit"] == m.settings.recheck_batch
+    with store.session() as s:
+        ck = s.get(CaseCheck, sent[0][1])
+        assert (ck.case_id, ck.state, ck.requested_by) == (cid, "pending", actions.SYSTEM_ACTOR)
+        ck.state = "expired"  # 다음 실행의 상한 계산에 남지 않게
+        s.commit()
+
+
+# ── Codex 1회차 정탐 재현 ─────────────────────────
+import socket  # noqa: E402
+import threading  # noqa: E402
+
+
+def _serve_once(handler) -> int:
+    """연결 하나를 받아 handler(conn) 를 부르는 작은 서버. 반환: 포트."""
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    port = srv.getsockname()[1]
+
+    def run():
+        try:
+            conn, _ = srv.accept()
+            with conn:
+                conn.recv(4096)
+                handler(conn)
+        except OSError:
+            pass
+        finally:
+            srv.close()
+
+    threading.Thread(target=run, daemon=True).start()
+    return port
+
+
+def test_no_proxy_recheck_cannot_be_rebound(testpages, monkeypatch):
+    """F1: 검문 프록시 없이 재확인하면 검사(공인 주소)와 연결(내부 주소)이 DNS 를 따로 풀어 rebinding 으로 내부에 닿는다."""
+    real = socket.getaddrinfo
+
+    def fake(host, *a, **k):
+        return real("127.0.0.1" if host == "rebind.example" else host, *a, **k)
+
+    monkeypatch.setattr(recheck, "resolve", lambda h, p: ("93.184.216.34",), raising=False)  # 검사할 때는 공인 주소(예전 코드)
+    monkeypatch.setattr(socket, "getaddrinfo", fake)  # 연결할 때는 내부 주소(시험 서버)
+    r = recheck.check("http://rebind.example:8900/smish/", None, {"127.0.0.1:8900"})
+    assert r["result"] == "refused" and r["http_status"] is None
+
+
+def test_target_cannot_forge_egress_refusal():
+    """F2: 대상 서버가 검문 프록시의 거부 머리(X-SafeTrace-Egress: dns_failure)를 흉내 내 '사라짐'으로 보이게 할 수 없다."""
+    port = _serve_once(lambda c: c.sendall(b"HTTP/1.1 200 OK\r\nX-SafeTrace-Egress: dns_failure\r\nContent-Length: 2\r\n"
+                                           b"Connection: close\r\n\r\nok"))
+    r = recheck.check(f"http://127.0.0.1:{port}/", None, {f"127.0.0.1:{port}"})
+    assert r["result"] == "alive" and r["http_status"] == 200
+
+
+def test_slow_headers_respect_budget():
+    """F4: 응답 머리를 조금씩 보내는 서버가 재확인 시간 예산(budget)을 넘겨 워커를 붙잡지 못한다."""
+    def drip(c):
+        c.sendall(b"HTTP/1.1 200 OK\r\n")
+        for _ in range(16):
+            time.sleep(0.5)
+            try:
+                c.sendall(b"X: y\r\n")
+            except OSError:
+                return
+
+    port = _serve_once(drip)
+    t0 = time.monotonic()
+    r = recheck.check(f"http://127.0.0.1:{port}/", None, {f"127.0.0.1:{port}"}, budget=2.0)
+    assert time.monotonic() - t0 < 4.5 and r["result"] == "unreachable"
+
+
+def test_recheck_queue_has_global_cap_and_one_pending_per_case(no_pending):
+    """F3: 재확인 대기에 전체 상한이 있고, 한 사건에는 동시에 하나만(DB 제약)."""
+    store = _store()
+    got, refused, actor = [], 0, "flood-" + secrets.token_hex(3)
+    for _ in range(actions.MAX_PENDING_PER_ACTOR + 3):
+        try:
+            got.append(actions.request_check(store, _case(), actor).id)
+        except actions.ActionError:
+            refused += 1
+    with store.session() as s:  # 다음 실행의 상한 계산에 남지 않게
+        for i in got:
+            s.get(CaseCheck, i).state = "expired"
+        s.commit()
+    assert len(got) == actions.MAX_PENDING_PER_ACTOR and refused == 3
+    cid = _case()
+    with store.session() as s, s.begin():
+        s.add(CaseCheck(case_id=cid, state="pending", requested_by="x"))
+    from sqlalchemy.exc import IntegrityError
+
+    with pytest.raises(IntegrityError), store.session() as s, s.begin():
+        s.add(CaseCheck(case_id=cid, state="pending", requested_by="y"))
