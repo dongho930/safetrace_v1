@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
@@ -31,6 +32,9 @@ MIN_GAP = timedelta(minutes=2)  # 같은 사건을 이보다 자주 재확인하
 # 재확인은 조사와 같은 워커가 한다: 쌓아 두면 사람 신고 조사가 밀린다(Codex 지적). 주체별·전체 대기 상한
 MAX_PENDING_PER_ACTOR = 10
 MAX_PENDING_TOTAL = 30
+# 상한 검사와 접수를 한 번에: 서로 다른 사건의 동시 요청이 같은 대기 수를 읽고 함께 통과하지 않게(Codex 2회차).
+# 사건 접수 한도(_intake_lock)처럼 API 프로세스 하나 기준이다
+_queue_lock = threading.Lock()
 
 
 class ActionError(ValueError):
@@ -116,7 +120,7 @@ def request_check(store: Store, case_id: str, actor: str, *, at: datetime | None
     사건 줄을 잠그고 검사·접수하며, 한 사건에 대기 줄은 하나만이라는 것을 DB 제약(부분 유일 색인)으로도 막는다(Codex 지적)."""
     at = at or now()
     fresh = at - PENDING_TTL
-    with store.session() as s:
+    with _queue_lock, store.session() as s:
         c = s.get(Case, case_id, with_for_update=True)
         if c is None:
             raise LookupError(case_id)

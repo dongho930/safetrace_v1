@@ -1939,7 +1939,7 @@ function ActionsTab({ c, canAct, canRecheck, onChanged }: { c: CaseOut; canAct: 
         <strong>{cur ? ACTION_STATE_LABEL[cur.state] ?? cur.state : "조치 없음"}</strong>
         {cur?.agency ? ` · ${AGENCY_LABEL[cur.agency] ?? cur.agency}` : ""}
         {cur?.ref ? ` · 접수 ${cur.ref}` : ""}
-        {cur ? ` · ${cur.actor} · ${fmt(cur.created_at)}` : ""}
+        {cur ? ` · ${cur.actor === "system:recheck" ? "재확인(시스템)" : cur.actor} · ${fmt(cur.created_at)}` : ""}
         {cur && ["requested", "blocked", "removed", "reappeared"].includes(cur.state) ? ` · ${data.interval}시간마다 재확인` : ""}
       </p>
       {msg && <p className="err" role="alert">{msg}</p>}

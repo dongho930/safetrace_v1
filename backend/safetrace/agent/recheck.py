@@ -19,6 +19,7 @@ import asyncio
 import html
 import re
 import time
+import zlib
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -86,11 +87,26 @@ async def _allowed(url: str, proxy: str | None, allow: set[str]) -> None:
         raise _Stop("unreachable", reason or f"egress_{code}")
 
 
+def _inflate(raw: bytes, encoding: str) -> bytes:
+    """gzip·deflate 한 단계만, 결과를 MAX_BODY 까지만 푼다. 여러 겹이거나 모르는 인코딩이면 글자 없이(제목을 못 읽을 뿐)."""
+    enc = encoding.lower().strip()
+    if enc in ("", "identity"):
+        return raw
+    if enc in ("gzip", "x-gzip", "deflate"):
+        try:
+            return zlib.decompressobj(zlib.MAX_WBITS | 32).decompress(raw, MAX_BODY)  # 32: gzip·zlib 머리 자동 판별
+        except zlib.error:
+            return b""
+    return b""
+
+
 async def _get(url: str, proxy: str | None, allow: set[str]) -> dict:
     out = {"http_status": None, "final_url": url, "title": ""}
     transport = httpx.AsyncHTTPTransport(proxy=proxy) if proxy else None
+    # 압축 없이 달라고 하고 원시 바이트를 읽는다: 라이브러리가 압축을 상한 없이 풀면 작은 응답이 수백 MB 로 불어난다
+    # (이중 gzip, Codex 2회차). 그래도 압축해 보내면 아래 _inflate 가 한 단계만 상한을 두고 푼다
     async with httpx.AsyncClient(transport=transport, follow_redirects=False, timeout=8, verify=False,  # nosec B501
-                                 headers={"User-Agent": UA}) as client:  # 피싱 사이트 인증서는 검증하지 않는다
+                                 headers={"User-Agent": UA, "Accept-Encoding": "identity"}) as client:  # 인증서 검증 안 함
         cur = url
         for _hop in range(MAX_REDIRECTS + 1):
             await _allowed(cur, proxy, allow)
@@ -104,11 +120,12 @@ async def _get(url: str, proxy: str | None, allow: set[str]) -> dict:
                     cur = nxt
                     continue
                 buf = bytearray()
-                async for chunk in r.aiter_bytes():
+                async for chunk in r.aiter_raw():
                     buf += chunk[: MAX_BODY - len(buf)]
                     if len(buf) >= MAX_BODY:
                         break
-                m = _TITLE.search(bytes(buf).decode(r.encoding or "utf-8", errors="replace"))
+                body = _inflate(bytes(buf), r.headers.get("content-encoding", ""))
+                m = _TITLE.search(body.decode(r.encoding or "utf-8", errors="replace"))
                 if m:
                     out["title"] = mask_pii(" ".join(html.unescape(m.group(1)).split()))[:200]
                 return out

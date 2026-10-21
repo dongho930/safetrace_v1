@@ -295,3 +295,80 @@ def test_recheck_queue_has_global_cap_and_one_pending_per_case(no_pending):
 
     with pytest.raises(IntegrityError), store.session() as s, s.begin():
         s.add(CaseCheck(case_id=cid, state="pending", requested_by="y"))
+
+
+# ── Codex 2회차 정탐 재현 ─────────────────────────
+def test_concurrent_requests_cannot_exceed_actor_cap(no_pending, monkeypatch):
+    """2회차 F1: 서로 다른 사건에 동시에 재확인을 요청해도 주체별 상한을 넘지 않는다(상한 검사와 접수를 한 잠금으로)."""
+    store = _store()
+    actor = "race-" + secrets.token_hex(3)
+    made = [actions.request_check(store, _case(), actor).id for _ in range(actions.MAX_PENDING_PER_ACTOR - 1)]
+    a, b = _case(), _case()
+    barrier = threading.Barrier(2)
+    real_scalar = None
+
+    from sqlalchemy.orm import Session
+
+    real_scalar = Session.scalar
+
+    def slow_scalar(self, stmt, *args, **kw):  # 대기 수를 읽은 직후 두 요청이 서로를 기다린다
+        out = real_scalar(self, stmt, *args, **kw)
+        if "count" in str(stmt).lower():
+            try:
+                barrier.wait(timeout=1)
+            except threading.BrokenBarrierError:
+                pass
+        return out
+
+    monkeypatch.setattr(Session, "scalar", slow_scalar)
+    results = {}
+
+    def go(cid):
+        try:
+            results[cid] = actions.request_check(store, cid, actor).id
+        except actions.ActionError:
+            results[cid] = None
+
+    ts = [threading.Thread(target=go, args=(c,)) for c in (a, b)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(10)
+    monkeypatch.setattr(Session, "scalar", real_scalar)
+    got = [x for x in results.values() if x]
+    with store.session() as s:  # 다음 실행의 상한 계산에 남지 않게
+        for i in [*made, *got]:
+            s.get(CaseCheck, i).state = "expired"
+        s.commit()
+    assert len(got) == 1  # 9 + 1 = 상한 10
+
+
+def test_compressed_body_is_not_inflated_without_limit():
+    """2회차 F2: 이중 gzip 으로 크게 풀리는 응답을 상한 없이 풀지 않는다(재확인은 제목만 읽는다)."""
+    import gzip
+    import tracemalloc
+
+    inner = gzip.compress(b"\0" * (64 << 20))  # 64MiB 가 약 65KB 로
+    body = gzip.compress(inner)
+    head = (f"HTTP/1.1 200 OK{chr(13)}{chr(10)}Content-Encoding: gzip, gzip{chr(13)}{chr(10)}Content-Length: {len(body)}"
+            f"{chr(13)}{chr(10)}Connection: close{chr(13)}{chr(10)}{chr(13)}{chr(10)}").encode()
+    port = _serve_once(lambda c: c.sendall(head + body))
+    tracemalloc.start()
+    try:
+        r = recheck.check(f"http://127.0.0.1:{port}/", None, {f"127.0.0.1:{port}"})
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert r["result"] == "alive" and peak < (16 << 20), peak
+
+
+def test_single_gzip_title_still_read():
+    """압축 없이 달라고 해도 gzip 으로 보내는 서버의 제목은 한 단계 풀어 읽는다."""
+    import gzip
+
+    body = gzip.compress("<html><title>Blue Tick Verified</title></html>".encode())
+    nl = chr(13) + chr(10)
+    head = f"HTTP/1.1 200 OK{nl}Content-Encoding: gzip{nl}Content-Length: {len(body)}{nl}Connection: close{nl}{nl}".encode()
+    port = _serve_once(lambda c: c.sendall(head + body))
+    r = recheck.check(f"http://127.0.0.1:{port}/", None, {f"127.0.0.1:{port}"})
+    assert (r["result"], r["title"]) == ("alive", "Blue Tick Verified")
