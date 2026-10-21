@@ -226,6 +226,39 @@ def brand_login_on_shared_hosting(titles: list[str], page_urls: list[str],
     return None
 
 
+# 브랜드 공식 화면 제목: 피싱 클론은 공식 화면을 통째로 베껴 제목도 그대로 둔다. 제목의 한 마디(' :: '·' | ' 등으로 나눈
+# 조각)가 이것과 같아야 한다. 실제로 클론에서 관찰한 제목만 넣는다(오늘의 실사이트 세트 OpenPhish 2026-10-15·16·20:
+# Steam 클론이 자체 도메인·공용 호스팅·오타 도메인에서 'Steam Community', 'Steam Community :: <프로필 이름>')
+OFFICIAL_TITLES: dict[str, tuple[str, ...]] = {
+    "steam": ("steam community",),
+}
+_TITLE_SEP = re.compile(r"\s*(?:::|\||·|—|–|\s-\s)\s*")
+
+
+def clone_title_brand(title: str) -> str | None:
+    """제목의 한 마디가 브랜드 공식 화면 제목 그대로면 그 브랜드. 제목에 다른 마디를 덧붙여도('Naver | Steam Community') 본다."""
+    parts = {p.strip() for p in _TITLE_SEP.split(_plain(title))}
+    return next((b for b, ts in OFFICIAL_TITLES.items() if parts.intersection(ts)), None)
+
+
+def brand_clone_login(titles: list[str], page_urls: list[str],
+                      page_forbidden: list[list[str]]) -> tuple[str, str] | None:
+    """공식 도메인 밖 화면이 브랜드 공식 화면 제목을 그대로 쓰고 그 화면에 로그인 요소가 있으면 (브랜드, 호스트).
+    관찰: 오늘의 실사이트 세트(OpenPhish 2026-10-20) 자체 도메인의 Steam 클론('Steam Community', 'Login'·'Sign In',
+    모델 정상 0.81~0.84 로 3/3 검토 없이 끝남). 제목 낱말로 브랜드를 내세우는 것(claimed_brands)만으로는 자체 도메인에서
+    보지 않는다 — 정상 제3자 사이트도 쓴다('Apple News'·가계부 앱 'Ledger'). 화면별 짝이 맞지 않으면 적용하지 않는다."""
+    if not len(titles) == len(page_urls) == len(page_forbidden):
+        return None
+    for title, url, seen in zip(titles, page_urls, page_forbidden, strict=True):
+        if not any(x.startswith(("login:", "input:password")) for x in seen):
+            continue
+        host = _host(url)
+        brand = clone_title_brand(title)
+        if brand and host and not official_brand(host):
+            return brand, host
+    return None
+
+
 def lookalike_in(url: str, final_url: str) -> str | None:
     """신고된 주소나 최종 주소가 브랜드 사칭 도메인이면 그 브랜드."""
     for u in (url, final_url):

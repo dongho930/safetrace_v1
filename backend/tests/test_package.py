@@ -352,6 +352,10 @@ def test_malformed_signed_records_do_not_break_exports(tmp_path, client, case_id
     ({"reason": "brand_login_shared_hosting", "brand": "steam", "destination": "x.netlify.app",
       "original": {"threat": "benign", "probability": 0.49, "provider": "jev_typesafe"}},
      "공용 호스팅에서 브랜드를 내세운 로그인 화면(steam · x.netlify.app) → 담당자 검토 · 모델 원래 판단 정상 49%"),
+    ({"reason": "brand_clone_title", "brand": "steam", "destination": "sample-clone-42.dev",
+      "original": {"threat": "benign", "probability": 0.83, "provider": "jev_typesafe"}},
+     "공식 도메인 밖에서 브랜드 공식 화면 제목을 그대로 쓴 로그인 화면(steam · sample-clone-42.dev) → 담당자 검토"
+     " · 모델 원래 판단 정상 83%"),
     ({"reason": "official_betting_domain", "operators": ["betman"],
       "original": {"threat": "illegal_gambling", "probability": 0.9, "provider": "jev_typesafe"}},
      "공식 사행사업자 도메인 · betman · 모델 원래 판단 불법 도박 의심 90%"),

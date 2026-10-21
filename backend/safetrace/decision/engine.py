@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 
 from ..config import Settings
 from .brands import (
+    brand_clone_login,
     brand_login_on_shared_hosting,
     brand_name_in,
     brand_typo_claim,
@@ -232,12 +233,16 @@ class Engine:
                           "original": {"threat": res.choice, "probability": prob, "provider": provider}},
             )
         # 화면 제목이 브랜드를 내세우는데 (1) 그 화면의 도메인이 브랜드 이름의 오타이거나(trzer → trezor)
-        # (2) 공용 호스팅에 로그인 요소와 함께 있다(Steam 사칭 netlify). 모델은 꾸민 화면을 정상으로 보기 쉽다
+        # (2) 공용 호스팅에 로그인 요소와 함께 있거나(Steam 사칭 netlify) (3) 공식 화면 제목을 그대로 쓴 로그인 화면이
+        # 공식 도메인 밖에 있다(자체 도메인의 Steam 클론). 모델은 꾸민 화면을 정상으로 보기 쉽다
         claim = brand_typo_claim(req.page_titles, req.page_urls)
         reason = "brand_typo_domain"
         if not claim:
             claim = brand_login_on_shared_hosting(req.page_titles, req.page_urls, req.page_forbidden)
             reason = "brand_login_shared_hosting"
+        if not claim:
+            claim = brand_clone_login(req.page_titles, req.page_urls, req.page_forbidden)
+            reason = "brand_clone_title"
         if claim and res.choice in (Threat.UNKNOWN, Threat.BENIGN):
             return ThreatDecision(
                 choice=Threat.PHISHING.value, probabilities={Threat.PHISHING.value: 1.0}, confidence=None,
