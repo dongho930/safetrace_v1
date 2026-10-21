@@ -230,6 +230,12 @@ def _verified_records(case_id: str) -> list[dict] | None:
         return None
 
 
+def _intel_secret() -> bytes:
+    """개인정보(전화·계좌) 연결 열쇠의 비밀키: 증거 서명 키에서 용도를 붙여 따로 뽑는다(서명 키 자체를 쓰지 않는다)."""
+    return hmac.new(settings.evidence_hmac_key.get_secret_value().encode(), b"safetrace.intel-link-key/1",
+                    hashlib.sha256).digest()
+
+
 def _write_intel(case_id: str, recs: list[dict] | None) -> None:
     """운영 정보·키트 지문으로 이을 줄(related.intel_rows)을 검증한 체인에서 쓴다. 워커가 보낸 이벤트 값은 쓰지 않는다."""
     if recs is None:
@@ -239,7 +245,7 @@ def _write_intel(case_id: str, recs: list[dict] | None) -> None:
         with store.session() as s:
             c = s.get(Case, case_id)
         th = c.threat.get("threat") if c is not None and isinstance(c.threat, dict) else None
-        store.write_intel_sites(case_id, related.intel_rows(recs, th if isinstance(th, str) else None))
+        store.write_intel_sites(case_id, related.intel_rows(recs, th if isinstance(th, str) else None, _intel_secret()))
     except Exception as e:  # 실패해도 원 사건 처리는 계속
         log.exception("write intel sites failed")
         store.audit("system", "case.intel_failed", case_id, type(e).__name__)
@@ -884,7 +890,7 @@ def _intel_of(recs: list[dict]) -> tuple[list[dict], list[dict]]:
                 continue
             k = (x["kind"][:16], x["value"][:200])
             if k not in items and len(items) < 50:
-                key = related.intel_key(*k)
+                key = related.intel_key(*k, _intel_secret())
                 items[k] = {"kind": k[0], "value": k[1], "src": x.get("src") if isinstance(x.get("src"), str) else None,
                             "step": step, "key": key[0] if key else None}
         kit, url = d.get("kit"), d.get("url")
@@ -1057,16 +1063,27 @@ def _masked_event(payload: dict) -> dict:
 
 @app.get("/api/cases/{case_id}/events")
 async def case_events(case_id: str, p: Annotated[Principal, Depends(need("viewer"))],
-                      after: int = Query(0, ge=0)):
+                      after: int = Query(0, ge=0), authorization: Annotated[str, Header()] = ""):
     """SSE: 기존 이벤트를 먼저 보내고, 이후 새 이벤트를 이어서 보낸다. 종료 상태면 스트림을 닫는다."""
     _get_case(case_id)
-    raw_intel = ROLES[p.role] >= ROLES["investigator"]  # 열람자에게는 운영 정보의 전화·계좌를 가려 보낸다
+    token = authorization.partition(" ")[2]
+
+    def current() -> Principal | None:
+        """연결을 연 뒤 역할이 바뀌거나 세션이 폐기될 수 있다(Codex 지적): 보내기 전에 다시 확인한다."""
+        now_p = _principal(token)
+        return now_p if now_p is not None and now_p.name == p.name and ROLES[now_p.role] >= ROLES["viewer"] else None
 
     async def gen():
         last = after
         idle = 0
         while True:
             evs = await asyncio.to_thread(store.events_after, case_id, last)
+            if evs or (idle and idle % 20 == 0):
+                who = await asyncio.to_thread(current)
+                if who is None:
+                    return
+                # 열람자에게는 운영 정보의 전화·계좌를 가려 보낸다
+                raw_intel = ROLES[who.role] >= ROLES["investigator"]
             for e in evs:
                 last = e.id
                 payload = e.payload if raw_intel else _masked_event(e.payload)

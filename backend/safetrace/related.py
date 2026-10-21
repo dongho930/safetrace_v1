@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import re
 from urllib.parse import urlsplit
 
@@ -203,12 +204,14 @@ def case_sites(url: str, final_url: str | None, threat: dict | None, candidates:
 # 적어 둘 수 있다) 판단·자동 연관 사건에는 쓰지 않고 묶음을 보여 주는 데만 쓴다. case_sites 에 role contact·kit 으로 둔다
 INTEL_ROLES = ("contact", "kit")
 INTEL_PER_CASE = 24
-_PII_KINDS = ("phone", "account", "whatsapp")  # 열쇠는 해시, 보이는 값은 끝 4자리만(연관 묶음·CSV 는 열람자도 본다)
+# 열쇠는 서버 비밀키 HMAC, 보이는 값은 끝 4자리만(연관 묶음·CSV 는 열람자도 본다). 키 없는 해시면 가린 값과 함께 공개된
+# 열쇠에 가운데 네 자리(1만 개)를 대입해 원래 번호를 찾을 수 있다(Codex 지적)
+_PII_KINDS = ("phone", "account", "whatsapp")
 _NO_KIT = (None, "benign", "unknown")  # 키트 지문은 위협으로 본 사건만(오류·주차·봇 확인 화면 같은 흔한 틀을 피한다)
 HASH32 = re.compile(r"[0-9a-f]{32}")
 
 
-def intel_key(kind: object, value: object) -> tuple[str, str] | None:
+def intel_key(kind: object, value: object, secret: bytes) -> tuple[str, str] | None:
     """운영 정보 하나의 (이을 열쇠, 보일 값). 잇지 않으면 None. 입력값을 보내는 곳은 주소 전체(쿼리 빼고)가 같을 때만
     잇는다: 등록 도메인으로 이으면 script.google.com·workers.dev 같은 공용 서비스로 남남끼리 묶인다. 내부 주소는 잇지 않는다."""
     from .agent.intel import KINDS, mask
@@ -224,11 +227,12 @@ def intel_key(kind: object, value: object) -> tuple[str, str] | None:
         endpoint = f"{host}{u.path or '/'}"[:200]
         return f"form:{endpoint}", endpoint
     if kind in _PII_KINDS:
-        return f"{kind}:{hashlib.sha256(value.encode()).hexdigest()[:16]}", mask(kind, value)
+        mac = hmac.new(secret, f"safetrace.intel-link/1|{kind}|{value}".encode(), hashlib.sha256).hexdigest()[:24]
+        return f"{kind}:{mac}", mask(kind, value)
     return f"{kind}:{value}", value
 
 
-def intel_rows(records: list[dict], threat: str | None) -> list[dict]:
+def intel_rows(records: list[dict], threat: str | None, secret: bytes) -> list[dict]:
     """검증한 체인의 원래 조사 intel 기록에서 이을 열쇠 줄(case_sites 모양). 정상으로 본 사건은 잇지 않는다."""
     if threat == "benign":
         return []
@@ -246,7 +250,7 @@ def intel_rows(records: list[dict], threat: str | None) -> list[dict]:
         if r.get("kind") != "intel" or not isinstance(d, dict) or isinstance(d.get("sub"), int):
             continue
         for x in d.get("items") if isinstance(d.get("items"), list) else []:
-            k = intel_key(x.get("kind"), x.get("value")) if isinstance(x, dict) else None
+            k = intel_key(x.get("kind"), x.get("value"), secret) if isinstance(x, dict) else None
             if k:
                 add(k[0], k[1], "contact")
         kit, url = d.get("kit"), d.get("url")

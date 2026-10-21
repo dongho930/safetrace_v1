@@ -17,6 +17,8 @@ import hashlib
 import re
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from ..masking import mask_pii
+
 MAX_ITEMS = 20       # 관찰 하나에서 남기는 운영 정보
 KIT_MIN_ELEMENTS = 60  # 이보다 요소가 적은 화면은 키트 지문을 만들지 않는다
 KIT_MIN_ASSETS = 1     # 빌드 산출물 경로가 이보다 적으면 산출물 지문을 만들지 않는다
@@ -121,9 +123,12 @@ def from_forms(forms: list, page_url: str) -> list[dict]:
         a = f.get("action") if isinstance(f, dict) else None
         if not isinstance(a, str) or not a.startswith(("http://", "https://")) or len(a) > 2048:
             continue
-        host = (urlsplit(a).hostname or "").lower()
+        u = urlsplit(a)
+        host = (u.hostname or "").lower()
         if host and host != page_host:
-            out.append(_item("form", a.split("#", 1)[0][:300], "form"))
+            # 쿼리·사용자 정보에는 받는 사람·번호가 들어갈 수 있다(열람자에게도 보인다, Codex 지적): 주소만, 경로는 가려서
+            port = f":{u.port}" if u.port else ""
+            out.append(_item("form", f"{u.scheme}://{host}{port}{mask_pii(u.path or '/')[:200]}", "form"))
     return out
 
 

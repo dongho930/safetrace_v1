@@ -90,6 +90,9 @@ def test_mask():
 
 
 # ── 사건 잇기(related.intel_rows) ─────────────────────────
+SECRET = b"k" * 32
+
+
 def _intel_rec(items, url="https://kit.example.net/a", kit=None, sub=None):
     d = {"step": 0, "obs": 1, "url": url, "items": items, **({"kit": kit} if kit else {}), **({"sub": sub} if sub else {})}
     return {"seq": 2, "kind": "intel", "data": d}
@@ -105,7 +108,7 @@ def test_intel_rows_keys_and_conditions():
              {"kind": "form", "value": "https://script.google.com/macros/s/x/exec?u=1", "src": "form"},
              {"kind": "form", "value": "http://10.0.0.5/p.php", "src": "form"},  # 내부 주소는 잇지 않음
              {"kind": "nope", "value": "x"}, "x"]
-    rows = related.intel_rows([_intel_rec(items, kit=kit), _intel_rec(items[:1], sub=1)], "phishing")
+    rows = related.intel_rows([_intel_rec(items, kit=kit), _intel_rec(items[:1], sub=1)], "phishing", SECRET)
     by = {r["site"]: r for r in rows}
     assert "telegram:vip_agent" in by and by["telegram:vip_agent"]["role"] == "contact"
     phone = next(r for r in rows if r["site"].startswith("phone:"))
@@ -117,12 +120,12 @@ def test_intel_rows_keys_and_conditions():
     assert {"kit:dom:" + "a" * 32, "kit:res:" + "b" * 32} <= set(by) and by["kit:dom:" + "a" * 32]["host"] == "kit.example.net"
     assert len(rows) == 7
     # 정상으로 본 사건은 잇지 않고, 판단 불가면 키트 지문은 쓰지 않는다(오류·주차 화면 틀)
-    assert related.intel_rows([_intel_rec(items, kit=kit)], "benign") == []
-    assert not any(r["role"] == "kit" for r in related.intel_rows([_intel_rec(items, kit=kit)], "unknown"))
+    assert related.intel_rows([_intel_rec(items, kit=kit)], "benign", SECRET) == []
+    assert not any(r["role"] == "kit" for r in related.intel_rows([_intel_rec(items, kit=kit)], "unknown", SECRET))
     # 공식·단축 서비스·내부 주소 화면의 지문은 운영자를 가리키지 않는다
     for url in ("https://www.facebook.com/", "https://bit.ly/x", "http://127.0.0.1:8900/a"):
-        assert not any(r["role"] == "kit" for r in related.intel_rows([_intel_rec([], url=url, kit=kit)], "phishing"))
-    assert related.intel_rows([_intel_rec([], kit={"dom": "x" * 32})], "phishing") == []  # 해시 모양이 아님
+        assert not any(r["role"] == "kit" for r in related.intel_rows([_intel_rec([], url=url, kit=kit)], "phishing", SECRET))
+    assert related.intel_rows([_intel_rec([], kit={"dom": "x" * 32})], "phishing", SECRET) == []  # 해시 모양이 아님
     from safetrace.store import INTEL_ROLES
     assert INTEL_ROLES == related.INTEL_ROLES
 
@@ -199,3 +202,69 @@ def test_observation_records_operator_info(client, two_cases):
     assert step0["intel"]["items"] and ("phone", "010-****-5678") in {(x["kind"], x["value"]) for x in step0["intel"]["items"]}
     audit = [x["action"] for x in pkg["review"]["audit"]]
     assert "intel.view" in audit
+
+
+# ── Codex 1회차 정탐 재현 ─────────────────────────
+def test_form_url_pii_is_not_kept():
+    """F3: 입력 양식이 보내는 주소의 쿼리·사용자 정보·경로에 든 개인정보를 남기지 않는다(열람자에게도 보인다)."""
+    pii = "01012345678"
+    forms = [{"action": f"https://collect.example.net/submit?phone={pii}"},
+             {"action": "https://user:secret@collect2.example.net/p.php"},
+             {"action": "https://collect3.example.net/u/010-1234-5678/x"},
+             {"action": "https://collect4.example.net/u/010%2D1234%2D5678/x"}]
+    out = intel.from_forms(forms, "https://site.example/")
+    text = repr(out)
+    assert len(out) == 4 and pii not in text and "1234-5678" not in text and "secret" not in text and "user:" not in text
+    assert out[0]["value"] == "https://collect.example.net/submit"
+
+
+def test_viewer_cannot_recover_phone_from_link_key(client, two_cases):
+    """F2: 열람자가 보는 연결 열쇠(phone:…)와 가린 값(010-****-5678)으로 가운데 네 자리를 대입해 원번호를 찾을 수 없다."""
+    import hashlib
+
+    (_, _), (cid2, _) = two_cases
+    links = client.get(f"/api/cases/{cid2}/links", headers=_h(VIEWER)).json()
+    keys = [g["site"].split(":", 1)[1] for g in links["shared"] if g["site"].startswith("phone:")]
+    assert keys
+    for k in keys:
+        assert not any(hashlib.sha256(f"010{i:04d}5678".encode()).hexdigest()[:16] == k for i in range(10000))
+        assert not any(hashlib.sha256(f"010{i:04d}1234".encode()).hexdigest()[:16] == k for i in range(10000))
+
+
+def test_role_change_stops_raw_intel_stream(client):
+    """F1: 실시간 이벤트를 받는 중에 역할이 열람자로 바뀌면(세션 폐기) 그 뒤 운영 정보 원래 값을 보내지 않는다."""
+    from safetrace import accounts
+    from safetrace.api.main import store
+    from safetrace.store import Case
+
+    name, pw = "intel" + secrets.token_hex(3), "correct-horse-battery-9"
+    accounts.create_user(store, name, pw, "investigator")
+    tok = client.post("/api/auth/login", json={"username": name, "password": pw}).json()["token"]
+    with store.session() as s, s.begin():
+        c = Case(url="http://x.example/", source="test", status="RUNNING", created_by="t")
+        s.add(c)
+    cid = c.id
+
+    def intel_ev(v):
+        return {"type": "evidence", "seq": 0, "kind": "intel", "files": [], "hash": "",
+                "data": {"step": 0, "items": [{"kind": "phone", "value": v, "src": "link"}]}}
+
+    store.add_event(cid, intel_ev("01011112222"))
+    # 시험 도구(TestClient)는 끝나지 않는 SSE 를 끝까지 모으려 해서, 응답의 생성기를 직접 돌린다
+    import asyncio
+
+    from safetrace.api import main as m
+
+    resp = asyncio.run(m.case_events(cid, m._principal(tok), 0, authorization=f"Bearer {tok}"))
+
+    async def run():
+        it = resp.body_iterator
+        first = await it.__anext__()
+        accounts.update_user(store, name, role="viewer")
+        store.add_event(cid, intel_ev("01033334444"))
+        store.add_event(cid, {"type": "status", "status": "FAILED", "reason": "test"})
+        return [first, *[x async for x in it]]
+
+    got = [x for x in asyncio.run(asyncio.wait_for(run(), 30)) if "data: " in x]
+    assert "01011112222" in got[0]  # 조사관일 때는 원래 값
+    assert not any("01033334444" in g for g in got)  # 역할이 바뀐 뒤에는 원래 값이 나가지 않는다
