@@ -6,8 +6,8 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import (JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine,
-                        delete, select)
+from sqlalchemy import (JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint,
+                        create_engine, delete, select)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
@@ -130,6 +130,43 @@ class Verdict(Base):
     head_seq: Mapped[int | None] = mapped_column(Integer)  # 판정 당시 증거 체인 끝
     head_hash: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CaseAction(Base):
+    """조치 추적(모니터링 담당자 업무): 위협 확정 뒤 기관에 요청함 → 차단·삭제 확인 → (재확인에서) 다시 나타남 → 종결.
+    판정처럼 덮어쓰지 않고 판(rev)을 쌓는다. (case_id, rev) 유일 제약이 낙관적 잠금이다(actions.py)."""
+
+    __tablename__ = "case_actions"
+    __table_args__ = (UniqueConstraint("case_id", "rev"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), index=True)
+    rev: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(String(16))  # requested | blocked | removed | reappeared | closed
+    agency: Mapped[str | None] = mapped_column(String(16))  # 요청한 기관(requested 일 때)
+    ref: Mapped[str | None] = mapped_column(String(100))  # 기관 접수 번호 등
+    note: Mapped[str | None] = mapped_column(Text)
+    actor: Mapped[str] = mapped_column(String(64))  # 담당자 이름 또는 system:recheck
+    check_id: Mapped[int | None] = mapped_column(Integer)  # 재확인 결과로 기록한 경우 그 재확인
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CaseCheck(Base):
+    """재확인: 조치를 추적 중인 사건의 신고 주소에 다시 접속해 본 결과(살아 있음·사라짐·회선 차단 등). API 가 대기(pending)
+    줄을 먼저 만들고, 조사 컨테이너는 그 번호의 결과만 채울 수 있다. 증거 체인(서명)에는 넣지 않는다(접속 결과만)."""
+
+    __tablename__ = "case_checks"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), index=True)
+    state: Mapped[str] = mapped_column(String(12), default="pending", index=True)  # pending | done | expired
+    requested_by: Mapped[str] = mapped_column(String(64))
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result: Mapped[str | None] = mapped_column(String(16))  # alive | gone | filtered | refused | unreachable | error
+    reason: Mapped[str | None] = mapped_column(String(64))
+    http_status: Mapped[int | None] = mapped_column(Integer)
+    final_host: Mapped[str | None] = mapped_column(String(253))
+    title: Mapped[str | None] = mapped_column(String(200))
+    seconds: Mapped[float | None] = mapped_column(Float)
 
 
 class User(Base):

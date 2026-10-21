@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from .. import accounts, package, related, report, verdicts
+from .. import accounts, actions, package, related, report, verdicts
 from ..accounts import ROLES, AccountError
 from ..config import get_settings
 from ..evidence import Head, Signer, VerifyResult, iter_evidence, open_evidence, verify_case
@@ -45,7 +45,7 @@ from ..netguard import BlockedURL, parse_url
 from ..preview import preview_image
 from ..ratelimit import FailureLimiter
 from ..signer.client import ChainAdmin, SignerError
-from ..store import TERMINAL, AuditLog, Case, CaseLink, CasePhase, CaseSite, Store, Verdict
+from ..store import TERMINAL, AuditLog, Case, CaseAction, CaseCheck, CaseLink, CasePhase, CaseSite, Store, Verdict
 from ..store import now as now_utc
 
 log = logging.getLogger("safetrace.api")
@@ -173,6 +173,9 @@ def record_event(case_id: str, payload: dict) -> None:
     잘라 내도 서명 서비스의 head 와 어긋나 검증에서 드러난다. 상태 전이는 store 가 검사한다(끝난 사건·모르는 상태는 거절).
     닫기에 실패하면 head 를 비워 두고, 검증·패키지에서 다시 닫아 받기 전까지 무결성을 성공으로 표시하지 않는다.
     """
+    if payload.get("type") == "check":
+        _record_check(case_id, payload)
+        return
     if payload.get("type") == "status" and "candidates" in payload:
         payload = {**payload, "candidates": _clean_candidates(payload["candidates"])}
     if payload.get("type") == "status" and "phase" in payload:
@@ -340,6 +343,60 @@ def _auto_related(case_id: str, recs: list[dict] | None | object = _UNREAD) -> N
         store.audit(related.AUTO_ACTOR, "case.create_related_auto_failed", case_id, type(e).__name__)
 
 
+def _record_check(case_id: str, payload: dict) -> None:
+    """재확인 결과(조사 컨테이너가 보낸 값). API 가 만든 그 사건의 대기 번호일 때만 받는다(actions.record_check)."""
+    got = actions.record_check(store, case_id, payload.get("check_id"), payload.get("result"))
+    if got is None:
+        store.audit("system", "check.rejected", case_id, f"check_id={str(payload.get('check_id'))[:12]}")
+        return
+    ck, added = got
+    store.audit(actions.SYSTEM_ACTOR, "check.done", case_id, f"id={ck.id} result={ck.result} reason={ck.reason or '-'}")
+    if added is not None:
+        store.audit(actions.SYSTEM_ACTOR, "action.reappeared", case_id, f"rev={added.rev} check={ck.id}")
+
+
+def enqueue_check(case_id: str, check_id: int, url: str) -> None:
+    """재확인 한 건을 조사 컨테이너에 맡긴다(운영: Redis st:checks, 개발: 같은 프로세스 스레드)."""
+    if _redis is not None:
+        _redis.xadd("st:checks", {"case_id": case_id, "check_id": str(check_id), "url": url[:2048]})
+        return
+    from ..agent.recheck import check  # 개발 모드에서만
+
+    def job():
+        try:
+            res = check(url, settings.egress_proxy, set(settings.test_allowlist))
+        except Exception as e:  # noqa: BLE001
+            res = {"result": "error", "reason": type(e).__name__}
+        record_event(case_id, {"type": "check", "check_id": check_id, "result": res})
+
+    _executor.submit(job)
+
+
+def recheck_due(at=None) -> int:
+    """정기 재확인 한 바퀴: 오래된 대기 줄을 만료하고, 조치를 추적 중인데 재확인한 지 오래된 사건을 맡긴다. 반환: 맡긴 수."""
+    actions.expire_pending(store, at)
+    n = 0
+    for cid, url in actions.due(store, interval=timedelta(hours=settings.recheck_interval_hours),
+                                limit=settings.recheck_batch, at=at):
+        try:
+            ck = actions.request_check(store, cid, actions.SYSTEM_ACTOR, at=at)
+        except actions.ActionError:
+            continue
+        store.audit(actions.SYSTEM_ACTOR, "check.request", cid, f"id={ck.id} scheduled")
+        enqueue_check(cid, ck.id, url)
+        n += 1
+    return n
+
+
+def _recheck_forever():
+    while True:
+        time.sleep(settings.recheck_tick_s)
+        try:
+            recheck_due()
+        except Exception:
+            log.exception("recheck scheduler error")
+
+
 def enqueue(case_id: str, url: str):
     if _chains is not None:
         try:
@@ -388,6 +445,8 @@ def _consume_events_forever():
 async def lifespan(_app: FastAPI):
     if _redis is not None:
         threading.Thread(target=_consume_events_forever, daemon=True).start()
+    if settings.recheck_enabled:
+        threading.Thread(target=_recheck_forever, daemon=True).start()
     yield
 
 
@@ -441,6 +500,50 @@ class VerdictIn(BaseModel):
     note: str | None = Field(default=None, max_length=verdicts.NOTE_MAX * 2)
 
 
+class ActionOut(BaseModel):
+    rev: int
+    state: str
+    agency: str | None
+    ref: str | None
+    note: str | None
+    actor: str
+    check_id: int | None
+    created_at: str
+
+    @classmethod
+    def of(cls, a: CaseAction) -> ActionOut:
+        return cls(rev=a.rev, state=a.state, agency=a.agency, ref=a.ref, note=a.note, actor=a.actor, check_id=a.check_id,
+                   created_at=a.created_at.isoformat())
+
+
+class CheckOut(BaseModel):
+    id: int
+    state: str
+    requested_by: str
+    requested_at: str
+    done_at: str | None
+    result: str | None
+    reason: str | None
+    http_status: int | None
+    final_host: str | None
+    title: str | None
+    seconds: float | None
+
+    @classmethod
+    def of(cls, c: CaseCheck) -> CheckOut:
+        return cls(id=c.id, state=c.state, requested_by=c.requested_by, requested_at=c.requested_at.isoformat(),
+                   done_at=c.done_at.isoformat() if c.done_at else None, result=c.result, reason=c.reason,
+                   http_status=c.http_status, final_host=c.final_host, title=c.title, seconds=c.seconds)
+
+
+class ActionIn(BaseModel):
+    rev: int = Field(ge=0, description="보고 있던 조치 판 번호(없었으면 0)")
+    state: str = Field(pattern=r"^(requested|blocked|removed|closed)$")
+    agency: str | None = Field(default=None, pattern=r"^(kisa|kcsc|ngcc|police|fss|other)$")
+    ref: str | None = Field(default=None, max_length=actions.REF_MAX * 2)
+    note: str | None = Field(default=None, max_length=verdicts.NOTE_MAX * 2)
+
+
 class ChildOut(BaseModel):
     """연관 후보로 만든 사건(부모 사건 상세에 붙는 요약)."""
     id: str
@@ -476,6 +579,7 @@ class CaseOut(BaseModel):
     children: list[ChildOut] | None = None
     # 하위 조사했지만 자동 사건이 없는 후보와 이유(disabled|depth|not_threat|blocked|shortener|limit_or_duplicate, 상세에만)
     auto_skipped: list[dict] | None = None
+    action: ActionOut | None = None  # 현재 조치(요청함·차단 확인·삭제 확인·다시 나타남·종결)
 
     @classmethod
     def of(cls, c: Case, v: Verdict | None = None, ph: CasePhase | None = None,
@@ -487,6 +591,10 @@ class CaseOut(BaseModel):
                    main_status=ph.main_status if ph else None, main_head_seq=ph.main_head_seq if ph else None,
                    parent_id=parent[0].parent_id if parent else None, parent_url=parent[1] if parent else None,
                    auto=parent[0].auto if parent else None, children=children)
+
+    def with_action(self, a: CaseAction | None) -> CaseOut:
+        self.action = ActionOut.of(a) if a else None
+        return self
 
 
 class LoginIn(BaseModel):
@@ -732,7 +840,8 @@ def list_cases(p: Annotated[Principal, Depends(need("viewer"))], limit: int = Qu
         rows = s.scalars(select(Case).order_by(Case.created_at.desc()).limit(limit)).all()
     ids = [c.id for c in rows]
     latest, phases, parents = verdicts.latest_for(store, ids), store.phases_for(ids), store.parents_for(ids)
-    return [CaseOut.of(c, latest.get(c.id), phases.get(c.id), parents.get(c.id)) for c in rows]
+    acts = actions.latest_for(store, ids)
+    return [CaseOut.of(c, latest.get(c.id), phases.get(c.id), parents.get(c.id)).with_action(acts.get(c.id)) for c in rows]
 
 
 @app.get("/api/cases/{case_id}", response_model=CaseOut)
@@ -748,7 +857,7 @@ def _case_detail(c: Case) -> CaseOut:
                          threat=(k.threat or {}).get("threat") if isinstance(k.threat, dict) else None,
                          verdict=kv[k.id].decision if k.id in kv else None, auto=link.auto) for link, k in kids]
     out = CaseOut.of(c, verdicts.latest_for(store, [c.id]).get(c.id), store.phases_for([c.id]).get(c.id),
-                     store.parents_for([c.id]).get(c.id), children)
+                     store.parents_for([c.id]).get(c.id), children).with_action(actions.latest_for(store, [c.id]).get(c.id))
     if c.status in TERMINAL:  # 자동 생성은 원 사건이 끝난 뒤에 한다
         made = {k.candidate_url for k in children}
         out.auto_skipped = [
@@ -1024,6 +1133,47 @@ def related_group_csv(group_key: str, p: Annotated[Principal, Depends(need("inve
     name = f"safetrace-related-{now_utc().strftime('%Y%m%d')}-{group_key[:8]}.csv"
     return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+# ── 조치 추적·재확인 ─────────────────────────────────────────
+@app.get("/api/cases/{case_id}/actions")
+def list_actions(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]):
+    """조치 기록(새 판부터)과 최근 재확인 결과."""
+    _get_case(case_id)
+    return {"actions": [ActionOut.of(a) for a in actions.history(store, case_id)],
+            "checks": [CheckOut.of(c) for c in actions.checks(store, case_id)],
+            "recheck_interval_hours": settings.recheck_interval_hours}
+
+
+@app.post("/api/cases/{case_id}/actions", response_model=ActionOut, status_code=201)
+def save_action(case_id: str, body: ActionIn, p: Annotated[Principal, Depends(need("investigator", human=True))]):
+    """조치 기록(조사관 이상 담당자 계정). 위협으로 확정한 끝난 사건만, 보고 있던 판 번호로 동시 저장을 막는다."""
+    _get_case(case_id)
+    try:
+        a = actions.save(store, case_id, expected_rev=body.rev, state=body.state, agency=body.agency, ref=body.ref,
+                         note=body.note, actor=p.name)
+    except actions.ActionError as e:
+        raise HTTPException(422, str(e)) from None
+    except actions.ActionConflict as e:
+        cur = e.current
+        store.audit(p.name, "action.conflict", case_id, f"seen={body.rev} current={cur.rev if cur else 0}")
+        raise HTTPException(409, {"message": "다른 담당자가 먼저 조치를 기록했습니다",
+                                  "current": ActionOut.of(cur).model_dump() if cur else None}) from None
+    store.audit(p.name, "action.save", case_id, f"rev={a.rev} state={a.state} agency={a.agency or '-'}")
+    return ActionOut.of(a)
+
+
+@app.post("/api/cases/{case_id}/recheck", response_model=CheckOut, status_code=202)
+def request_recheck(case_id: str, p: Annotated[Principal, Depends(need("investigator"))]):
+    """지금 재확인(조사관 이상). 신고 주소에 다시 접속해 보는 일은 격리된 조사 컨테이너가 한다."""
+    c = _get_case(case_id)
+    try:
+        ck = actions.request_check(store, case_id, p.name)
+    except actions.ActionError as e:
+        raise HTTPException(409, str(e)) from None
+    store.audit(p.name, "check.request", case_id, f"id={ck.id}")
+    enqueue_check(case_id, ck.id, c.url)
+    return CheckOut.of(ck)
 
 
 # ── 담당자 판정 ─────────────────────────────────────────

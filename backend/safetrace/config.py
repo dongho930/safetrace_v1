@@ -91,6 +91,11 @@ class Settings(BaseSettings):
     related_auto_per_case: int = Field(3, ge=0, le=3)
     related_auto_max_pending: int = Field(10, ge=0, le=50)
     related_auto_dedup_days: int = Field(7, ge=1, le=30)
+    # 조치 추적 재확인(actions.py): 켜기, 같은 사건을 다시 볼 간격, 한 바퀴에 맡기는 수, 바퀴 간격(초)
+    recheck_enabled: bool = True
+    recheck_interval_hours: int = Field(24, ge=1, le=24 * 30)
+    recheck_batch: int = Field(10, ge=1, le=100)
+    recheck_tick_s: int = Field(300, ge=10, le=86400)
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
 
 
