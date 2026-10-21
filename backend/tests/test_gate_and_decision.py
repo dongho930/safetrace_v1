@@ -924,6 +924,22 @@ def test_typo_of(host, brand, expected):
     assert typo_of(host, brand) is expected
 
 
+@pytest.mark.parametrize("title, brand", [
+    ("Steam Community", "steam"),
+    ("Steam Community :: Meow ❤️", "steam"),          # 클론이 베낀 프로필 화면 제목(OpenPhish 2026-10-20 모양)
+    ("𝗦𝘁𝗲𝗮𝗺 𝗖𝗼𝗺𝗺𝘂𝗻𝗶𝘁𝘆", "steam"),                       # 꾸민 글자도 풀어서 본다
+    ("Sign in | Steam Community", "steam"),
+    ("Steam Community Market Prices - Sample", None),  # 공식 제목을 한 마디로 쓰지 않음(제3자 사이트)
+    ("steamcommunity", None),
+    ("Welcome to Steam", None),
+    ("", None),
+])
+def test_clone_title_brand(title, brand):
+    from safetrace.decision.brands import clone_title_brand
+
+    assert clone_title_brand(title) == brand
+
+
 @pytest.mark.parametrize("screens, reason", [
     # Codex 2회차: 제목에 다른 브랜드를 덧붙여도(첫 일치 하나만 보면 'naver' 로 오타 비교를 건너뛴다) 모든 브랜드로 본다
     ([("https://web-trzerwallet.gitbook.io/", "Trezor Hardware | Naver", [])], "brand_typo_domain"),
@@ -944,6 +960,12 @@ def test_brand_claim_needs_per_screen_pairs():
     assert brand_typo_claim(["x", "Trezor Hardware"], [url]) is None
     assert brand_login_on_shared_hosting(["Steam Community"], ["https://x.netlify.app/"], [["login:a:Sign in"]])
     assert brand_login_on_shared_hosting(["Steam Community"], ["https://x.netlify.app/"], []) is None
+    from safetrace.decision.brands import brand_clone_login
+
+    assert brand_clone_login(["Steam Community"], ["https://sample-clone-42.dev/"], [["login:a:Login"]]) == (
+        "steam", "sample-clone-42.dev")
+    assert brand_clone_login(["Steam Community"], ["https://sample-clone-42.dev/"], []) is None
+    assert brand_clone_login(["x", "Steam Community"], ["https://sample-clone-42.dev/"], [[], ["login:a:Login"]]) is None
     from safetrace.decision.brands import claimed_brands
     # 꾸민 글자로 브랜드 이름을 비튼 제목(OpenPhish 2026-10-17·18 의 'Çoinbase', 'G𝓮miñi' 모양)도 같은 브랜드로 본다
     assert claimed_brands("Çoinbase Pro | Login") == ["coinbase"] and claimed_brands("Tr𝓮zor® Hardware") == ["trezor"]
@@ -977,6 +999,18 @@ def _claim_req(url, title, forbidden=()):
     # 공식 도메인이거나 모델이 위협 유형을 골랐으면 그대로
     ("benign", "https://steamcommunity.com/login", "Steam Community :: Sign In", ["input:password:Password"], None),
     ("phishing", "https://sample-site-1234.netlify.app/", "Steam Community", ["login:a:Sign in"], None),
+    # 자체 도메인의 클론이 공식 화면 제목을 그대로 씀(OpenPhish 2026-10-20 Steam 클론과 같은 모양, 가짜 이름)
+    ("benign", "https://sample-clone-42.dev/", "Steam Community", ["login:a:Sign In", "login:a:Login"], "brand_clone_title"),
+    ("unknown", "https://sample-clone-42.dev/profiles/1", "Steam Community :: Sample ❤️", ["input:password:Password"],
+     "brand_clone_title"),
+    ("benign", "https://sample-clone-42.dev/", "Naver | Steam Community", ["login:a:Login"], "brand_clone_title"),
+    ("phishing", "https://sample-clone-42.dev/", "Steam Community", ["login:a:Login"], None),
+    # 자체 도메인에서 제목 낱말로만 브랜드를 내세우면(정상 제3자 사이트도 쓴다) 그대로
+    ("benign", "https://news-sample.example/", "Sample Rumors: Apple News", ["login:a:Log in"], None),
+    ("benign", "https://budget-sample.example/", "Ledger", ["login:button:Sign in"], None),
+    ("benign", "https://prices-sample.example/", "Steam Community Market Prices - Sample", ["login:a:Sign in"], None),
+    # 공식 화면 제목이어도 로그인 요소가 없으면 그대로
+    ("benign", "https://sample-clone-42.dev/", "Steam Community", ["input:text:Search"], None),
 ])
 def test_brand_claim_goes_to_review(choice, url, title, forbidden, reason):
     p = JevProvider("jev_typesafe", "https://x", "k", "m", 5,
@@ -1011,6 +1045,11 @@ def _screens_req(screens):
       ("https://x.github.io/", "Steam deck tips", [])], None),
     ([("https://example.com/", "Home", []),
       ("https://x.github.io/", "Steam Community", ["login:a:Sign in"])], "brand_login_shared_hosting"),
+    # 공식 화면 제목 규칙도 같은 화면의 로그인 요소만 본다
+    ([("https://example.com/login", "Community", ["input:password:Password"]),
+      ("https://sample-clone-42.dev/", "Steam Community", [])], None),
+    ([("https://example.com/", "Home", []),
+      ("https://sample-clone-42.dev/", "Steam Community", ["login:a:Login"])], "brand_clone_title"),
 ])
 def test_brand_claim_uses_each_screen(screens, reason):
     sent = []
@@ -1031,7 +1070,7 @@ def test_brand_claim_not_on_normal_sites():
     import csv
     from pathlib import Path
 
-    from safetrace.decision.brands import brand_login_on_shared_hosting, brand_typo_claim
+    from safetrace.decision.brands import brand_clone_login, brand_login_on_shared_hosting, brand_typo_claim
 
     data = Path(__file__).resolve().parents[2] / "data"
     rows = [r for r in csv.DictReader((data / "normal_sites_browser_checked.csv").open(encoding="utf-8-sig"))
@@ -1041,6 +1080,7 @@ def test_brand_claim_not_on_normal_sites():
         u = r.get("browser_final_url") or r["url"]
         assert brand_typo_claim([r["browser_title"]], [u]) is None, u
         assert brand_login_on_shared_hosting([r["browser_title"]], [u], [["login:a:로그인", "input:password:비밀번호"]]) is None, u
+        assert brand_clone_login([r["browser_title"]], [u], [["login:a:로그인", "input:password:비밀번호"]]) is None, u
 
 
 def test_official_brand_domain_with_no_content_kept():

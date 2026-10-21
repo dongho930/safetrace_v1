@@ -25,6 +25,7 @@ export function overrideLabel(o: Threat["override"]): string {
   if (o.reason === "brand_name_domain") return `브랜드 이름 그대로의 다른 도메인(${brand} · ${dest}) → 담당자 검토`;
   if (o.reason === "brand_typo_domain") return `브랜드를 내세운 화면인데 도메인이 그 이름의 오타(${brand} · ${dest}) → 담당자 검토`;
   if (o.reason === "brand_login_shared_hosting") return `공용 호스팅에서 브랜드를 내세운 로그인 화면(${brand} · ${dest}) → 담당자 검토`;
+  if (o.reason === "brand_clone_title") return `공식 도메인 밖에서 브랜드 공식 화면 제목을 그대로 쓴 로그인 화면(${brand} · ${dest}) → 담당자 검토`;
   if (o.reason === "official_betting_domain") {
     const ops = strs(o.operators);
     return `공식 사행사업자 도메인${ops.length ? ` · ${ops.join(", ")}` : ""}`;
