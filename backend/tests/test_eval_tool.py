@@ -155,6 +155,11 @@ def test_related_summary_counts_auto_targets():
     m = related_summary(recs)
     assert (m["kisa"]["auto"], m["kisa"]["auto_sites"]) == (1, ["g.example"])
     assert m["normal"]["auto"] == 0
+    # 조건 10: 사칭 브랜드의 진짜 사이트는 자동 접수 대상에서 빠지고, 같은 회차에서 뺀 수를 따로 센다(이전 기록은 표시 없음)
+    real = {**good, "url": "https://www.brand.example/", "site": "brand.example", "brand_site": True}
+    recs[0]["related"].append(real)
+    m = related_summary(recs)["kisa"]
+    assert (m["auto"], m["brand_out"], m["brand_out_sites"]) == (1, 1, ["brand.example"])
 
 
 def test_sb_record_flags():

@@ -11,14 +11,58 @@
 
 from __future__ import annotations
 
+import re
 from urllib.parse import urlsplit
 
-from .decision.brands import SHARED_HOSTING, SHORTENER_HOSTS, on_domain
+from .decision.brands import SHARED_HOSTING, SHORTENER_HOSTS, _plain, on_domain, site_of
 from .netguard import is_public_ip
 
 AUTO_ACTOR = "system:related"  # 자동 생성 주체(사람 계정·자동화 토큰 이름과 겹치지 않는 내부 이름)
 _NOT_THREAT = (None, "benign", "unknown")
 _HAS_RESULT = ("COMPLETED", "REVIEW_REQUIRED")  # 하위 조사가 화면을 보고 판단한 상태(접속 불가·차단·실패는 결과 없음)
+
+# ── 원 사건이 내세운 브랜드의 사이트(개선 후보 9) ─────────────────────────
+# 피싱 키트는 사칭한 브랜드의 진짜 사이트를 링크한다(비밀번호 재설정·이용 약관 등). 하위 조사가 그 진짜 사이트를 위협으로
+# 보면(OpenPhish 2026-10-20 OCA 사칭 → oca.com.uy 0.6, 10/21 Wells Fargo 사칭 → wellsfargo.com 0.61~0.64, 보류 없음)
+# 진짜 사이트를 조사하는 자동 사건이 생긴다. 확률로는 가를 수 없어(진짜 위협 0.62 와 겹침) 이름으로 뺀다
+_NAME_WORD = re.compile(r"[a-z0-9]+")
+_LABEL = re.compile(r"[a-z0-9]{3,63}")  # 하이픈 없는 등록 도메인 이름만(wells-fargo-login 같은 사칭 이름은 맞추지 않는다)
+_NAME_SPAN = 3  # 이어 붙이는 낱말 수('Wells Fargo' → wellsfargo, 'Bank of America' → bankofamerica)
+
+
+def claimed_names(titles: object) -> frozenset[str]:
+    """원 사건 화면 제목들이 내세우는 이름: 꾸민 글자를 풀고 영문·숫자 낱말과 이어진 낱말 2~3개를 붙인 것.
+    'Wells Fargo - Sign On' → wells, fargo, sign, on, wellsfargo, fargosign, ... 제목은 조사 대상 페이지가 정한 값이다."""
+    out: set[str] = set()
+    for t in titles[-20:] if isinstance(titles, list) else []:
+        if not isinstance(t, str):
+            continue
+        words = _NAME_WORD.findall(_plain(t[:200]))
+        for i in range(len(words)):
+            for j in range(i + 1, min(i + _NAME_SPAN, len(words)) + 1):
+                out.add("".join(words[i:j]))
+    return frozenset(out)
+
+
+def brand_site(host: str, names: frozenset[str] | set[str], *, gambling: bool = False) -> bool:
+    """하위 조사가 도착한 호스트가 원 사건이 내세운 브랜드 자신의 사이트로 보이는지(자동 사건을 만들지 않는다).
+
+    - 공식 브랜드·사행사업자 도메인이면 그렇다(목록에 있는 진짜 사이트)
+    - 등록 도메인 이름(하이픈 없는 3자 이상)이 원 사건 제목이 내세운 이름과 같으면 그렇다(wellsfargo.com ← 'Wells
+      Fargo', oca.com.uy ← 'OCA'). 이름으로 시작하거나 이름을 품은 도메인(wellsfargo-login.com)은 아니다
+    - 원 사건이 불법 도박이면 이름은 보지 않는다: 도박 복제 사이트가 내세우는 브랜드는 그 자체가 불법 도박이다
+    - 공용 호스팅·단축 서비스·IP 주소는 아니다(호스팅 이름은 운영자가 아니다)
+    최종 주소가 같은 이름이고 최상위 도메인만 다른 사칭(wellsfargo.co)도 여기 걸린다. 자동 접수만 하지 않을 뿐 후보
+    목록에는 위협으로 그대로 남아 담당자가 버튼으로 접수할 수 있다"""
+    from .agent.candidates import _official  # 공식 판정은 후보 고르기·사건 연결과 같게
+
+    h = (host or "").lower().rstrip(".")[:253]
+    if not h or _non_public_ip(h) or on_domain(h, SHORTENER_HOSTS) or on_domain(h, SHARED_HOSTING):
+        return False
+    if _official(h):
+        return True
+    label = site_of(h).split(".")[0]
+    return not gambling and bool(_LABEL.fullmatch(label)) and not label.isdigit() and label in names
 
 
 def target_host(c: dict) -> str:
@@ -33,7 +77,10 @@ def skip_reason(parent_source: str, c: dict, *, enabled: bool, threat_min_prob: 
     """조건 1~6 중 처음 어긋난 이유 코드. 모두 통과하면 None.
 
     disabled 자동 접수 꺼짐 · depth 연관 사건의 후보(깊이 1) · not_threat 선별 결과가 위협이 아님 ·
-    shortener 도착한 곳이 단축 서비스
+    shortener 도착한 곳이 단축 서비스 · brand_site 원 사건이 내세운 브랜드 자신의 사이트(조건 10, brand_site())
+
+    brand_site 표시는 하위 조사를 한 워커가 남긴 값이다. 자동 사건을 막기만 하므로(만들게 하지는 못함) 뚫린 워커가 이
+    값으로 얻는 것은 없다 — 워커는 이미 하위 조사 결과(상태·위협)를 바꿔 자동 사건을 막을 수 있다
 
     명세의 조건 5(이미 차단됨이면 만들지 않음)는 두지 않는다: 회선 차단은 조사 대상 서버가 흉내 낼 수 있는 '추정'이라
     (PR 2 Codex 지적), 그것만으로 자동 조사를 건너뛰면 공격자가 차단된 척해 자동 조사를 피할 수 있다. 정말 막힌 곳이면
@@ -51,6 +98,8 @@ def skip_reason(parent_source: str, c: dict, *, enabled: bool, threat_min_prob: 
         return "not_threat"
     if on_domain(target_host(c), SHORTENER_HOSTS):                    # 6 같은 단축 서비스는 같은 조직이 아니다
         return "shortener"
+    if c.get("brand_site") is True:                                   # 10 피싱 키트가 링크한 진짜 브랜드 사이트
+        return "brand_site"
     return None
 
 
