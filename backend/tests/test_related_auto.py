@@ -127,7 +127,7 @@ def test_creates_only_selected_candidates(client, store, isolated):
 def test_brand_site_is_not_auto_created_but_button_still_works(client, store, isolated):
     """조건 10(개선 후보 9): 하위 조사가 사칭 브랜드의 진짜 사이트(brand_site)를 위협으로 봐도 자동 사건을 만들지 않고,
     상세의 자동 접수 안 함 이유로 보인다. 담당자는 버튼으로 접수할 수 있다."""
-    real, other = cand(brand_site=True), cand()
+    real, other = cand(brand_site=True, probability=0.62), cand()  # 관찰한 진짜 사이트처럼 확신 낮은 위협
     pid = finish(store, [real, other])
     assert [lk.candidate_url for lk in children(store, pid)] == [other["url"]]
     h = {"Authorization": f"Bearer {INVESTIGATOR}"}

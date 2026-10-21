@@ -28,6 +28,7 @@ _HAS_RESULT = ("COMPLETED", "REVIEW_REQUIRED")  # 하위 조사가 화면을 보
 _NAME_WORD = re.compile(r"[a-z0-9]+")
 _LABEL = re.compile(r"[a-z0-9]{3,63}")  # 하이픈 없는 등록 도메인 이름만(wells-fargo-login 같은 사칭 이름은 맞추지 않는다)
 _NAME_SPAN = 3  # 이어 붙이는 낱말 수('Wells Fargo' → wellsfargo, 'Bank of America' → bankofamerica)
+BRAND_SITE_MAX_PROB = 0.7  # 이 확신 이상인 위협·평판 위험은 이름이 맞아도 자동 접수(skip_reason 조건 10)
 
 
 def claimed_names(titles: object) -> frozenset[str]:
@@ -80,7 +81,11 @@ def skip_reason(parent_source: str, c: dict, *, enabled: bool, threat_min_prob: 
     shortener 도착한 곳이 단축 서비스 · brand_site 원 사건이 내세운 브랜드 자신의 사이트(조건 10, brand_site())
 
     brand_site 표시는 하위 조사를 한 워커가 남긴 값이다. 자동 사건을 막기만 하므로(만들게 하지는 못함) 뚫린 워커가 이
-    값으로 얻는 것은 없다 — 워커는 이미 하위 조사 결과(상태·위협)를 바꿔 자동 사건을 막을 수 있다
+    값으로 얻는 것은 없다 — 워커는 이미 하위 조사 결과(상태·위협)를 바꿔 자동 사건을 막을 수 있다.
+    이름은 조사 대상 페이지가 정한 제목에서 오므로(Codex 1회차 F1: 제목을 'Secure Portal' 로 하고 자기 피싱 사이트
+    secure.example 을 링크하면 빠졌다) 그것만으로 빼지 않는다: 하위 조사의 위협 확신이 낮고(BRAND_SITE_MAX_PROB 미만,
+    관찰한 진짜 사이트 0.60~0.64) 외부 평판(페이지가 정할 수 없는 값)이 위험이 아닐 때만 뺀다. 확신을 그 구간으로
+    낮출 수 있는 공격자는 0.6 아래로도 낮춰 조건 4 로 이미 피할 수 있어 제목으로 얻는 것이 없다
 
     명세의 조건 5(이미 차단됨이면 만들지 않음)는 두지 않는다: 회선 차단은 조사 대상 서버가 흉내 낼 수 있는 '추정'이라
     (PR 2 Codex 지적), 그것만으로 자동 조사를 건너뛰면 공격자가 차단된 척해 자동 조사를 피할 수 있다. 정말 막힌 곳이면
@@ -98,7 +103,8 @@ def skip_reason(parent_source: str, c: dict, *, enabled: bool, threat_min_prob: 
         return "not_threat"
     if on_domain(target_host(c), SHORTENER_HOSTS):                    # 6 같은 단축 서비스는 같은 조직이 아니다
         return "shortener"
-    if c.get("brand_site") is True:                                   # 10 피싱 키트가 링크한 진짜 브랜드 사이트
+    if (c.get("brand_site") is True and c.get("reputation_match") is not True   # 10 피싱 키트가 링크한 진짜 브랜드 사이트
+            and isinstance(prob, (int, float)) and prob < BRAND_SITE_MAX_PROB):
         return "brand_site"
     return None
 

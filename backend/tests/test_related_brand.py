@@ -101,3 +101,22 @@ def test_package_and_api_keep_only_bool():
     assert [r.get("brand_site") for r in out[0]["data"]["results"]] == [None, True]  # 목록 안 항목은 그 필드만 버린다
     got = _clean_candidates([{"url": "https://a.example/", "brand_site": "yes"}, {"url": "https://b.example/", "brand_site": True}])
     assert [c.get("brand_site") for c in got] == [None, True]
+
+
+# ── Codex 1회차 F1(Medium): 제목은 조사 대상 페이지가 정한다 ─────────────────────────
+@pytest.mark.parametrize("prob, rep, expected", [
+    (0.95, False, None),          # 제목만 바꿔 자기 피싱 사이트(secure.example)를 빼지 못한다: 확신 있는 위협은 자동 접수
+    (0.62, True, None),           # 외부 평판(페이지가 정할 수 없는 값)이 위험이면 빼지 않는다
+    (0.95, True, None),
+    (0.62, False, "brand_site"),  # 관찰한 진짜 사이트(0.6~0.64)처럼 확신 낮은 위협만 뺀다
+])
+def test_title_alone_cannot_suppress_confident_or_reputed_threat(prob, rep, expected):
+    names = claimed_names(["Secure Portal"])
+    c = {"url": "https://secure.example/guide", "host": "secure.example", "sub": 1, "status": "COMPLETED",
+         "final_url": "https://secure.example/guide", "threat": "phishing", "probability": prob, "hold": False,
+         "reputation_match": rep}
+    c["brand_site"] = brand_site(related.target_host(c), names)
+    assert c["brand_site"] is True  # 이름은 맞는다(표시는 남는다)
+    assert related.skip_reason("report", c, enabled=True, threat_min_prob=0.6) == expected
+    assert [x["url"] for x, _ in related.auto_targets("report", [c], enabled=True, threat_min_prob=0.6)] == (
+        [c["url"]] if expected is None else [])

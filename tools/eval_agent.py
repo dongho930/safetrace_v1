@@ -157,7 +157,8 @@ def related_summary(recs: list[dict]) -> dict[str, dict]:
         n_sub = sum(1 for r in subs for c in r["related"] if c.get("sub"))
         mains = sorted(r.get("seconds_main", r["seconds"]) for r in measured)
         autos = [c for r in measured for c in auto_targets(r)]
-        brand_out = [c for r in measured for c in auto_targets(r, brand=False) if c.get("brand_site") is True]
+        kept = {id(c) for c in autos}
+        brand_out = [c for r in measured for c in auto_targets(r, brand=False) if id(c) not in kept]  # 조건 10 이 뺀 것
         extra = sum(r["seconds"] - r.get("seconds_main", r["seconds"]) for r in subs)
         out[g] = {"scored": len(scored), "measured": len(measured), "sub_runs": len(subs), "threat_runs": len(hits),
                   "sites": len(sites), "blocked_known": bool(known), "open_sites": len(open_sites),

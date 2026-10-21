@@ -156,10 +156,11 @@ def test_related_summary_counts_auto_targets():
     assert (m["kisa"]["auto"], m["kisa"]["auto_sites"]) == (1, ["g.example"])
     assert m["normal"]["auto"] == 0
     # 조건 10: 사칭 브랜드의 진짜 사이트는 자동 접수 대상에서 빠지고, 같은 회차에서 뺀 수를 따로 센다(이전 기록은 표시 없음)
-    real = {**good, "url": "https://www.brand.example/", "site": "brand.example", "brand_site": True}
-    recs[0]["related"].append(real)
+    real = {**good, "url": "https://www.brand.example/", "site": "brand.example", "brand_site": True, "probability": 0.62}
+    sure = {**good, "url": "https://sure.example/", "site": "sure.example", "brand_site": True}  # 확신 있는 위협은 빼지 않는다
+    recs[0]["related"] += [real, sure]
     m = related_summary(recs)["kisa"]
-    assert (m["auto"], m["brand_out"], m["brand_out_sites"]) == (1, 1, ["brand.example"])
+    assert (m["auto"], m["brand_out"], m["brand_out_sites"]) == (2, 1, ["brand.example"])
 
 
 def test_sb_record_flags():
