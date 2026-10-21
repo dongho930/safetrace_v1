@@ -177,7 +177,8 @@ def kit_fingerprint(raw: object) -> dict | None:
 
 
 def mask(kind: str, value: str) -> str:
-    """목록·묶음에 보일 값. 전화·계좌는 끝 4자리만, 나머지(운영자가 공개한 채널 아이디)는 그대로."""
+    """목록·묶음에 보일 값. 전화·계좌는 끝 4자리만, 보내는 곳은 호스트만(경로에 든 번호를 인코딩·자릿수로 가리기는
+    다 막지 못한다, Codex 2회차), 나머지(운영자가 공개한 채널 아이디)는 그대로. 원래 값은 조사관 이상만 본다."""
     if kind == "phone":
         return f"{value[:3]}-****-{value[-4:]}" if len(value) >= 10 else "****"
     if kind == "account":
@@ -185,4 +186,8 @@ def mask(kind: str, value: str) -> str:
         return f"{bank} ****{num[-4:]}"
     if kind == "whatsapp":
         return f"+{value[:2]}****{value[-4:]}"
+    if kind == "form":
+        u = urlsplit(value)
+        port = f":{u.port}" if u.port else ""
+        return f"{u.scheme}://{(u.hostname or '')}{port}/…"
     return value

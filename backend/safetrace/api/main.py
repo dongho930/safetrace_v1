@@ -1086,6 +1086,12 @@ async def case_events(case_id: str, p: Annotated[Principal, Depends(need("viewer
                 raw_intel = ROLES[who.role] >= ROLES["investigator"]
             for e in evs:
                 last = e.id
+                if raw_intel and e.payload.get("kind") == "intel":
+                    # 원래 값을 보내기 직전마다 다시 확인한다(묶음 중간에 역할이 바뀔 수 있다, Codex 2회차)
+                    who = await asyncio.to_thread(current)
+                    if who is None:
+                        return
+                    raw_intel = ROLES[who.role] >= ROLES["investigator"]
                 payload = e.payload if raw_intel else _masked_event(e.payload)
                 yield f"id: {e.id}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
                 if e.payload.get("type") == "status" and e.payload.get("status") in TERMINAL:

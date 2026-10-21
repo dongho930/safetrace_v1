@@ -120,8 +120,9 @@ def test_intel_rows_keys_and_conditions():
     phone = next(r for r in rows if r["site"].startswith("phone:"))
     assert "01012345678" not in phone["site"] and phone["host"] == "010-****-5678"  # 열쇠는 해시, 보이는 값은 가림
     assert any(r["site"].startswith("account:") and r["host"] == "국민 ****4567" for r in rows)
-    # 보내는 곳은 주소 전체(쿼리 빼고)가 같을 때만: 공용 서비스(script.google.com)로 남남끼리 묶이지 않게
-    assert {"form:collect.example.net/p.php", "form:script.google.com/macros/s/x/exec"} <= set(by)
+    # 보내는 곳은 주소 전체(쿼리 빼고)가 같을 때만(열쇠는 HMAC, 보이는 값은 호스트): 공용 서비스로 남남끼리 묶이지 않게
+    forms = {r["site"].rsplit(":", 1)[0]: r["host"] for r in rows if r["site"].startswith("form:")}
+    assert forms == {"form:collect.example.net": "collect.example.net", "form:script.google.com": "script.google.com"}
     assert not any(x in r["site"] for r in rows for x in ("10.0.0.5", "facebook", "translate."))
     assert {"kit:dom:" + "a" * 32, "kit:res:" + "b" * 32} <= set(by) and by["kit:dom:" + "a" * 32]["host"] == "kit.example.net"
     assert len(rows) == 7
@@ -177,7 +178,7 @@ def test_observation_records_operator_info(client, two_cases):
     got = {(x["kind"], x["value"]) for e in intel_events for x in e["data"]["items"]}
     # 열람자 이벤트: 공개 채널 아이디는 그대로, 전화·계좌는 끝 4자리만
     assert {("telegram", "st_test_agent"), ("telegram", "st_test_vip"), ("kakao", "o/sTestOnly1"), ("kakao", "id:sttest77"),
-            ("form", "https://collect.example.net/p.php"), ("phone", "010-****-5678"), ("phone", "010-****-1234"),
+            ("form", "https://collect.example.net/…"), ("phone", "010-****-5678"), ("phone", "010-****-1234"),
             ("account", "국민 ****0000")} <= got
     assert not any(k == "telegram" and v == "share" for k, v in got)
     assert "01000005678" not in json.dumps(viewer_events, ensure_ascii=False)
@@ -218,9 +219,21 @@ def test_form_url_pii_is_not_kept():
              {"action": "https://user:secret@collect2.example.net/p.php"},
              {"action": "https://collect3.example.net/u/010-1234-5678/x"},
              {"action": "https://collect4.example.net/u/010%2D1234%2D5678/x"}]
+    forms += [{"action": "https://collect5.example.net/u/010%252D1234%252D5678/x"},  # 2회차: 두 번 인코딩
+              {"action": "https://collect6.example.net/account/1234567890"}]  # 2회차: 구분자 없는 10자리 계좌
     out = intel.from_forms(forms, "https://site.example/")
+    from urllib.parse import unquote
+
+    from safetrace import package, related
+
+    shown = repr(package.masked_intel(out))  # 열람자가 받는 값(SSE·검토 패키지 요약)
+    for _ in range(3):
+        shown = unquote(shown)
+    assert "1234" not in shown and "567890" not in shown
+    keys = [related.intel_key(x["kind"], x["value"], b"k" * 32) for x in out]
+    assert keys and all(k and "1234" not in k[0] + k[1] and "567890" not in k[0] + k[1] for k in keys)  # 연관 묶음도 열람자가 봄
     text = repr(out)
-    assert len(out) == 4 and pii not in text and "1234-5678" not in text and "secret" not in text and "user:" not in text
+    assert len(out) == 6 and pii not in text and "1234-5678" not in text and "secret" not in text and "user:" not in text
     assert out[0]["value"] == "https://collect.example.net/submit"
 
 
@@ -256,6 +269,7 @@ def test_role_change_stops_raw_intel_stream(client):
                 "data": {"step": 0, "items": [{"kind": "phone", "value": v, "src": "link"}]}}
 
     store.add_event(cid, intel_ev("01011112222"))
+    store.add_event(cid, intel_ev("01055556666"))  # 2회차: 같은 묶음으로 읽힐 이벤트(역할이 바뀐 뒤 보내면 안 된다)
     # 시험 도구(TestClient)는 끝나지 않는 SSE 를 끝까지 모으려 해서, 응답의 생성기를 직접 돌린다
     import asyncio
 
@@ -273,4 +287,4 @@ def test_role_change_stops_raw_intel_stream(client):
 
     got = [x for x in asyncio.run(asyncio.wait_for(run(), 30)) if "data: " in x]
     assert "01011112222" in got[0]  # 조사관일 때는 원래 값
-    assert not any("01033334444" in g for g in got)  # 역할이 바뀐 뒤에는 원래 값이 나가지 않는다
+    assert not any("01033334444" in g or "01055556666" in g for g in got)  # 역할이 바뀐 뒤에는 원래 값이 나가지 않는다

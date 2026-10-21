@@ -84,6 +84,7 @@ export function linkKeyLabel(site: string, kind: "site" | "contact" | "kit", hos
   }
   const i = site.indexOf(":");
   const k = i > 0 ? site.slice(0, i) : "";
-  const shown = k === "phone" || k === "account" || k === "whatsapp" ? (hosts[0] ?? "") : site.slice(i + 1);
+  // 전화·계좌·왓츠앱은 가린 값, 보내는 곳은 호스트만(열쇠는 서버 비밀키 HMAC 이라 화면에 쓸 값이 아니다)
+  const shown = k === "phone" || k === "account" || k === "whatsapp" || k === "form" ? (hosts[0] ?? "") : site.slice(i + 1);
   return `${INTEL_KIND[k] ?? "운영 정보"} ${shown}`;
 }

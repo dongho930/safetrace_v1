@@ -228,8 +228,10 @@ def intel_key(kind: object, value: object, secret: bytes) -> tuple[str, str] | N
         # 피싱 키트가 진짜 facebook.com 으로 보내는 양식을 달아 두면 남남끼리 묶인다(2026-10-22 Meta 키트에서 관찰)
         if not host or link_key(host) is None or on_domain(host, WIDGET_FORM_HOSTS):
             return None
+        # 열쇠는 주소 전체(쿼리 빼고)의 비밀키 HMAC, 보이는 값은 호스트만(경로에 개인정보가 들 수 있다, Codex 2회차)
         endpoint = f"{host}{u.path or '/'}"[:200]
-        return f"form:{endpoint}", endpoint
+        mac = hmac.new(secret, f"safetrace.intel-link/1|form|{endpoint}".encode(), hashlib.sha256).hexdigest()[:24]
+        return f"form:{host}:{mac}", host
     if kind in _PII_KINDS:
         mac = hmac.new(secret, f"safetrace.intel-link/1|{kind}|{value}".encode(), hashlib.sha256).hexdigest()[:24]
         return f"{kind}:{mac}", mask(kind, value)
