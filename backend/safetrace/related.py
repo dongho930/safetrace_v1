@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from urllib.parse import urlsplit
 
@@ -194,6 +195,68 @@ def case_sites(url: str, final_url: str | None, threat: dict | None, candidates:
         add(c.get("url"), role, c.get("threat") if c.get("sub") else None, c.get("blocked"))
         if c.get("sub"):
             add(c.get("final_url"), "candidate_final", c.get("threat"), c.get("blocked"))
+    return out
+
+
+# ── 운영 정보·키트 지문으로 잇기(분석가 업무, agent/intel.py) ─────────────────────────
+# 같은 텔레그램 아이디·계좌·수집 서버·화면 구조가 나온 사건끼리 잇는다. 값은 조사 대상 페이지가 적은 것이라(남의 연락처를
+# 적어 둘 수 있다) 판단·자동 연관 사건에는 쓰지 않고 묶음을 보여 주는 데만 쓴다. case_sites 에 role contact·kit 으로 둔다
+INTEL_ROLES = ("contact", "kit")
+INTEL_PER_CASE = 24
+_PII_KINDS = ("phone", "account", "whatsapp")  # 열쇠는 해시, 보이는 값은 끝 4자리만(연관 묶음·CSV 는 열람자도 본다)
+_NO_KIT = (None, "benign", "unknown")  # 키트 지문은 위협으로 본 사건만(오류·주차·봇 확인 화면 같은 흔한 틀을 피한다)
+HASH32 = re.compile(r"[0-9a-f]{32}")
+
+
+def intel_key(kind: object, value: object) -> tuple[str, str] | None:
+    """운영 정보 하나의 (이을 열쇠, 보일 값). 잇지 않으면 None. 입력값을 보내는 곳은 주소 전체(쿼리 빼고)가 같을 때만
+    잇는다: 등록 도메인으로 이으면 script.google.com·workers.dev 같은 공용 서비스로 남남끼리 묶인다. 내부 주소는 잇지 않는다."""
+    from .agent.intel import KINDS, mask
+
+    if kind not in KINDS or not isinstance(value, str) or not value:
+        return None
+    value = value[:200]
+    if kind == "form":
+        u = urlsplit(value)
+        host = (u.hostname or "").lower()
+        if not host or _non_public_ip(host):
+            return None
+        endpoint = f"{host}{u.path or '/'}"[:200]
+        return f"form:{endpoint}", endpoint
+    if kind in _PII_KINDS:
+        return f"{kind}:{hashlib.sha256(value.encode()).hexdigest()[:16]}", mask(kind, value)
+    return f"{kind}:{value}", value
+
+
+def intel_rows(records: list[dict], threat: str | None) -> list[dict]:
+    """검증한 체인의 원래 조사 intel 기록에서 이을 열쇠 줄(case_sites 모양). 정상으로 본 사건은 잇지 않는다."""
+    if threat == "benign":
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def add(site: str, host: str, role: str) -> None:
+        if site not in seen and len(out) < INTEL_PER_CASE:
+            seen.add(site)
+            out.append({"host": host[:253], "site": site[:253], "role": role, "threat": threat, "blocked": False,
+                        "generic": False})
+
+    for r in records:
+        d = r.get("data") if isinstance(r, dict) else None
+        if r.get("kind") != "intel" or not isinstance(d, dict) or isinstance(d.get("sub"), int):
+            continue
+        for x in d.get("items") if isinstance(d.get("items"), list) else []:
+            k = intel_key(x.get("kind"), x.get("value")) if isinstance(x, dict) else None
+            if k:
+                add(k[0], k[1], "contact")
+        kit, url = d.get("kit"), d.get("url")
+        host = (urlsplit(url).hostname or "").lower() if isinstance(url, str) else ""
+        if threat in _NO_KIT or not isinstance(kit, dict) or link_key(host) is None:
+            continue  # 공식·단축 서비스·흔한 대형 사이트 화면의 구조는 운영자를 가리키지 않는다
+        for part in ("dom", "res"):
+            h = kit.get(part)
+            if isinstance(h, str) and HASH32.fullmatch(h):
+                add(f"kit:{part}:{h}", host, "kit")
     return out
 
 

@@ -18,6 +18,8 @@ import {
   createRelated,
   createUser,
   downloadGroupCsv,
+  getIntel,
+  type CaseIntel,
   getLinks,
   getReferral,
   type Referral,
@@ -50,7 +52,7 @@ import {
   buildOverlay, buildPath, buildReasons, buildScreens, clip, CURSOR_IN, cursorTravel, hostOrFile, hostPath, jpegSize, liveActivity, liveClick, locateSeg, MAX_RECORDINGS, recCursor, recordingClicks, recordings, SCREEN_H,
   SCREEN_W, segStarts, type Activity, type ClickPoint, type Overlay, type Reason, type RecItem, type Screen, type Tone,
 } from "./evidence";
-import { ACTION_LABEL, NET_CATEGORY_LABEL, overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
+import { ACTION_LABEL, INTEL_KIND, linkKeyLabel, NET_CATEGORY_LABEL, overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
 
 // 조사 대상 페이지에서 온 문자열은 모두 React 기본 이스케이프로만 출력한다(raw HTML 금지).
 
@@ -1577,7 +1579,7 @@ function Summary({ c, running, reasons, picked, onPick }: { c: CaseOut | null; r
 const CIRCLED = [..."①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"];
 
 // ── 조사 경과 탭: 근거 화면(기본) · 경로 지도 · 조사 녹화 · 행동 기록 ─────────────
-type TabId = "screens" | "path" | "related" | "links" | "referral" | "rec" | "log";
+type TabId = "screens" | "path" | "related" | "links" | "intel" | "referral" | "rec" | "log";
 type VerifyState = { ok: boolean; records: number; errors: string[] } | null;
 
 function CaseTabs({
@@ -1615,6 +1617,7 @@ function CaseTabs({
     ["path", "경로 지도"],
     ["related", `연관 사이트 ${nCands}`],
     ["links", "연결된 사건"],
+    ...(canCreate ? ([["intel", "운영 정보"]] as [TabId, string][]) : []),
     ...(canCreate ? ([["referral", "처리 요청"]] as [TabId, string][]) : []),
     ["rec", recs.length > 1 ? `조사 녹화 ${recs.length}` : "조사 녹화"],
     ["log", `행동 기록 ${events.length}`],
@@ -1663,6 +1666,12 @@ function CaseTabs({
         {tab === "screens" && <ScreensTab id={id} c={c} events={events} screens={screens} pick={pick} onPick={onPick} />}
         {tab === "path" && c && <PathTab c={c} events={events} />}
         {tab === "links" && <LinksTab id={id} onOpen={onOpen} />}
+        {tab === "intel" && canCreate && !related && <IntelTab id={id} onOpen={onOpen} />}
+        {tab === "intel" && canCreate && related && (
+          <div className="floor">
+            <p className="muted">연관 사이트 조사가 끝나면 볼 수 있습니다</p>
+          </div>
+        )}
         {tab === "referral" && canCreate && <ReferralTab id={id} rev={c?.verdict?.rev ?? 0} related={related} />}
         {tab === "related" && c && <RelatedTab id={id} c={c} events={events} related={related} canCreate={canCreate} onOpen={onOpen} onChanged={onChanged} />}
         {tab === "rec" && (
@@ -1765,6 +1774,84 @@ function ReferralTab({ id, rev, related }: { id: string; rev: number; related: b
   );
 }
 
+// 운영 정보: 화면에 적힌 운영자 연락 수단·입금 계좌·입력값을 보내는 곳과 키트 지문(조사관 이상).
+// 모두 조사 대상 페이지가 적은 값이라 '확인 안 됨'이다. 같은 값이 나온 다른 사건으로 이어 준다
+function IntelTab({ id, onOpen }: { id: string; onOpen: (id: string) => void }) {
+  const [v, setV] = useState<CaseIntel | null>(null);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    let live = true;
+    getIntel(id)
+      .then((x) => live && setV(x))
+      .catch((e) => live && setErr(e instanceof Error ? e.message : "불러오지 못했습니다"));
+    return () => {
+      live = false;
+    };
+  }, [id]);
+  if (err) return <div className="floor"><p className="err">{err}</p></div>;
+  if (!v) return <div className="floor"><p className="muted">불러오는 중…</p></div>;
+  return (
+    <div className="floor intel">
+      <p className="muted small">페이지에 적힌 값이다(사실 확인 안 됨). 판단에는 쓰지 않고, 같은 값이 나온 사건을 잇는 데만 쓴다.</p>
+      <h3 className="sub-h">운영 연락처·입금 정보 {v.items.length}</h3>
+      {v.items.length === 0 ? (
+        <p className="muted">화면에서 찾은 운영 연락처가 없습니다</p>
+      ) : (
+        <ul className="rel-list">
+          {v.items.map((x) => (
+            <li key={`${x.kind}:${x.value}`} className="rel-row">
+              <span className="rel-site">
+                <span>
+                  <span className="row-badge">{INTEL_KIND[x.kind] ?? x.kind}</span>
+                  <span className="mono">{x.value}</span>
+                </span>
+                <span className="muted small">
+                  {x.step != null ? `${x.step}단계 화면` : "화면"} · {x.src === "link" ? "링크" : x.src === "form" ? "입력 양식" : "화면 글자"}
+                  {x.others.length ? ` · 같은 값 다른 사건 ${x.others.length}건` : ""}
+                </span>
+              </span>
+              <span />
+              {x.others[0] ? (
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => onOpen(x.others[0].id)}>
+                  다른 사건 보기
+                </button>
+              ) : (
+                <span />
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      <h3 className="sub-h">키트 지문 {v.kits.length}</h3>
+      {v.kits.length === 0 ? (
+        <p className="muted">지문 없음(요소가 적은 화면·공식·단축 서비스 화면은 만들지 않습니다)</p>
+      ) : (
+        <ul className="rel-list">
+          {v.kits.map((k) => (
+            <li key={`${k.kind}:${k.hash}`} className="rel-row">
+              <span className="rel-site">
+                <span>
+                  <span className="row-badge">{k.kind === "dom" ? "화면 구조" : "빌드 파일"}</span>
+                  <span className="mono">{k.hash.slice(0, 12)}</span> · <span className="mono">{clip(k.host, 50)}</span>
+                </span>
+                <span className="muted small">{k.others.length ? `같은 지문 다른 사건 ${k.others.length}건` : "같은 지문 사건 없음"}</span>
+              </span>
+              <span />
+              {k.others[0] ? (
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => onOpen(k.others[0].id)}>
+                  다른 사건 보기
+                </button>
+              ) : (
+                <span />
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 // 사건 요약 한 줄(연결된 사건·연관 묶음 공통)
 function BriefRow({ b, onOpen, note }: { b: { id: string; url: string; status: string; threat: string | null; verdict: string | null }; onOpen: (id: string) => void; note?: string }) {
   const verdict = b.verdict === "threat" ? "위협 확정" : b.verdict === "benign" ? "정상 확정" : b.verdict === "hold" ? "보류" : "";
@@ -1827,7 +1914,8 @@ function LinksTab({ id, onOpen }: { id: string; onOpen: (id: string) => void }) 
       {links.shared.map((g) => (
         <section key={g.site}>
           <h3 className="sub-h">
-            같은 사이트 <span className="mono">{clip(g.site, 60)}</span> · {g.cases.length}건
+            {g.kind === "contact" ? "같은 운영 정보" : g.kind === "kit" ? "같은 키트 지문" : "같은 사이트"}{" "}
+            <span className="mono">{clip(linkKeyLabel(g.site, g.kind, g.hosts), 60)}</span> · {g.cases.length}건
           </h3>
           <ul className="rel-list">
             {g.cases.map((b) => (
@@ -1872,10 +1960,11 @@ function GroupsPane({ canExport, onOpenCase }: { canExport: boolean; onOpenCase:
             <li key={x.key}>
               <button type="button" className="row" aria-current={g?.key === x.key} onClick={() => setPick(x.key)}>
                 <span className="row-dot" />
-                <span className="row-host">{clip(x.sites[0]?.site ?? x.key, 50)}</span>
+                <span className="row-host">{clip(x.sites[0] ? linkKeyLabel(x.sites[0].site, x.sites[0].kind, x.sites[0].hosts) : x.key, 50)}</span>
                 <span className="row-time">{x.cases.length}건</span>
                 <span className="row-sub">
-                  위협 사이트 {x.threat_sites} · 회선 차단 추정 {x.blocked_estimate_sites} · 사이트 {x.sites.length}
+                  위협 사이트 {x.threat_sites} · 회선 차단 추정 {x.blocked_estimate_sites} · 사이트 {x.sites.filter((s) => s.kind === "site").length}
+                  {x.sites.some((s) => s.kind !== "site") ? ` · 운영 정보·키트 ${x.sites.filter((s) => s.kind !== "site").length}` : ""}
                 </span>
               </button>
             </li>
@@ -1887,7 +1976,7 @@ function GroupsPane({ canExport, onOpenCase }: { canExport: boolean; onOpenCase:
         {!g ? (
           <div className="empty">
             <h2>연관 묶음</h2>
-            <p>같은 사이트(단축 서비스·공식·흔한 대형 사이트 제외, 공용 호스팅은 호스트가 같을 때만)가 나온 사건끼리 묶습니다.</p>
+            <p>같은 사이트(단축 서비스·공식·흔한 대형 사이트 제외, 공용 호스팅은 호스트가 같을 때만)나 같은 운영 정보(텔레그램·계좌 등 페이지에 적힌 값)·키트 지문(화면 구조)이 나온 사건끼리 묶습니다.</p>
           </div>
         ) : (
           <div className="detail-body">
@@ -1924,16 +2013,20 @@ function GroupsPane({ canExport, onOpenCase }: { canExport: boolean; onOpenCase:
               {g.sites.map((s) => (
                 <li key={s.site} className="rel-row">
                   <span className="rel-site">
-                    <span className="mono">{clip(s.site, 60)}</span>
+                    <span className="mono">{clip(linkKeyLabel(s.site, s.kind, s.hosts), 60)}</span>
                     <span className="muted small">
                       사건 {s.cases}건 · {s.hosts.slice(0, 3).map((x) => clip(x, 40)).join(", ")}
                     </span>
                   </span>
-                  <span className={`chip ${s.threat ? "st-threat" : ""}`}>
-                    {s.threat ? `위협 의심 · ${THREAT_LABEL[s.threat] ?? s.threat}` : "판단 없음"}
-                    {s.blocked ? " · 회선 차단 추정" : ""}
-                  </span>
-                  {canExport && s.threat && s.candidate ? (
+                  {s.kind === "site" ? (
+                    <span className={`chip ${s.threat ? "st-threat" : ""}`}>
+                      {s.threat ? `위협 의심 · ${THREAT_LABEL[s.threat] ?? s.threat}` : "판단 없음"}
+                      {s.blocked ? " · 회선 차단 추정" : ""}
+                    </span>
+                  ) : (
+                    <span className="chip">{s.kind === "contact" ? "운영 정보 · 확인 안 됨" : "키트 지문"}</span>
+                  )}
+                  {canExport && s.kind === "site" && s.threat && s.candidate ? (
                     <button
                       type="button"
                       className="btn btn-ghost btn-sm"

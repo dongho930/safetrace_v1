@@ -175,8 +175,11 @@ export const createCase = (url: string, source: string) =>
   });
 // 사건 간 연결(related-sites PR 5). 값은 조사 대상 페이지에서 온 글자라 정해진 모양만 남긴다
 export type CaseBrief = { id: string; url: string; status: string; threat: string | null; verdict: string | null };
-export type CaseLinks = { parent: CaseBrief | null; children: (CaseBrief & { auto: boolean })[]; shared: { site: string; hosts: string[]; roles: string[]; cases: CaseBrief[] }[] };
-export type GroupSite = { site: string; hosts: string[]; threat: string | null; blocked: boolean; cases: number; candidate: { case_id: string; host: string } | null };
+// 이은 열쇠의 종류: site(사이트) | contact(운영 정보: 텔레그램·계좌 등, 페이지에 적힌 값) | kit(키트 지문)
+export type LinkKind = "site" | "contact" | "kit";
+const linkKind = (v: unknown): LinkKind => (v === "contact" || v === "kit" ? v : "site");
+export type CaseLinks = { parent: CaseBrief | null; children: (CaseBrief & { auto: boolean })[]; shared: { site: string; kind: LinkKind; hosts: string[]; roles: string[]; cases: CaseBrief[] }[] };
+export type GroupSite = { site: string; kind: LinkKind; hosts: string[]; threat: string | null; blocked: boolean; cases: number; candidate: { case_id: string; host: string } | null };
 export type RelatedGroup = { key: string; cases: CaseBrief[]; sites: GroupSite[]; threat_sites: number; blocked_estimate_sites: number };
 const brief = (x: unknown): CaseBrief[] =>
   isObj(x) && typeof x.id === "string" && typeof x.url === "string" && typeof x.status === "string"
@@ -190,7 +193,7 @@ export const getLinks = async (id: string): Promise<CaseLinks> => {
     children: list(o.children).slice(0, 50).flatMap((x) => brief(x).map((b) => ({ ...b, auto: isObj(x) && x.auto === true }))),
     shared: list(o.shared)
       .slice(0, 50)
-      .flatMap((g) => (isObj(g) && typeof g.site === "string" ? [{ site: g.site.slice(0, 253), hosts: strs(g.hosts).slice(0, 10), roles: strs(g.roles).slice(0, 5), cases: list(g.cases).slice(0, 50).flatMap(brief) }] : [])),
+      .flatMap((g) => (isObj(g) && typeof g.site === "string" ? [{ site: g.site.slice(0, 253), kind: linkKind(g.kind), hosts: strs(g.hosts).slice(0, 10), roles: strs(g.roles).slice(0, 5), cases: list(g.cases).slice(0, 50).flatMap(brief) }] : [])),
   };
 };
 export const listGroups = async (): Promise<{ groups: RelatedGroup[]; truncated: boolean; ms: number }> => {
@@ -209,6 +212,7 @@ export const listGroups = async (): Promise<{ groups: RelatedGroup[]; truncated:
                 isObj(x) && typeof x.site === "string"
                   ? [{
                       site: x.site.slice(0, 253),
+                      kind: linkKind(x.kind),
                       hosts: strs(x.hosts).slice(0, 10),
                       threat: strOr(x.threat)?.slice(0, 32) ?? null,
                       blocked: x.blocked === true,
@@ -504,5 +508,32 @@ export const getReferral = async (id: string): Promise<Referral> => {
     subject: text(o.subject, 300),
     text: text(o.text, 8000),
     notice: text(o.notice, 400),
+  };
+};
+
+// 운영 정보(조사관 이상): 화면에 적힌 운영 연락처·입금 계좌·입력값을 보내는 곳과 키트 지문, 같은 열쇠가 나온 다른 사건.
+// 값은 조사 대상 페이지가 적은 글자다(확인 안 됨). 화면에는 글자로만 넣는다
+export type IntelItem = { kind: string; value: string; src: string | null; step: number | null; others: CaseBrief[] };
+export type KitPrint = { kind: "dom" | "res"; hash: string; host: string; step: number | null; others: CaseBrief[] };
+export type CaseIntel = { items: IntelItem[]; kits: KitPrint[] };
+export const getIntel = async (id: string): Promise<CaseIntel> => {
+  const v = await req<unknown>(`/api/cases/${encodeURIComponent(id)}/intel`);
+  const o = isObj(v) ? v : {};
+  const step = (x: unknown) => (typeof x === "number" && Number.isInteger(x) && x >= 0 ? x : null);
+  return {
+    items: list(o.items)
+      .slice(0, 50)
+      .flatMap((x): IntelItem[] =>
+        isObj(x) && typeof x.kind === "string" && typeof x.value === "string"
+          ? [{ kind: x.kind.slice(0, 16), value: x.value.slice(0, 200), src: strOr(x.src)?.slice(0, 8) ?? null, step: step(x.step), others: list(x.others).slice(0, 50).flatMap(brief) }]
+          : [],
+      ),
+    kits: list(o.kits)
+      .slice(0, 20)
+      .flatMap((x): KitPrint[] =>
+        isObj(x) && (x.kind === "dom" || x.kind === "res") && typeof x.hash === "string" && /^[0-9a-f]{32}$/.test(x.hash)
+          ? [{ kind: x.kind, hash: x.hash, host: text(x.host, 253), step: step(x.step), others: list(x.others).slice(0, 50).flatMap(brief) }]
+          : [],
+      ),
   };
 };

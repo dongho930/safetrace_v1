@@ -208,7 +208,41 @@ def record_event(case_id: str, payload: dict) -> None:
         except Exception as e:
             log.exception("write sites failed")
             store.audit("system", "case.sites_failed", case_id, type(e).__name__)
-        _auto_related(case_id)
+        recs = _verified_records(case_id)  # 닫고 검증한 체인(한 번만 읽고 검증해 아래 둘이 함께 쓴다)
+        _write_intel(case_id, recs)
+        _auto_related(case_id, recs)
+
+
+def _verified_records(case_id: str) -> list[dict] | None:
+    """닫고 검증한 체인의 기록. 검증하지 못하면 None(그 기록으로는 아무것도 만들지 않는다)."""
+    try:
+        with store.session() as s:
+            c = s.get(Case, case_id)
+        if c is None or c.status not in TERMINAL:
+            return None
+        text = package.read_chain_text(settings.evidence_dir, c.id)
+        if text is None or not _verify_case(c, _signer(), text).ok:
+            return None
+        return package.clean_records(package.parse_chain(text))[0]
+    except Exception as e:  # 검증 실패가 이벤트 소비를 멈추지 않게
+        log.exception("verify chain after finish failed")
+        store.audit("system", "evidence.verify_failed", case_id, type(e).__name__)
+        return None
+
+
+def _write_intel(case_id: str, recs: list[dict] | None) -> None:
+    """운영 정보·키트 지문으로 이을 줄(related.intel_rows)을 검증한 체인에서 쓴다. 워커가 보낸 이벤트 값은 쓰지 않는다."""
+    if recs is None:
+        store.audit("system", "case.intel_skipped", case_id, "chain_unverified")
+        return
+    try:
+        with store.session() as s:
+            c = s.get(Case, case_id)
+        th = c.threat.get("threat") if c is not None and isinstance(c.threat, dict) else None
+        store.write_intel_sites(case_id, related.intel_rows(recs, th if isinstance(th, str) else None))
+    except Exception as e:  # 실패해도 원 사건 처리는 계속
+        log.exception("write intel sites failed")
+        store.audit("system", "case.intel_failed", case_id, type(e).__name__)
 
 
 def _auto_limit(s, parent_id: str, host: str) -> str | None:
@@ -226,16 +260,13 @@ def _auto_limit(s, parent_id: str, host: str) -> str | None:
     return None
 
 
-def _signed_candidates(c: Case) -> list[dict] | None:
+def _signed_candidates(recs: list[dict]) -> list[dict]:
     """자동 연관 사건의 선별 근거(Codex 지적): 워커가 종료 이벤트로 보고한 후보 목록이 아니라, 닫고 검증한 체인의 원래
     조사 후보 기록(candidates)과 하위 조사 결과 기록(candidate_results)을 runner 와 같은 방식으로 합친 것.
     체인을 검증하지 못하면 None(만들지 않는다). 워커는 조사 중인 사건에 거짓 기록을 서명받을 수 있으므로 이것으로 거짓
     선별을 모두 막지는 못하지만, 자동 사건을 만든 근거가 원 사건의 서명된 증거에 그대로 남고(감사·패키지) 이벤트와 증거가
-    다를 때 증거를 따른다. 남는 위험은 부모당 3·대기 10·깊이 1 한도로 묶는다(docs/threat-model.md)."""
-    text = package.read_chain_text(settings.evidence_dir, c.id)
-    if text is None or not _verify_case(c, _signer(), text).ok:
-        return None
-    recs = package.parse_chain(text)
+    다를 때 증거를 따른다. 남는 위험은 부모당 3·대기 10·깊이 1 한도로 묶는다(docs/threat-model.md).
+    recs: 닫고 검증한 체인의 기록(_verified_records)."""
 
     def last(kind: str) -> dict:
         for r in reversed(recs):
@@ -256,7 +287,10 @@ def _signed_candidates(c: Case) -> list[dict] | None:
     return _clean_candidates(out)
 
 
-def _auto_related(case_id: str) -> None:
+_UNREAD = object()
+
+
+def _auto_related(case_id: str, recs: list[dict] | None | object = _UNREAD) -> None:
     """원 사건이 끝나면(체인을 닫고 반영한 뒤) 선별 조건을 모두 통과한 연관 후보로 새 사건을 만든다(PR 4b).
     격리망 안의 워커가 아니라 API 가 만든다. 후보는 이벤트가 아니라 검증한 체인에서 고른다(_signed_candidates).
     실패해도 원 사건 처리와 이벤트 소비는 멈추지 않는다."""
@@ -265,7 +299,9 @@ def _auto_related(case_id: str) -> None:
             c = s.get(Case, case_id)
             if c is None or c.status not in TERMINAL or not settings.related_auto or c.source == "related":
                 return
-            signed = _signed_candidates(c)  # 체인 검증은 접수 잠금 밖에서
+        if recs is _UNREAD:
+            recs = _verified_records(case_id)  # 체인 검증은 접수 잠금 밖에서
+        signed = _signed_candidates(recs) if isinstance(recs, list) else None
         if signed is None:
             store.audit(related.AUTO_ACTOR, "case.create_related_auto_skipped", case_id, "chain_unverified")
             return
@@ -826,9 +862,74 @@ def case_links(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]):
     return {
         "parent": info.get(parent[0].parent_id) if parent else None,
         "children": [{**info[k.id], "auto": link.auto} for link, k in kids if k.id in info],
-        "shared": [{"site": g["site"], "hosts": sorted(g["hosts"])[:10], "roles": sorted(g["roles"]),
-                    "cases": [info[x] for x in g["cases"] if x in info]} for g in shared.values()],
+        "shared": [{"site": g["site"], "kind": _site_kind(g["roles"]), "hosts": sorted(g["hosts"])[:10],
+                    "roles": sorted(g["roles"]), "cases": [info[x] for x in g["cases"] if x in info]}
+                   for g in shared.values()],
     }
+
+
+def _intel_of(recs: list[dict]) -> tuple[list[dict], list[dict]]:
+    """검증한 체인의 원래 조사 intel 기록을 값마다 하나로: (운영 정보, 키트 지문). 각 항목의 key 는 이을 열쇠."""
+    steps = {r["seq"]: r["data"].get("step") for r in recs if r.get("kind") == "observe"}
+    items: dict[tuple[str, str], dict] = {}
+    kits: dict[str, dict] = {}
+    for r in recs:
+        d = r.get("data")
+        if r.get("kind") != "intel" or not isinstance(d, dict) or isinstance(d.get("sub"), int):
+            continue
+        step = steps.get(d.get("obs")) if type(d.get("obs")) is int else None
+        step = step if type(step) is int else None
+        for x in d.get("items") if isinstance(d.get("items"), list) else []:
+            if not isinstance(x, dict) or not isinstance(x.get("kind"), str) or not isinstance(x.get("value"), str):
+                continue
+            k = (x["kind"][:16], x["value"][:200])
+            if k not in items and len(items) < 50:
+                key = related.intel_key(*k)
+                items[k] = {"kind": k[0], "value": k[1], "src": x.get("src") if isinstance(x.get("src"), str) else None,
+                            "step": step, "key": key[0] if key else None}
+        kit, url = d.get("kit"), d.get("url")
+        host = (urlsplit(url).hostname or "")[:253] if isinstance(url, str) else ""
+        for part in ("dom", "res"):
+            h = kit.get(part) if isinstance(kit, dict) else None
+            if isinstance(h, str) and related.HASH32.fullmatch(h) and f"kit:{part}:{h}" not in kits and len(kits) < 20:
+                kits[f"kit:{part}:{h}"] = {"kind": part, "hash": h, "host": host, "step": step, "key": f"kit:{part}:{h}"}
+    return list(items.values()), list(kits.values())
+
+
+@app.get("/api/cases/{case_id}/intel")
+def case_intel(case_id: str, p: Annotated[Principal, Depends(need("investigator"))]):
+    """운영 정보(페이지에 적힌 연락처·계좌·수집 서버)와 키트 지문, 같은 열쇠가 나온 다른 사건. 원래 값이라 조사관 이상,
+    감사로그. 값은 검증한 체인의 원래 조사 기록에서만 꺼낸다(DB 의 연결 줄은 '다른 사건' 찾기에만)."""
+    c = _get_case(case_id)
+    if c.status not in TERMINAL:
+        raise HTTPException(409, "조사가 끝난 뒤에 볼 수 있습니다")
+    recs = _verified_records(c.id)
+    if recs is None:
+        raise HTTPException(422, "증거 체인을 검증하지 못해 보여 줄 수 없습니다(검토 패키지로 원본 확인)")
+    store.audit(p.name, "intel.view", case_id)
+    items, kits = _intel_of(recs)
+    keys = {x["key"] for x in [*items, *kits] if x["key"]}
+    with store.session() as s:
+        rows = s.execute(select(CaseSite.site, CaseSite.case_id).join(Case, Case.id == CaseSite.case_id)
+                         .where(CaseSite.site.in_(keys), CaseSite.role.in_(related.INTEL_ROLES), CaseSite.case_id != c.id)
+                         .order_by(Case.created_at.desc()).limit(GROUP_SITES_MAX)).all() if keys else []
+    others: dict[str, list[str]] = {}
+    for site, cid in rows:
+        lst = others.setdefault(site, [])
+        if cid not in lst and len(lst) < LINKS_MAX:
+            lst.append(cid)
+    info = _briefs(list({cid for lst in others.values() for cid in lst}))
+
+    def out(x: dict) -> dict:
+        return {**{k: v for k, v in x.items() if k != "key"},
+                "others": [info[i] for i in others.get(x["key"] or "", []) if i in info]}
+
+    return {"items": [out(x) for x in items], "kits": [out(x) for x in kits]}
+
+
+def _site_kind(roles: set[str]) -> str:
+    """이은 열쇠의 종류: contact(운영 정보) | kit(키트 지문) | site(사이트)."""
+    return "contact" if "contact" in roles else "kit" if "kit" in roles else "site"
 
 
 def _related_groups(min_cases: int) -> tuple[list[dict], bool]:
@@ -853,8 +954,9 @@ def _related_groups(min_cases: int) -> tuple[list[dict], bool]:
         for cid in g:
             for r in by_case.get(cid, []):
                 x = sites.setdefault(r.site, {"site": r.site, "hosts": set(), "threat": None, "blocked": False,
-                                              "cases": set(), "candidate": None})
+                                              "cases": set(), "candidate": None, "roles": set()})
                 x["hosts"].add(r.host)
+                x["roles"].add(r.role)
                 x["cases"].add(cid)
                 if r.threat and r.threat not in ("benign", "unknown"):
                     x["threat"] = r.threat
@@ -866,9 +968,11 @@ def _related_groups(min_cases: int) -> tuple[list[dict], bool]:
         out.append({
             "key": key,
             "cases": [info[c] for c in sorted(g) if c in info],
-            "sites": [{"site": x["site"], "hosts": sorted(x["hosts"])[:10], "threat": x["threat"],
-                       "blocked": x["blocked"], "cases": len(x["cases"]), "candidate": x["candidate"]} for x in listed],
-            "threat_sites": sum(1 for x in listed if x["threat"]),
+            "sites": [{"site": x["site"], "kind": _site_kind(x["roles"]), "hosts": sorted(x["hosts"])[:10],
+                       "threat": x["threat"], "blocked": x["blocked"], "cases": len(x["cases"]),
+                       "candidate": x["candidate"]} for x in listed],
+            # 운영 정보·키트 지문 열쇠는 사이트가 아니라 위협 사이트 수에 넣지 않는다
+            "threat_sites": sum(1 for x in listed if x["threat"] and _site_kind(x["roles"]) == "site"),
             # 회선 차단은 조사 대상 서버가 흉내 낼 수 있는 추정이라 위협 집계에서 빼지 않고 따로 센다(Codex 지적)
             "blocked_estimate_sites": sum(1 for x in listed if x["blocked"]),
         })
@@ -904,9 +1008,10 @@ def related_group_csv(group_key: str, p: Annotated[Principal, Depends(need("inve
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["구분", "사이트", "호스트", "AI 판단", "회선 차단 추정", "사건 수", "사건 id", "신고 URL", "사건 상태", "담당자 판정"])
+    kind_ko = {"site": "사이트", "contact": "운영 정보", "kit": "키트 지문"}
     for x in g["sites"]:
-        w.writerow([_csv_cell(v) for v in ("사이트", x["site"], " ".join(x["hosts"]), x["threat"], x["blocked"], x["cases"],
-                                           "", "", "", "")])
+        w.writerow([_csv_cell(v) for v in (kind_ko.get(x["kind"], "사이트"), x["site"], " ".join(x["hosts"]), x["threat"],
+                                           x["blocked"], x["cases"], "", "", "", "")])
     for c in g["cases"]:
         w.writerow([_csv_cell(v) for v in ("사건", "", "", c["threat"], "", "", c["id"], c["url"], c["status"], c["verdict"])])
     store.audit(p.name, "related.export", None, f"group={group_key} cases={len(g['cases'])} sites={len(g['sites'])}")
@@ -943,11 +1048,19 @@ def save_verdict(case_id: str, body: VerdictIn, p: Annotated[Principal, Depends(
     return VerdictOut.of(v)
 
 
+def _masked_event(payload: dict) -> dict:
+    """열람자에게 보내는 이벤트: 운영 정보 기록(페이지에 적힌 전화·계좌)은 끝 4자리만 남긴다."""
+    if payload.get("type") != "evidence" or payload.get("kind") != "intel" or not isinstance(payload.get("data"), dict):
+        return payload
+    return {**payload, "data": {**payload["data"], "items": package.masked_intel(payload["data"].get("items"))}}
+
+
 @app.get("/api/cases/{case_id}/events")
 async def case_events(case_id: str, p: Annotated[Principal, Depends(need("viewer"))],
                       after: int = Query(0, ge=0)):
     """SSE: 기존 이벤트를 먼저 보내고, 이후 새 이벤트를 이어서 보낸다. 종료 상태면 스트림을 닫는다."""
     _get_case(case_id)
+    raw_intel = ROLES[p.role] >= ROLES["investigator"]  # 열람자에게는 운영 정보의 전화·계좌를 가려 보낸다
 
     async def gen():
         last = after
@@ -956,7 +1069,8 @@ async def case_events(case_id: str, p: Annotated[Principal, Depends(need("viewer
             evs = await asyncio.to_thread(store.events_after, case_id, last)
             for e in evs:
                 last = e.id
-                yield f"id: {e.id}\ndata: {json.dumps(e.payload, ensure_ascii=False)}\n\n"
+                payload = e.payload if raw_intel else _masked_event(e.payload)
+                yield f"id: {e.id}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
                 if e.payload.get("type") == "status" and e.payload.get("status") in TERMINAL:
                     return
             idle = 0 if evs else idle + 1
