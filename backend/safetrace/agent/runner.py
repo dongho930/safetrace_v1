@@ -9,6 +9,7 @@ from urllib.parse import unquote
 
 import httpx
 
+from .. import related
 from ..config import Settings
 from ..decision.client import Decider, HttpDecider, LocalDecider
 from ..decision.engine import Engine, build_providers
@@ -57,9 +58,12 @@ def _needs_followup(status: str, threat: dict | None, sb_hit: bool) -> bool:
 
 
 def _investigate_candidates(cands: list[dict], s: Settings, decider: Decider, writer: EvidenceWriter,
-                            emit: Callable[[dict], None], resolver, sink) -> list[dict]:
+                            emit: Callable[[dict], None], resolver, sink, names: frozenset[str] = frozenset(),
+                            gambling: bool = False) -> list[dict]:
     """후보마다 새 브라우저에서 작은 예산으로 같은 탐색 루프를 돌린다. 같은 안전 게이트·검문 프록시를 거치고,
-    같은 증거 체인에 sub 번호를 붙여 기록한다. 후보 하나가 실패해도 기록만 하고 다음 후보로 간다."""
+    같은 증거 체인에 sub 번호를 붙여 기록한다. 후보 하나가 실패해도 기록만 하고 다음 후보로 간다.
+    brand_name: 도착한 사이트 이름이 원 사건 제목이 내세운 이름과 같다는 참고 표시(related.brand_name, 자동 접수 결정에는
+    쓰지 않는다 — 평가 도구가 모아 보여 주면 사람이 진짜 사이트인지 확인해 목록에 보탠다)"""
     sub_s = s.model_copy(update={"max_steps": s.candidate_max_steps, "max_seconds": s.candidate_max_seconds})
     out = []
     for i, c in enumerate(cands, 1):
@@ -75,9 +79,10 @@ def _investigate_candidates(cands: list[dict], s: Settings, decider: Decider, wr
         urls = list(dict.fromkeys(u for u in [c["url"], *r.nav_chain[-5:], r.final_url] if u))
         # blocked: 회선이 도메인 이름을 보고 막았다(warning.or.kr 화면·이름 기준 연결 리셋, 원래 조사의 회선 차단 감지와
         # 같은 값). 이미 차단된 사이트라 담당자가 따로 차단 요청할 필요가 적다
-        out.append({**res, "status": r.status, "reason": r.finish_reason, "final_url": r.final_url[:2048],
-                    "threat": th.get("threat"), "probability": th.get("probability"), "hold": th.get("hold"),
-                    "blocked": bool(r.network_filtered), "_urls": urls})
+        row = {**res, "status": r.status, "reason": r.finish_reason, "final_url": r.final_url[:2048],
+               "threat": th.get("threat"), "probability": th.get("probability"), "hold": th.get("hold"),
+               "blocked": bool(r.network_filtered), "_urls": urls}
+        out.append({**row, "brand_name": related.brand_name(related.target_host(row), names, gambling=gambling)})
     return out
 
 
@@ -138,7 +143,8 @@ def investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], None
 
 def _investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], None], decider: Decider, resolver, sink,
                  writer: EvidenceWriter) -> dict:
-    result = asyncio.run(AgentRun(url, s, decider, writer, emit, resolver=resolver, live=sink).run())
+    main = AgentRun(url, s, decider, writer, emit, resolver=resolver, live=sink)
+    result = asyncio.run(main.run())
     cands = result.candidates_found
 
     # Safe Browsing: 시작·경유·최종 URL 과 연관 후보 조회. 결과도 증거로 남긴다.
@@ -197,7 +203,9 @@ def _investigate(case_id: str, url: str, s: Settings, emit: Callable[[dict], Non
               "threat": result.threat, "final_url": result.final_url, "safebrowsing": sb,
               "candidates": [{**c, "reputation_match": c["url"] in hits,
                               "reputation_unchecked": c["url"] not in first_checked} for c in cands]})
-    results = _investigate_candidates(chosen, s, decider, writer, emit, resolver, sink) if chosen else []
+    names = related.claimed_names(getattr(main, "page_titles", []))  # 원 사건 화면(하위 조사 전)이 내세운 이름
+    gambling = isinstance(result.threat, dict) and result.threat.get("threat") == "illegal_gambling"
+    results = _investigate_candidates(chosen, s, decider, writer, emit, resolver, sink, names, gambling) if chosen else []
     if results:
         if sink:
             sink.activity("reputation")

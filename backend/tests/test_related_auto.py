@@ -124,6 +124,23 @@ def test_creates_only_selected_candidates(client, store, isolated):
     assert (child["source"], child["auto"], child["parent_id"]) == ("related", True, pid)
 
 
+def test_brand_site_is_not_auto_created_but_button_still_works(client, store, isolated):
+    """조건 10(개선 후보 9): 하위 조사가 피싱 키트가 링크한 진짜 브랜드 사이트(서버 목록)를 확신 낮은 위협으로 봐도
+    자동 사건을 만들지 않고, 상세의 자동 접수 안 함 이유로 보인다. 담당자는 버튼으로 접수할 수 있다. 워커의 참고 표시
+    (brand_name)는 결정에 쓰지 않는다."""
+    real = cand(final_url="https://oam.wellsfargo.com/reset", probability=0.62, brand_name=False)  # 관찰한 진짜 사이트
+    other = cand(brand_name=True)  # 제목과 이름이 같다는 표시만으로는 빼지 않는다(Codex 1·2회차)
+    pid = finish(store, [real, other])
+    assert [lk.candidate_url for lk in children(store, pid)] == [other["url"]]  # other 는 자동 접수됨
+    h = {"Authorization": f"Bearer {INVESTIGATOR}"}
+    d = client.get(f"/api/cases/{pid}", headers=h).json()
+    assert {x["url"]: x["reason"] for x in d["auto_skipped"]} == {real["url"]: "brand_site"}
+    r = client.post(f"/api/cases/{pid}/related", headers=h, json={"url": real["url"]})
+    assert r.status_code == 201 and r.json()["auto"] is False
+    with store.session() as s, s.begin():  # 시험 DB 는 실행 사이에 남는다: 조사관 접수 한도(20)를 채우지 않게 끝낸다
+        s.get(Case, r.json()["id"]).status = "COMPLETED"
+
+
 def test_unsigned_candidate_cannot_create_case(store, isolated):
     """Codex 3회차 F2: 침해된 워커가 종료 이벤트에만 위협 후보(하위 조사·평판 위험 표시)를 넣으면, 서명된 증거에는 그런
     하위 조사가 없으므로 자동 사건을 만들지 않는다. 체인을 검증하지 못해도(끝을 잘라 냄) 만들지 않는다."""

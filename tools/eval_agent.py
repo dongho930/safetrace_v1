@@ -111,7 +111,8 @@ def related_item(c: dict, site_of) -> dict:
             "final_url": str(c.get("final_url") or "")[:2048] or None, "threat": c.get("threat"),
             "probability": c.get("probability"), "hold": c.get("hold"),
             "reputation_match": bool(c.get("reputation_match")),
-            "blocked": c.get("blocked") if isinstance(c.get("blocked"), bool) else None}  # PR 2 부터
+            "blocked": c.get("blocked") if isinstance(c.get("blocked"), bool) else None,  # PR 2 부터
+            "brand_name": c.get("brand_name") is True}  # 개선 후보 9 부터(그 전 기록은 False)
 
 
 def _is_threat(c: dict) -> bool:
@@ -121,16 +122,33 @@ def _is_threat(c: dict) -> bool:
 AUTO_MIN_PROB = 0.6  # 설정 threat_min_prob 기본값(자동 사건의 조건 4 는 원래 사건이 위협으로 보는 기준과 같다)
 
 
-def auto_targets(r: dict) -> list[dict]:
-    """related-sites PR 4b: 자동 사건을 만들 후보(API 와 같은 safetrace.related.auto_targets, 조건 1~6). 중복·한도(7~9)는
-    시점에 따라 바뀌어 빼고 센다. 평가 목록의 원 사건은 연관 사건이 아니다."""
+def _related_module():
     try:
         if str(ROOT / "backend") not in sys.path:
             sys.path.insert(0, str(ROOT / "backend"))
-        from safetrace.related import auto_targets as pick
+        from safetrace import related
     except ImportError:  # 이전 코드(PR 4b 전) 컨테이너
+        return None
+    return related
+
+
+def auto_targets(r: dict) -> list[dict]:
+    """related-sites PR 4b: 자동 사건을 만들 후보(API 와 같은 safetrace.related.auto_targets, 조건 1~6·10). 중복·한도(7~9)는
+    시점에 따라 바뀌어 빼고 센다. 평가 목록의 원 사건은 연관 사건이 아니다."""
+    rel = _related_module()
+    if rel is None:
         return []
-    return [c for c, _ in pick("report", r.get("related") or [], enabled=True, threat_min_prob=AUTO_MIN_PROB)]
+    return [c for c, _ in rel.auto_targets("report", r.get("related") or [], enabled=True, threat_min_prob=AUTO_MIN_PROB)]
+
+
+def brand_outs(r: dict) -> list[dict]:
+    """조건 10(피싱 키트가 링크한 진짜 브랜드 사이트, 서버 목록)이 자동 접수에서 뺀 후보. 조건 10 은 마지막 조건이라
+    이유가 brand_site 면 나머지 조건은 모두 통과했다."""
+    rel = _related_module()
+    if rel is None or not hasattr(rel, "real_brand_site"):
+        return []
+    return [c for c in r.get("related") or [] if isinstance(c, dict) and isinstance(c.get("url"), str)
+            and rel.skip_reason("report", c, enabled=True, threat_min_prob=AUTO_MIN_PROB) == "brand_site"]
 
 
 def related_summary(recs: list[dict]) -> dict[str, dict]:
@@ -152,12 +170,17 @@ def related_summary(recs: list[dict]) -> dict[str, dict]:
         n_sub = sum(1 for r in subs for c in r["related"] if c.get("sub"))
         mains = sorted(r.get("seconds_main", r["seconds"]) for r in measured)
         autos = [c for r in measured for c in auto_targets(r)]
+        brand_out = [c for r in measured for c in brand_outs(r)]
+        # 참고: 원 사건 제목과 이름이 같은데 자동 접수 대상인 위협 후보 — 진짜 사이트면 related.KIT_LINKED_REAL_SITES 에 보탠다
+        name_hits = [c for c in autos if c.get("brand_name") is True]
         extra = sum(r["seconds"] - r.get("seconds_main", r["seconds"]) for r in subs)
         out[g] = {"scored": len(scored), "measured": len(measured), "sub_runs": len(subs), "threat_runs": len(hits),
                   "sites": len(sites), "blocked_known": bool(known), "open_sites": len(open_sites),
                   "n_sub": n_sub, "per_candidate": extra / n_sub if n_sub and extra > 0 else None,
                   "main_median": statistics.median(mains) if mains else None,
-                  "auto": len(autos), "auto_sites": sorted({c["site"] for c in autos if c.get("site")})}
+                  "auto": len(autos), "auto_sites": sorted({c["site"] for c in autos if c.get("site")}),
+                  "brand_out": len(brand_out), "brand_out_sites": sorted({c["site"] for c in brand_out if c.get("site")}),
+                  "name_hit_sites": sorted({c["site"] for c in name_hits if c.get("site")})}
     return out
 
 
@@ -176,7 +199,9 @@ def _related_rows(m: dict) -> list[tuple[str, str]]:
          if m["blocked_known"] else "측정 안 함"),
         ("후보 1곳당 시간", f"{m['per_candidate']:.1f}s" if m["per_candidate"] is not None else "측정 안 함"),
         ("원래 결과까지 시간 중앙값", f"{m['main_median']:.1f}s" if m["main_median"] is not None else "-"),
-        ("자동 접수 대상", f"{m['auto']}곳 · 사이트 {len(m['auto_sites'])}"),
+        ("자동 접수 대상", f"{m['auto']}곳 · 사이트 {len(m['auto_sites'])}"
+         + (f" (사칭한 브랜드의 진짜 사이트로 뺌 {m['brand_out']}곳 · 사이트 {len(m['brand_out_sites'])})"
+            if m.get("brand_out") else "")),
     ]
 
 
@@ -279,6 +304,13 @@ def report(recs: list[dict], meta: dict | None = None) -> str:
     autos = {g: rel[g]["auto_sites"] for g in groups if g != "전체" and rel[g]["measured"] and rel[g]["auto_sites"]}
     if autos:  # 자동 접수 대상(PR 4b 조건 1~6). 정상 사이트 그룹에 나오면 오탐이다
         lines += ["", "자동 접수 대상 사이트: " + " · ".join(f"{g} {', '.join(s)}" for g, s in autos.items())]
+    outs = {g: rel[g]["brand_out_sites"] for g in groups if g != "전체" and rel[g]["measured"] and rel[g].get("brand_out_sites")}
+    if outs:  # 조건 10 이 뺀 사이트(서버 목록의 진짜 사이트)
+        lines += ["", "사칭한 브랜드의 진짜 사이트로 뺀 사이트: " + " · ".join(f"{g} {', '.join(s)}" for g, s in outs.items())]
+    hits = {g: rel[g]["name_hit_sites"] for g in groups if g != "전체" and rel[g]["measured"] and rel[g].get("name_hit_sites")}
+    if hits:  # 제목은 페이지가 정해 자동으로 빼지 않는다: 사람이 확인해 진짜 사이트면 목록에 보탠다
+        lines += ["", "원 사건 제목과 이름이 같은 자동 접수 대상(진짜 사이트인지 확인해 related.KIT_LINKED_REAL_SITES 에 보탤 후보): "
+                  + " · ".join(f"{g} {', '.join(s)}" for g, s in hits.items())]
     sbs = sb_summary(recs)
     lines += ["", "## 외부 평판 비교 (Safe Browsing, 조사 당시)", "",
               "같은 회차에서 Safe Browsing 만 썼다면(신고 주소 또는 브라우저가 연 경유·최종 주소가 일치)과 SafeTrace 의 위협 판단을 "

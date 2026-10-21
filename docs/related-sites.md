@@ -236,6 +236,7 @@ PR 1 을 먼저 하는 이유: 2~5 의 효과를 숫자로 보이려면 바꾸�
 | 7 | 최근 `related_auto_dedup_days`(기본 7일) 안에 같은 도착 호스트로 만든 연관 사건이 없음(`case_links.target_host`) | 여러 신고에서 같은 도박 사이트가 반복될 때 중복 방지 |
 | 8 | 이 부모에서 자동으로 만든 사건이 `related_auto_per_case`(기본 3) 미만 | 신고 1건이 불어나는 것 제한 |
 | 9 | 끝나지 않은 자동 사건 전체가 `related_auto_max_pending`(기본 10) 미만 | 사람 신고 대기 시간 보호 |
+| 10 | 도착 호스트가 **피싱 키트가 링크한 진짜 브랜드 사이트**가 아님(`brand_site`, 2026-10-21 추가): 서버가 가진 목록 — 공식 브랜드·사행사업자 도메인 또는 `related.KIT_LINKED_REAL_SITES`(관찰하고 진짜임을 확인한 것만) — 에 있고, 하위 조사의 위협 확신이 0.7(`BRAND_SITE_MAX_PROB`) 미만이며 외부 평판이 위험이 아니면 만들지 않는다. 공용 호스팅·단축 서비스·IP 는 해당 없음 | 피싱 키트는 사칭한 브랜드의 진짜 사이트(비밀번호 재설정 등)를 링크하는데, 하위 조사가 그 진짜 사이트를 확신 낮은 위협으로 볼 때가 있다(OpenPhish 10/20 OCA → oca.com.uy 0.6, 10/21 Wells Fargo → wellsfargo.com 0.61~0.64, 보류 없음). 진짜 위협(0.62)과 확률이 겹쳐 문턱으로는 못 가른다. **원 사건 제목과 이름이 같은지는 결정에 쓰지 않는다**: 제목은 조사 대상 페이지가 정해, 제목을 'Secure Portal' 로 하고 자기 피싱 사이트 secure.example 을 링크하면 빠졌다(Codex 1·2회차). 그 일치는 참고 표시(`brand_name`)로 남기고 평가 결과에 '목록에 보탤지 확인할 사이트'로 모아 보여 사람이 확인해 목록에 보탠다. 목록의 사이트라도 확신 있는 위협·평판 위험은 자동 접수한다(공식 도메인에 올라온 사용자 콘텐츠) |
 
 - 단축 서비스·공용 호스팅 목록은 `related.py` 에 상수로 두고, **평가·신고 자료에서 실제로 본 것만** 넣는다(지금 저장소에 있는 것: bit.ly, tinyurl.com, han.gl, lrl.kr, goo.su, c11.kr, xzx.kr, muz.so, 5du.pl, tny.kr, iii.im, go9.co, t.ly / 공용 호스팅 pages.dev, dothome, creatorlink). 출처를 주석에 적는다. PR 5 가 이 목록을 그대로 쓴다.
 - 통과하지 못한 후보는 지금처럼 PR 4 버튼으로 접수할 수 있다. 콘솔에는 못 만든 이유를 짧게 보여 준다(§6b.5).
@@ -250,7 +251,7 @@ PR 1 을 먼저 하는 이유: 2~5 의 효과를 숫자로 보이려면 바꾸�
   - 감사 로그 `case.create_related_auto`(부모 id, 후보 주소 앞 200자, 도착 호스트, 위협 유형·확률).
 - **사람 접수 한도와 분리**: `_check_intake_limits` 의 전체 한도(200) 계산에서 `created_by == "system:related"` 사건을 뺀다. 자동 사건은 조건 9 의 전용 한도만 받는다. 담당자가 버튼으로 만든 연관 사건은 지금처럼 그 담당자의 한도에 들어간다.
 - 상세 `children` 항목에 `auto` 를 보탠다. 원 사건 상세에 `auto_skipped: [{url, reason}]` 를 보탠다(자동 사건이 없는 하위 조사 후보와 이유 코드). 새 표를 두지 않고 읽을 때 계산한다:
-  - 시점과 무관한 조건 1~6 은 다시 계산해 `disabled|not_threat|blocked|shortener` 로 준다.
+  - 시점과 무관한 조건 1~6·10 은 다시 계산해 `disabled|not_threat|shortener|brand_site` 로 준다(`blocked` 는 조건 5 를 빼면서 없어짐).
   - 1~6 을 통과했는데 자식이 없으면 `limit_or_duplicate`(조건 7~9, 그때의 한도·중복은 감사 로그 `case.create_related_auto_skipped` 에 남긴다).
 - 설정(`config.py`):
   ```python
