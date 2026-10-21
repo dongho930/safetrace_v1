@@ -155,12 +155,14 @@ def test_related_summary_counts_auto_targets():
     m = related_summary(recs)
     assert (m["kisa"]["auto"], m["kisa"]["auto_sites"]) == (1, ["g.example"])
     assert m["normal"]["auto"] == 0
-    # 조건 10: 사칭 브랜드의 진짜 사이트는 자동 접수 대상에서 빠지고, 같은 회차에서 뺀 수를 따로 센다(이전 기록은 표시 없음)
-    real = {**good, "url": "https://www.brand.example/", "site": "brand.example", "brand_site": True, "probability": 0.62}
-    sure = {**good, "url": "https://sure.example/", "site": "sure.example", "brand_site": True}  # 확신 있는 위협은 빼지 않는다
-    recs[0]["related"] += [real, sure]
+    # 조건 10: 피싱 키트가 링크한 진짜 브랜드 사이트(서버 목록)는 빠지고 같은 회차에서 뺀 수를 센다. 원 사건 제목과
+    # 이름이 같다는 표시(brand_name)만 있는 위협 후보는 자동 접수 대상으로 남고, 목록에 보탤지 확인할 사이트로 보인다
+    real = {**good, "url": "https://oam.wellsfargo.com/x", "host": "oam.wellsfargo.com", "site": "wellsfargo.com",
+            "final_url": "https://oam.wellsfargo.com/x", "probability": 0.62}
+    hint = {**good, "url": "https://hint.example/", "host": "hint.example", "site": "hint.example", "brand_name": True}
+    recs[0]["related"] += [real, hint]
     m = related_summary(recs)["kisa"]
-    assert (m["auto"], m["brand_out"], m["brand_out_sites"]) == (2, 1, ["brand.example"])
+    assert (m["auto"], m["brand_out"], m["brand_out_sites"], m["name_hit_sites"]) == (2, 1, ["wellsfargo.com"], ["hint.example"])
 
 
 def test_sb_record_flags():

@@ -76,7 +76,7 @@ _ITEM = {  # 목록 안 사전의 필드
     "matches": {"url": _STR, "threatType": _STR},
     "results": {"sub": _INT, "url": _STR, "final_url": _STR, "threat": _STR, "probability": _PROB, "hold": _BOOL,
                 "status": _STR, "reason": _STR, "reputation_match": _BOOL, "reputation_unchecked": _BOOL,
-                "blocked": _BOOL, "brand_site": _BOOL, "score": _INT, "text": _STR},
+                "blocked": _BOOL, "brand_name": _BOOL, "score": _INT, "text": _STR},
 }
 
 

@@ -1901,7 +1901,7 @@ const AUTO_SKIP_LABEL: Record<string, string> = dict({
   depth: "연관 사건의 후보",
   not_threat: "위협으로 보지 않음",
   shortener: "단축 주소",
-  brand_site: "사칭한 브랜드의 진짜 사이트로 보임",
+  brand_site: "사칭한 브랜드의 진짜 사이트(확인된 목록)",
   limit_or_duplicate: "자동 한도·중복",
 });
 

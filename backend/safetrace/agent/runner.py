@@ -62,7 +62,8 @@ def _investigate_candidates(cands: list[dict], s: Settings, decider: Decider, wr
                             gambling: bool = False) -> list[dict]:
     """후보마다 새 브라우저에서 작은 예산으로 같은 탐색 루프를 돌린다. 같은 안전 게이트·검문 프록시를 거치고,
     같은 증거 체인에 sub 번호를 붙여 기록한다. 후보 하나가 실패해도 기록만 하고 다음 후보로 간다.
-    brand_site: 도착한 사이트가 원 사건 제목이 내세운 브랜드 자신의 사이트(자동 사건을 만들지 않음, related.brand_site)"""
+    brand_name: 도착한 사이트 이름이 원 사건 제목이 내세운 이름과 같다는 참고 표시(related.brand_name, 자동 접수 결정에는
+    쓰지 않는다 — 평가 도구가 모아 보여 주면 사람이 진짜 사이트인지 확인해 목록에 보탠다)"""
     sub_s = s.model_copy(update={"max_steps": s.candidate_max_steps, "max_seconds": s.candidate_max_seconds})
     out = []
     for i, c in enumerate(cands, 1):
@@ -81,7 +82,7 @@ def _investigate_candidates(cands: list[dict], s: Settings, decider: Decider, wr
         row = {**res, "status": r.status, "reason": r.finish_reason, "final_url": r.final_url[:2048],
                "threat": th.get("threat"), "probability": th.get("probability"), "hold": th.get("hold"),
                "blocked": bool(r.network_filtered), "_urls": urls}
-        out.append({**row, "brand_site": related.brand_site(related.target_host(row), names, gambling=gambling)})
+        out.append({**row, "brand_name": related.brand_name(related.target_host(row), names, gambling=gambling)})
     return out
 
 
