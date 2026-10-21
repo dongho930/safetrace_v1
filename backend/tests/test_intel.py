@@ -111,6 +111,8 @@ def test_intel_rows_keys_and_conditions():
              {"kind": "form", "value": "https://collect.example.net/p.php", "src": "form"},
              {"kind": "form", "value": "https://script.google.com/macros/s/x/exec?u=1", "src": "form"},
              {"kind": "form", "value": "http://10.0.0.5/p.php", "src": "form"},  # 내부 주소는 잇지 않음
+             {"kind": "form", "value": "https://facebook.com/", "src": "form"},  # 공식 브랜드(키트가 진짜 사이트로 보냄)
+             {"kind": "form", "value": "https://translate.googleapis.com/translate_voice", "src": "form"},  # 위젯
              {"kind": "nope", "value": "x"}, "x"]
     rows = related.intel_rows([_intel_rec(items, kit=kit), _intel_rec(items[:1], sub=1)], "phishing", SECRET)
     by = {r["site"]: r for r in rows}
@@ -120,7 +122,7 @@ def test_intel_rows_keys_and_conditions():
     assert any(r["site"].startswith("account:") and r["host"] == "국민 ****4567" for r in rows)
     # 보내는 곳은 주소 전체(쿼리 빼고)가 같을 때만: 공용 서비스(script.google.com)로 남남끼리 묶이지 않게
     assert {"form:collect.example.net/p.php", "form:script.google.com/macros/s/x/exec"} <= set(by)
-    assert not any("10.0.0.5" in r["site"] for r in rows)
+    assert not any(x in r["site"] for r in rows for x in ("10.0.0.5", "facebook", "translate."))
     assert {"kit:dom:" + "a" * 32, "kit:res:" + "b" * 32} <= set(by) and by["kit:dom:" + "a" * 32]["host"] == "kit.example.net"
     assert len(rows) == 7
     # 정상으로 본 사건은 잇지 않고, 판단 불가면 키트 지문은 쓰지 않는다(오류·주차 화면 틀)

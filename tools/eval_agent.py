@@ -222,8 +222,16 @@ def intel_record(kinds: list, url: str, final_url: object, site_key) -> dict:
         page = urlsplit(d["url"]).hostname if isinstance(d.get("url"), str) else None
         if page and site_key(page):
             kits.update(f"{part}:{kit[part]}" for part in ("dom", "res") if isinstance(kit.get(part), str))
-    host = urlsplit(final_url if isinstance(final_url, str) and final_url else url).hostname or ""
+    # 사이트 = 신고 주소(사건 하나). 최종 주소로 세면 조사 전에 진짜 facebook.com 으로 넘긴 키트들이 한 사이트가 된다
+    host = urlsplit(url).hostname or ""
     return {"intel": sorted(items)[:40], "kit": sorted(kits)[:20], "site": (site_key(host) or host) if host else ""}
+
+
+def _intel_key(item: str) -> str | None:
+    """평가 기록의 '종류:값' 을 서비스의 연결 열쇠로(비밀키는 평가용 고정값: 같은 값끼리만 같으면 된다)."""
+    kind, _, value = item.partition(":")
+    k = _related_module().intel_key(kind, value, b"eval")
+    return k[0] if k else None
 
 
 def intel_summary(recs: list[dict]) -> dict:
@@ -251,8 +259,9 @@ def intel_summary(recs: list[dict]) -> dict:
     for r in measured:
         site = r["site"]
         find(site)
-        # 서비스(related.intel_rows)와 같게: 정상으로 본 회차는 잇지 않고, 키트 지문은 위협으로 본 회차만
-        keys = (set(r["intel"]) if r.get("threat") != "benign" else set()) | (
+        # 서비스(related.intel_rows)와 같게: 운영 정보는 같은 열쇠 함수(intel_key)로, 정상으로 본 회차는 잇지 않고,
+        # 키트 지문은 위협으로 본 회차만
+        keys = ({k for k in (_intel_key(x) for x in r["intel"]) if k} if r.get("threat") != "benign" else set()) | (
             {f"kit:{k}" for k in r.get("kit") or []} if r.get("threat") in MALICIOUS else set())
         keys_of.setdefault(site, set()).update(keys)
         for key in keys:

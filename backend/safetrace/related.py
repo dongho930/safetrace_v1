@@ -204,6 +204,8 @@ def case_sites(url: str, final_url: str | None, threat: dict | None, candidates:
 # 적어 둘 수 있다) 판단·자동 연관 사건에는 쓰지 않고 묶음을 보여 주는 데만 쓴다. case_sites 에 role contact·kit 으로 둔다
 INTEL_ROLES = ("contact", "kit")
 INTEL_PER_CASE = 24
+# 입력 양식이 보내는 곳 중 운영자를 가리키지 않는 위젯(관찰한 것만): 2026-10-22 Meta 사칭 vercel 키트 화면의 Google 번역 위젯
+WIDGET_FORM_HOSTS: tuple[str, ...] = ("translate.googleapis.com",)
 # 열쇠는 서버 비밀키 HMAC, 보이는 값은 끝 4자리만(연관 묶음·CSV 는 열람자도 본다). 키 없는 해시면 가린 값과 함께 공개된
 # 열쇠에 가운데 네 자리(1만 개)를 대입해 원래 번호를 찾을 수 있다(Codex 지적)
 _PII_KINDS = ("phone", "account", "whatsapp")
@@ -222,7 +224,9 @@ def intel_key(kind: object, value: object, secret: bytes) -> tuple[str, str] | N
     if kind == "form":
         u = urlsplit(value)
         host = (u.hostname or "").lower()
-        if not host or _non_public_ip(host):
+        # 공식 브랜드·단축 서비스·흔한 대형 사이트·내부 주소(연결 열쇠가 없는 곳)와 위젯으로 보내는 양식은 잇지 않는다:
+        # 피싱 키트가 진짜 facebook.com 으로 보내는 양식을 달아 두면 남남끼리 묶인다(2026-10-22 Meta 키트에서 관찰)
+        if not host or link_key(host) is None or on_domain(host, WIDGET_FORM_HOSTS):
             return None
         endpoint = f"{host}{u.path or '/'}"[:200]
         return f"form:{endpoint}", endpoint
