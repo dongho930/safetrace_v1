@@ -83,6 +83,9 @@ class CaseLink(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+INTEL_ROLES = ("contact", "kit")  # related.INTEL_ROLES 와 같다(store 는 related 를 위에서 가져오지 않는다)
+
+
 class CaseSite(Base):
     """끝난 사건에서 나온 호스트(시작·최종·경유·링크·후보의 도착). 같은 site 가 나온 사건끼리 잇는다(related-sites PR 5).
     site 는 이을 열쇠: 보통 등록 도메인, 공용 호스팅(generic)은 호스트 그대로. 단축 서비스·공식·흔한 대형 사이트는 쓰지 않는다."""
@@ -92,7 +95,7 @@ class CaseSite(Base):
     case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), index=True)
     host: Mapped[str] = mapped_column(String(253), index=True)
     site: Mapped[str] = mapped_column(String(253), index=True)
-    role: Mapped[str] = mapped_column(String(16))  # start | final | via | link | candidate_final
+    role: Mapped[str] = mapped_column(String(16))  # start | final | via | link | candidate_final | contact | kit
     threat: Mapped[str | None] = mapped_column(String(32))
     blocked: Mapped[bool] = mapped_column(Boolean, default=False)
     generic: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -242,7 +245,15 @@ class Store:
             if c is None or c.status not in TERMINAL:
                 return 0
             rows = case_sites(c.url, c.final_url, c.threat, c.candidates)
-            s.execute(delete(CaseSite).where(CaseSite.case_id == case_id))
+            # 운영 정보·키트 지문 줄(검증한 체인에서 쓴 것, write_intel_sites)은 그대로 둔다
+            s.execute(delete(CaseSite).where(CaseSite.case_id == case_id, CaseSite.role.not_in(INTEL_ROLES)))
+            s.add_all(CaseSite(case_id=case_id, **r) for r in rows)
+        return len(rows)
+
+    def write_intel_sites(self, case_id: str, rows: list[dict]) -> int:
+        """운영 정보·키트 지문으로 이을 줄을 다시 쓴다(related.intel_rows, 검증한 체인에서 만든 것). 반환: 쓴 줄 수."""
+        with self.session() as s, s.begin():
+            s.execute(delete(CaseSite).where(CaseSite.case_id == case_id, CaseSite.role.in_(INTEL_ROLES)))
             s.add_all(CaseSite(case_id=case_id, **r) for r in rows)
         return len(rows)
 

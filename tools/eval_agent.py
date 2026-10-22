@@ -205,6 +205,99 @@ def _related_rows(m: dict) -> list[tuple[str, str]]:
     ]
 
 
+# ── 운영 정보·키트 지문(순수 함수) ───────────────────────────────
+def intel_record(kinds: list, url: str, final_url: object, site_key) -> dict:
+    """원래 조사의 intel 기록을 평가 기록용으로: intel(종류:값), kit(dom:해시·res:해시), site(최종 주소의 연결 열쇠).
+    site_key(host) 는 서비스의 사건 연결 열쇠(related.link_key: 등록 도메인, 공용 호스팅은 호스트)이고 잇지 않는 호스트
+    (공식·단축 서비스 등)면 None 이다. 키트 지문도 서비스와 같게 그런 화면의 것은 넣지 않는다."""
+    items, kits = set(), set()
+    for k in kinds:
+        d = k.get("data") if isinstance(k, dict) else None
+        if k.get("kind") != "intel" or not isinstance(d, dict) or "sub" in d:
+            continue
+        for x in d.get("items") or []:
+            if isinstance(x, dict) and isinstance(x.get("kind"), str) and isinstance(x.get("value"), str):
+                items.add(f"{x['kind'][:16]}:{x['value'][:200]}")
+        kit = d.get("kit") if isinstance(d.get("kit"), dict) else {}
+        page = urlsplit(d["url"]).hostname if isinstance(d.get("url"), str) else None
+        if page and site_key(page):
+            kits.update(f"{part}:{kit[part]}" for part in ("dom", "res") if isinstance(kit.get(part), str))
+    # 사이트 = 신고 주소(사건 하나). 최종 주소로 세면 조사 전에 진짜 facebook.com 으로 넘긴 키트들이 한 사이트가 된다
+    host = urlsplit(url).hostname or ""
+    return {"intel": sorted(items)[:40], "kit": sorted(kits)[:20], "site": (site_key(host) or host) if host else ""}
+
+
+def _intel_key(item: str) -> str | None:
+    """평가 기록의 '종류:값' 을 서비스의 연결 열쇠로(비밀키는 평가용 고정값: 같은 값끼리만 같으면 된다)."""
+    kind, _, value = item.partition(":")
+    k = _related_module().intel_key(kind, value, b"eval")
+    return k[0] if k else None
+
+
+def intel_summary(recs: list[dict]) -> dict:
+    """그룹별 운영 정보·키트 지문이 나온 회차와, 같은 열쇠로 이어진 서로 다른 사이트 묶음(합집합 찾기).
+    정상으로 본 회차는 잇지 않고 키트 지문은 위협으로 본 회차만(서비스와 같은 기준). 정상 사이트 그룹이 낀 묶음은 잘못 이은 것이다."""
+    measured = [r for r in recs if isinstance(r.get("intel"), list) and r.get("site")]
+    groups: dict[str, dict] = {}
+    for r in measured:
+        for g in (r["group"], "전체"):
+            m = groups.setdefault(g, {"measured": 0, "with_intel": 0, "with_kit": 0, "kinds": Counter()})
+            m["measured"] += 1
+            m["with_intel"] += bool(r["intel"])
+            m["with_kit"] += bool(r.get("kit"))
+            m["kinds"].update({x.split(":", 1)[0] for x in r["intel"]})
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    first: dict[str, str] = {}
+    keys_of: dict[str, set] = {}
+    for r in measured:
+        site = r["site"]
+        find(site)
+        # 서비스(related.intel_rows)와 같게: 운영 정보는 같은 열쇠 함수(intel_key)로, 정상으로 본 회차는 잇지 않고,
+        # 키트 지문은 위협으로 본 회차만
+        keys = ({k for k in (_intel_key(x) for x in r["intel"]) if k} if r.get("threat") != "benign" else set()) | (
+            {f"kit:{k}" for k in r.get("kit") or []} if r.get("threat") in MALICIOUS else set())
+        keys_of.setdefault(site, set()).update(keys)
+        for key in keys:
+            if key in first:
+                parent[find(site)] = find(first[key])
+            else:
+                first[key] = site
+    clusters: dict[str, set] = {}
+    for site in parent:
+        clusters.setdefault(find(site), set()).add(site)
+    benign_sites = {r["site"] for r in measured if r["expected"] == "benign"}
+    linked = [sorted(c) for c in clusters.values() if len(c) >= 2]
+    sites_of: dict[str, set] = {}
+    for site, keys in keys_of.items():
+        for key in keys:
+            sites_of.setdefault(key, set()).add(site)
+
+    def kind(key: str) -> str:  # 묶음을 이은 열쇠 종류(값은 적지 않는다)
+        return "kit:" + key.split(":")[1] if key.startswith("kit:") else key.split(":", 1)[0]
+
+    shared = [sorted({kind(k) for k, ss in sites_of.items() if len(ss & set(c)) >= 2}) for c in linked]
+    return {"groups": groups, "clusters": linked, "cluster_keys": shared,
+            "benign_clusters": sum(1 for c in linked if benign_sites & set(c))}
+
+
+def _intel_rows(m: dict | None) -> list[tuple[str, str]]:
+    names = ["운영 정보가 나온 회차", "종류(회차)", "키트 지문이 있는 회차"]
+    if not m or not m["measured"]:
+        return [(n, "측정 안 함") for n in names]
+    from_ko = {"telegram": "텔레그램", "kakao": "카톡", "line": "라인", "whatsapp": "왓츠앱", "discord": "디스코드", "phone": "휴대전화",
+               "account": "계좌", "form": "다른 사이트로 보내는 양식"}
+    kinds = ", ".join(f"{from_ko.get(k, k)} {n}" for k, n in m["kinds"].most_common()) or "-"
+    return [("운영 정보가 나온 회차", f"{m['with_intel']}/{m['measured']} ({_pct(m['with_intel'], m['measured'])})"),
+            ("종류(회차)", kinds), ("키트 지문이 있는 회차", f"{m['with_kit']}/{m['measured']}")]
+
+
 # ── 외부 평판 비교(순수 함수) ───────────────────────────────
 def sb_record(data: object, start: str, nav: object) -> dict:
     """원래 조사의 safebrowsing 기록(조사 당시 SafeTrace 가 받은 조회 결과)을 평가 기록용으로 줄인다.
@@ -311,6 +404,18 @@ def report(recs: list[dict], meta: dict | None = None) -> str:
     if hits:  # 제목은 페이지가 정해 자동으로 빼지 않는다: 사람이 확인해 진짜 사이트면 목록에 보탠다
         lines += ["", "원 사건 제목과 이름이 같은 자동 접수 대상(진짜 사이트인지 확인해 related.KIT_LINKED_REAL_SITES 에 보탤 후보): "
                   + " · ".join(f"{g} {', '.join(s)}" for g, s in hits.items())]
+    its = intel_summary(recs)
+    if its["groups"]:
+        lines += ["", "## 운영 정보·키트 지문", "",
+                  "페이지에 적힌 운영자 연락처·계좌·수집 서버(확인 안 됨)와 화면 구조 지문. 판단에는 쓰지 않고 사건을 잇는 데만 "
+                  "쓴다. 묶음 = 같은 열쇠로 이어진 서로 다른 사이트(등록 도메인), 키트 지문은 위협으로 본 회차만.", "",
+                  "| 지표 | " + " | ".join(groups) + " |", "|---|" + "---|" * len(groups)]
+        irows = {g: _intel_rows(its["groups"].get(g)) for g in groups}
+        for i in range(3):
+            lines.append(f"| {irows[groups[0]][i][0]} | " + " | ".join(irows[g][i][1] for g in groups) + " |")
+        lines += ["", f"서로 다른 사이트를 이은 묶음 {len(its['clusters'])}개 · 사이트 {sum(len(c) for c in its['clusters'])}곳"
+                  f" · 정상 사이트가 낀 묶음 {its['benign_clusters']}개"]
+        lines += [f"- {', '.join(c)} ({', '.join(k)})" for c, k in zip(its["clusters"], its["cluster_keys"])]
     sbs = sb_summary(recs)
     lines += ["", "## 외부 평판 비교 (Safe Browsing, 조사 당시)", "",
               "같은 회차에서 Safe Browsing 만 썼다면(신고 주소 또는 브라우저가 연 경유·최종 주소가 일치)과 SafeTrace 의 위협 판단을 "
@@ -415,6 +520,7 @@ def run_inside(args) -> None:
     sys.path.insert(0, "/app")
     from safetrace.agent.candidates import site_of
     from safetrace.agent.runner import investigate
+    from safetrace.related import link_key
     from safetrace.config import Settings
 
     rows = load_set(Path(args.set), args.group)
@@ -456,6 +562,9 @@ def run_inside(args) -> None:
                     rec["candidates"] = len(cands)
                     rec["candidates_investigated"] = sum(1 for c in cands if isinstance(c, dict) and c.get("sub"))
                     rec["related"] = [related_item(c, site_of) for c in cands if isinstance(c, dict)][:20]
+                    # 운영 정보·키트 지문(원래 조사의 intel 기록). 살아 있는 운영자 값이라 결과 파일은 git 밖에만 둔다
+                    rec.update(intel_record(kinds, row["url"], final.get("final_url"),
+                                            lambda h: (link_key(h) or (None,))[0]))
                 except Exception as e:  # 한 건 실패로 전체를 멈추지 않는다
                     rec["error"] = f"{type(e).__name__}: {str(e)[:200]}"
                 rec["seconds"] = round(time.monotonic() - t, 1)

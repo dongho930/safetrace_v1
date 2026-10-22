@@ -63,3 +63,28 @@ export const NET_CATEGORY_LABEL: Record<string, string> = dict({
   other: "기타",
 });
 export const ACTION_LABEL: Record<string, string> = dict({ scroll: "스크롤", back: "뒤로 가기", close_popup: "팝업 닫기", finish: "조사 끝내기" });
+
+// 운영 정보 종류(agent/intel.py KIND_KO 와 같은 문구)
+export const INTEL_KIND: Record<string, string> = dict({
+  telegram: "텔레그램",
+  kakao: "카카오톡",
+  line: "라인",
+  whatsapp: "왓츠앱",
+  discord: "디스코드",
+  phone: "휴대전화",
+  account: "입금 계좌",
+  form: "입력값을 보내는 곳",
+});
+// 사건을 이은 열쇠의 화면 문구: 사이트는 그대로, 운영 정보는 '종류 값'(전화·계좌는 서버가 가린 값), 키트 지문은 앞 12자리
+export function linkKeyLabel(site: string, kind: "site" | "contact" | "kit", hosts: string[]): string {
+  if (kind === "site") return site;
+  if (kind === "kit") {
+    const [, part, hash] = site.split(":");
+    return `${part === "res" ? "빌드 파일 지문" : "화면 구조 지문"} ${(hash ?? "").slice(0, 12)}`;
+  }
+  const i = site.indexOf(":");
+  const k = i > 0 ? site.slice(0, i) : "";
+  // 전화·계좌·왓츠앱은 가린 값, 보내는 곳은 호스트만(열쇠는 서버 비밀키 HMAC 이라 화면에 쓸 값이 아니다)
+  const shown = k === "phone" || k === "account" || k === "whatsapp" || k === "form" ? (hosts[0] ?? "") : site.slice(i + 1);
+  return `${INTEL_KIND[k] ?? "운영 정보"} ${shown}`;
+}

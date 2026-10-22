@@ -68,7 +68,8 @@ COLLECT_JS = r"""
       if (r.width * r.height > vw * vh * 0.2) { popup = true; break; }
     }
   }
-  const text = (document.body ? document.body.innerText : '').replace(/\s+/g, ' ').trim().slice(0, 6000);
+  const full = document.body ? document.body.innerText : '';
+  const text = full.replace(/\s+/g, ' ').trim().slice(0, 6000);
   // 연관 후보용 링크: 클릭 후보와 별개로 화면의 모든 a[href] 의 http·https 절대 주소(보이지 않는 링크 포함, 최대 200개).
   // 판단 모델에는 보내지 않는다(Python 이 다시 검사한다)
   const links = [];
@@ -84,7 +85,61 @@ COLLECT_JS = r"""
     links.push({ href, text: textOf(a), visible: shown, hasDownload: a.hasAttribute('download'),
                  inForm: !!a.closest('form'), imgOnly });
   }
-  return { items: out, inputs, popup, text, title: document.title.slice(0, 200), links };
+  // 운영 정보·키트 지문(agent/intel.py): 연락 링크(텔레그램·카톡·tel: 등), 입력 양식이 보내는 곳, 문의·입금 같은 말
+  // 둘레의 글자 조각, 화면 요소 순서(태그·깊이)와 같은 출처의 js·css 경로. 판단 모델에는 보내지 않는다(Python 이
+  // 정해진 모양만 뽑는다). 어느 하나가 실패해도 관찰은 계속한다
+  const contacts = [], forms = [], snips = [], kit = { dom: '', n: 0, res: [] };
+  try {
+    const re = /^(tel|sms|tg):|^https?:\/\/(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog|open\.kakao\.com|pf\.kakao\.com|qr\.kakao\.com|line\.me|wa\.me|api\.whatsapp\.com|discord\.gg|discord\.com)\//i;
+    let seen = 0;
+    for (const a of document.querySelectorAll('a[href]')) {
+      if (contacts.length >= 60 || ++seen > 5000) break;
+      const h = String(a.href || '');
+      if (h.length <= 2048 && re.test(h)) contacts.push(h);
+    }
+  } catch (e) {}
+  try {
+    for (const f of document.querySelectorAll('form')) {
+      if (forms.length >= 10) break;
+      // f.action·f.method 는 이름이 action 인 입력칸으로 바꿔치기된다(DOM clobbering): 속성을 읽어 직접 푼다
+      const raw = f.getAttribute('action');
+      let action = '';
+      try { action = raw ? new URL(raw, document.baseURI).href : ''; } catch (e) {}
+      forms.push({ action: action.slice(0, 2048), method: String(f.getAttribute('method') || 'get').toLowerCase().slice(0, 8) });
+    }
+  } catch (e) {}
+  try {
+    const flat = full.length > 300000 ? full.slice(0, 300000) : full;
+    const cue = /텔레그램|텔레|telegram|카카오톡|카톡|문의|상담|고객센터|연락|전화|입금|계좌|은행|예금주/gi;
+    let m;
+    while ((m = cue.exec(flat)) && snips.length < 40) {
+      snips.push(flat.slice(Math.max(0, m.index - 10), m.index + 80).replace(/\s+/g, ' '));
+      cue.lastIndex = m.index + 40;
+    }
+  } catch (e) {}
+  try {
+    if (document.body) {
+      const tw = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+      const parts = [];
+      for (let el = tw.currentNode; el && parts.length < 3000; el = tw.nextNode()) {
+        let d = 0;
+        for (let p = el.parentElement; p && d < 32; p = p.parentElement) d++;
+        parts.push(el.tagName.toLowerCase() + d);
+      }
+      kit.dom = parts.join(',');
+      kit.n = parts.length;
+    }
+    const res = new Set();
+    for (const el of document.querySelectorAll('script[src],link[href]')) {
+      if (res.size >= 100) break;
+      try {
+        const u = new URL(el.getAttribute('src') || el.getAttribute('href') || '', document.baseURI);
+        if (u.origin === location.origin) res.add(u.pathname.slice(0, 200));
+      } catch (e) {}
+    }
+    kit.res = [...res];
+  } catch (e) {}
+  return { items: out, inputs, popup, text, title: document.title.slice(0, 200), links, contacts, forms, snips, kit };
 }
 """
 
