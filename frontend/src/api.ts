@@ -54,7 +54,58 @@ export type CaseOut = {
   auto: boolean | null; // 자동으로 만든 연관 사건인지(PR 4b)
   children: ChildCase[] | null; // 이 사건의 후보로 만든 사건(상세에만)
   auto_skipped: { url: string; reason: string }[] | null; // 하위 조사했지만 자동 사건이 없는 후보와 이유(상세에만)
+  action: Action | null; // 현재 조치(요청함·차단 확인·삭제 확인·다시 나타남·종결)
 };
+
+// 조치 추적(모니터링 담당자): 위협 확정 뒤 기관에 요청 → 차단·삭제 확인 → 재확인에서 다시 나타남 → 종결. 판(rev)을 쌓는다
+export type ActionState = "requested" | "blocked" | "removed" | "reappeared" | "closed";
+export type Action = { rev: number; state: ActionState; agency: string | null; ref: string | null; note: string | null; actor: string; check_id: number | null; created_at: string };
+// 재확인: 신고 주소에 다시 접속해 본 결과(격리된 조사 컨테이너가 한다). 값은 조사 대상 서버가 정한 글자를 포함한다
+export type Check = { id: number; state: string; requested_by: string; requested_at: string; done_at: string | null; result: string | null; reason: string | null; http_status: number | null; final_host: string | null; title: string | null };
+const ACTION_STATES = ["requested", "blocked", "removed", "reappeared", "closed"];
+function cleanAction(x: unknown): Action | null {
+  if (!isObj(x) || typeof x.rev !== "number" || typeof x.state !== "string" || !ACTION_STATES.includes(x.state)) return null;
+  return {
+    rev: x.rev,
+    state: x.state as ActionState,
+    agency: strOr(x.agency)?.slice(0, 16) ?? null,
+    ref: strOr(x.ref)?.slice(0, 100) ?? null,
+    note: strOr(x.note)?.slice(0, 1000) ?? null,
+    actor: text(x.actor, 64),
+    check_id: typeof x.check_id === "number" ? x.check_id : null,
+    created_at: text(x.created_at, 40),
+  };
+}
+function cleanCheck(x: unknown): Check[] {
+  if (!isObj(x) || typeof x.id !== "number" || typeof x.state !== "string") return [];
+  return [{
+    id: x.id,
+    state: x.state.slice(0, 12),
+    requested_by: text(x.requested_by, 64),
+    requested_at: text(x.requested_at, 40),
+    done_at: strOr(x.done_at)?.slice(0, 40) ?? null,
+    result: strOr(x.result)?.slice(0, 16) ?? null,
+    reason: strOr(x.reason)?.slice(0, 64) ?? null,
+    http_status: typeof x.http_status === "number" ? x.http_status : null,
+    final_host: strOr(x.final_host)?.slice(0, 253) ?? null,
+    title: strOr(x.title)?.slice(0, 200) ?? null,
+  }];
+}
+export const getActions = async (id: string): Promise<{ actions: Action[]; checks: Check[]; interval: number }> => {
+  const v = await req<unknown>(`/api/cases/${encodeURIComponent(id)}/actions`);
+  const o = isObj(v) ? v : {};
+  return {
+    actions: list(o.actions).slice(0, 50).flatMap((x) => cleanAction(x) ?? []),
+    checks: list(o.checks).slice(0, 20).flatMap(cleanCheck),
+    interval: typeof o.recheck_interval_hours === "number" ? o.recheck_interval_hours : 24,
+  };
+};
+export const saveAction = async (id: string, a: { rev: number; state: ActionState; agency: string | null; ref: string; note: string }) => {
+  const v = cleanAction(await req<unknown>(`/api/cases/${encodeURIComponent(id)}/actions`, { method: "POST", body: JSON.stringify(a) }));
+  if (!v) throw new ApiError(500, "조치 형식 오류");
+  return v;
+};
+export const requestRecheck = (id: string) => req<unknown>(`/api/cases/${encodeURIComponent(id)}/recheck`, { method: "POST" });
 
 // 연관 후보로 만든 사건(부모 사건 상세의 요약)
 export type ChildCase = { id: string; url: string; candidate_url: string; status: string; threat: string | null; verdict: string | null; auto: boolean };
@@ -479,6 +530,7 @@ export function cleanCase(v: unknown): CaseOut | null {
           .slice(0, 20)
           .flatMap((x) => (isObj(x) && typeof x.url === "string" && typeof x.reason === "string" ? [{ url: x.url.slice(0, 2000), reason: x.reason.slice(0, 32) }] : []))
       : null,
+    action: cleanAction(v.action),
   };
 }
 

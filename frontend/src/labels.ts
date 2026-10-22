@@ -88,3 +88,28 @@ export function linkKeyLabel(site: string, kind: "site" | "contact" | "kit", hos
   const shown = k === "phone" || k === "account" || k === "whatsapp" || k === "form" ? (hosts[0] ?? "") : site.slice(i + 1);
   return `${INTEL_KIND[k] ?? "운영 정보"} ${shown}`;
 }
+
+// 조치 추적(actions.py)과 재확인(agent/recheck.py) 문구
+export const ACTION_STATE_LABEL: Record<string, string> = dict({
+  requested: "요청함",
+  blocked: "차단 확인",
+  removed: "삭제·폐쇄 확인",
+  reappeared: "다시 나타남",
+  closed: "종결",
+});
+export const AGENCY_LABEL: Record<string, string> = dict({
+  kisa: "KISA(118)",
+  kcsc: "방송미디어통신심의위원회(1377)",
+  ngcc: "사행산업통합감독위원회(1336)",
+  police: "경찰청 ECRM(112)",
+  fss: "금융감독원(1332)",
+  other: "기타",
+});
+export const CHECK_RESULT_LABEL: Record<string, string> = dict({
+  alive: "살아 있음",
+  gone: "사라짐",
+  filtered: "회선 차단 추정",
+  refused: "정책상 접속 안 함",
+  unreachable: "연결 안 됨",
+  error: "확인 실패",
+});

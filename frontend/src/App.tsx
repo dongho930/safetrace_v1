@@ -21,6 +21,12 @@ import {
   getIntel,
   type CaseIntel,
   getLinks,
+  getActions,
+  saveAction,
+  requestRecheck,
+  type Action,
+  type ActionState,
+  type Check,
   getReferral,
   type Referral,
   listGroups,
@@ -52,7 +58,7 @@ import {
   buildOverlay, buildPath, buildReasons, buildScreens, clip, CURSOR_IN, cursorTravel, hostOrFile, hostPath, jpegSize, liveActivity, liveClick, locateSeg, MAX_RECORDINGS, recCursor, recordingClicks, recordings, SCREEN_H,
   SCREEN_W, segStarts, type Activity, type ClickPoint, type Overlay, type Reason, type RecItem, type Screen, type Tone,
 } from "./evidence";
-import { ACTION_LABEL, INTEL_KIND, linkKeyLabel, NET_CATEGORY_LABEL, overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
+import { ACTION_LABEL, ACTION_STATE_LABEL, AGENCY_LABEL, CHECK_RESULT_LABEL, INTEL_KIND, linkKeyLabel, NET_CATEGORY_LABEL, overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
 
 // 조사 대상 페이지에서 온 문자열은 모두 React 기본 이스케이프로만 출력한다(raw HTML 금지).
 
@@ -137,13 +143,16 @@ const isSuspect = (c: CaseOut) => !!c.threat && !["benign", "unknown"].includes(
 // 원래 결과가 나왔고 연관 사이트를 조사하는 중인 사건은 원래 결과의 상태로 분류한다(조사 중 폴더에 넣지 않는다)
 const relatedRunning = (c: CaseOut) => c.phase === "related" && c.status === "RUNNING" && !!c.main_status;
 const asMain = (c: CaseOut): CaseOut => (relatedRunning(c) ? { ...c, status: c.main_status as string } : c);
-type FolderId = "review" | "running" | "suspect" | "decided" | "unreachable" | "all";
+type FolderId = "review" | "running" | "suspect" | "decided" | "unreachable" | "tracking" | "reappeared" | "all";
 const FOLDERS: { id: FolderId; label: string; color: string; test: (c: CaseOut) => boolean }[] = [
   { id: "review", label: "검토 필요", color: "var(--review)", test: (c) => needsReview(asMain(c)) },
   { id: "running", label: "조사 중", color: "var(--primary)", test: (c) => (c.status === "RUNNING" || c.status === "QUEUED") && !relatedRunning(c) },
   { id: "suspect", label: "위협 의심 · 판정 전", color: "var(--threat)", test: (c) => asMain(c).status === "COMPLETED" && isSuspect(c) && !c.verdict },
   { id: "decided", label: "판정 완료", color: "var(--safe)", test: (c) => c.verdict?.decision === "threat" || c.verdict?.decision === "benign" },
   { id: "unreachable", label: "접속 불가 · 차단", color: "var(--idle-line)", test: (c) => ["UNREACHABLE", "BLOCKED", "FAILED"].includes(asMain(c).status) },
+  // 조치 추적: 기관에 요청했거나 차단·삭제를 확인해 재확인 중인 사건, 재확인에서 다시 접속된 사건(다시 요청할 것)
+  { id: "tracking", label: "조치 추적", color: "var(--primary)", test: (c) => ["requested", "blocked", "removed"].includes(c.action?.state ?? "") },
+  { id: "reappeared", label: "다시 나타남", color: "var(--threat)", test: (c) => c.action?.state === "reappeared" },
   { id: "all", label: "전체", color: "var(--header)", test: () => true },
 ];
 // 담당자가 확인할 사건(검토 필요, 위협 의심인데 판정 전)은 목록에 파란 점
@@ -297,6 +306,7 @@ export default function App() {
               key={selected}
               id={selected}
               canDecide={user.kind === "user" && ROLE_RANK[user.role] >= ROLE_RANK.reviewer}
+              canAct={user.kind === "user" && ROLE_RANK[user.role] >= ROLE_RANK.investigator}
               canExport={ROLE_RANK[user.role] >= ROLE_RANK.investigator}
               onDecided={refresh}
               onOpen={setSelected}
@@ -953,6 +963,7 @@ function EmptyWorkspace() {
 const Workspace = memo(function Workspace({
   id,
   canDecide,
+  canAct,
   canExport,
   onDecided,
   onOpen,
@@ -961,6 +972,7 @@ const Workspace = memo(function Workspace({
 }: {
   id: string;
   canDecide: boolean;
+  canAct: boolean;
   canExport: boolean;
   onDecided: () => void;
   onOpen: (id: string) => void;
@@ -1088,8 +1100,12 @@ const Workspace = memo(function Workspace({
               onPick={setPick}
               related={related}
               canCreate={canExport}
+              canAct={canAct}
               onOpen={onOpen}
-              onChanged={() => getCase(id).then(setC).catch(() => undefined)}
+              onChanged={() => {
+                getCase(id).then(setC).catch(() => undefined);
+                onDecided();
+              }}
             />
             <CaseFooterBar c={c} id={id} running={running || related} related={related} canExport={canExport} verify={verify} onVerify={setVerify} />
           </section>
@@ -1579,7 +1595,7 @@ function Summary({ c, running, reasons, picked, onPick }: { c: CaseOut | null; r
 const CIRCLED = [..."①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"];
 
 // ── 조사 경과 탭: 근거 화면(기본) · 경로 지도 · 조사 녹화 · 행동 기록 ─────────────
-type TabId = "screens" | "path" | "related" | "links" | "intel" | "referral" | "rec" | "log";
+type TabId = "screens" | "path" | "related" | "links" | "intel" | "referral" | "actions" | "rec" | "log";
 type VerifyState = { ok: boolean; records: number; errors: string[] } | null;
 
 function CaseTabs({
@@ -1593,6 +1609,7 @@ function CaseTabs({
   onPick,
   related,
   canCreate,
+  canAct,
   onOpen,
   onChanged,
 }: {
@@ -1606,6 +1623,7 @@ function CaseTabs({
   onPick: (f: string) => void;
   related: boolean;
   canCreate: boolean;
+  canAct: boolean;
   onOpen: (id: string) => void;
   onChanged: () => void;
 }) {
@@ -1619,6 +1637,7 @@ function CaseTabs({
     ["links", "연결된 사건"],
     ...(canCreate ? ([["intel", "운영 정보"]] as [TabId, string][]) : []),
     ...(canCreate ? ([["referral", "처리 요청"]] as [TabId, string][]) : []),
+    ["actions", c?.action ? `조치 · ${ACTION_STATE_LABEL[c.action.state] ?? c.action.state}` : "조치 추적"],
     ["rec", recs.length > 1 ? `조사 녹화 ${recs.length}` : "조사 녹화"],
     ["log", `행동 기록 ${events.length}`],
   ];
@@ -1673,6 +1692,7 @@ function CaseTabs({
           </div>
         )}
         {tab === "referral" && canCreate && <ReferralTab id={id} rev={c?.verdict?.rev ?? 0} related={related} />}
+        {tab === "actions" && c && <ActionsTab c={c} canAct={canAct} canRecheck={canCreate} onChanged={onChanged} />}
         {tab === "related" && c && <RelatedTab id={id} c={c} events={events} related={related} canCreate={canCreate} onOpen={onOpen} onChanged={onChanged} />}
         {tab === "rec" && (
           <div className="floor">
@@ -1844,6 +1864,166 @@ function IntelTab({ id, onOpen }: { id: string; onOpen: (id: string) => void }) 
               ) : (
                 <span />
               )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// 조치 추적: 위협 확정 뒤 기관에 요청한 것과 그 뒤(차단·삭제 확인, 재확인에서 다시 나타남, 종결)를 판으로 쌓는다.
+// 재확인은 신고 주소에 다시 접속해 본 결과다(격리된 조사 컨테이너가 하고, 조치를 추적 중이면 정해진 간격마다 저절로)
+function ActionsTab({ c, canAct, canRecheck, onChanged }: { c: CaseOut; canAct: boolean; canRecheck: boolean; onChanged: () => void }) {
+  const [data, setData] = useState<{ actions: Action[]; checks: Check[]; interval: number } | null>(null);
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [state, setState] = useState<ActionState>("requested");
+  const [agency, setAgency] = useState("kisa");
+  const [ref, setRef] = useState("");
+  const [note, setNote] = useState("");
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    let live = true;
+    getActions(c.id)
+      .then((v) => live && setData(v))
+      .catch((e) => live && setErr(e instanceof Error ? e.message : "불러오지 못했습니다"));
+    return () => {
+      live = false;
+    };
+  }, [c.id, tick]);
+  // 진행 중인 재확인이 있으면 끝날 때까지 2초마다 다시 받는다
+  const pending = data?.checks.some((x) => x.state === "pending") ?? false;
+  useEffect(() => {
+    if (!pending) return;
+    const t = setTimeout(() => setTick((n) => n + 1), 2000);
+    return () => clearTimeout(t);
+  }, [pending, data]);
+  if (err) return <div className="floor"><p className="err">{err}</p></div>;
+  if (!data) return <div className="floor"><p className="muted">불러오는 중…</p></div>;
+  const cur = data.actions[0] ?? null;
+  const confirmed = c.verdict?.decision === "threat";
+  const save = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      await saveAction(c.id, { rev: cur?.rev ?? 0, state, agency: state === "requested" ? agency : null, ref, note });
+      setRef("");
+      setNote("");
+      setTick((n) => n + 1);
+      onChanged();
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "저장하지 못했습니다");
+      setTick((n) => n + 1);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const recheck = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      await requestRecheck(c.id);
+      setTick((n) => n + 1);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "재확인을 요청하지 못했습니다");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) : "-");
+  return (
+    <div className="floor actions">
+      <p className="ref-head">
+        <strong>{cur ? ACTION_STATE_LABEL[cur.state] ?? cur.state : "조치 없음"}</strong>
+        {cur?.agency ? ` · ${AGENCY_LABEL[cur.agency] ?? cur.agency}` : ""}
+        {cur?.ref ? ` · 접수 ${cur.ref}` : ""}
+        {cur ? ` · ${cur.actor === "system:recheck" ? "재확인(시스템)" : cur.actor} · ${fmt(cur.created_at)}` : ""}
+        {cur && ["requested", "blocked", "removed", "reappeared"].includes(cur.state) ? ` · ${data.interval}시간마다 재확인` : ""}
+      </p>
+      {msg && <p className="err" role="alert">{msg}</p>}
+      {canAct && confirmed ? (
+        <div className="act-form">
+          <select className="field" value={state} onChange={(e) => setState(e.target.value as ActionState)} aria-label="조치 상태">
+            {(["requested", "blocked", "removed", "closed"] as ActionState[]).map((x) => (
+              <option key={x} value={x}>
+                {ACTION_STATE_LABEL[x]}
+              </option>
+            ))}
+          </select>
+          {state === "requested" && (
+            <select className="field" value={agency} onChange={(e) => setAgency(e.target.value)} aria-label="요청한 기관">
+              {Object.keys(AGENCY_LABEL).map((x) => (
+                <option key={x} value={x}>
+                  {AGENCY_LABEL[x]}
+                </option>
+              ))}
+            </select>
+          )}
+          <input className="field" value={ref} maxLength={100} onChange={(e) => setRef(e.target.value)} placeholder="기관 접수 번호(선택)" aria-label="기관 접수 번호" />
+          <input className="field grow" value={note} maxLength={1000} onChange={(e) => setNote(e.target.value)} placeholder="메모(선택)" aria-label="조치 메모" />
+          <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={save}>
+            기록
+          </button>
+        </div>
+      ) : (
+        <p className="muted small">{confirmed ? "조치 기록은 조사관 이상 담당자 계정만 합니다" : "담당자가 위협으로 확정한 사건에 조치를 기록합니다"}</p>
+      )}
+      <h3 className="sub-h">
+        재확인 {data.checks.length}{" "}
+        {canRecheck && (
+          <button type="button" className="btn btn-ghost btn-sm" disabled={busy || pending} onClick={recheck}>
+            {pending ? "재확인 중…" : "지금 재확인"}
+          </button>
+        )}
+      </h3>
+      {data.checks.length === 0 ? (
+        <p className="muted">재확인 기록 없음</p>
+      ) : (
+        <ul className="rel-list">
+          {data.checks.map((x) => (
+            <li key={x.id} className="rel-row">
+              <span className="rel-site">
+                <span>
+                  <span className={`chip ${x.result === "alive" ? "st-threat" : ""}`}>
+                    {x.state === "pending" ? "확인 중" : x.state === "expired" ? "응답 없음(만료)" : CHECK_RESULT_LABEL[x.result ?? ""] ?? x.result}
+                  </span>{" "}
+                  <span className="mono">{fmt(x.done_at ?? x.requested_at)}</span>
+                  {x.http_status ? <span className="mono"> · HTTP {x.http_status}</span> : null}
+                </span>
+                <span className="muted small">
+                  {x.final_host ? `${clip(x.final_host, 50)} · ` : ""}
+                  {x.title ? `「${clip(x.title, 60)}」 · ` : ""}
+                  {x.requested_by === "system:recheck" ? "정기 재확인" : `${x.requested_by} 요청`}
+                </span>
+              </span>
+              <span />
+              <span />
+            </li>
+          ))}
+        </ul>
+      )}
+      <h3 className="sub-h">조치 기록 {data.actions.length}</h3>
+      {data.actions.length === 0 ? (
+        <p className="muted">기록 없음</p>
+      ) : (
+        <ul className="rel-list">
+          {data.actions.map((a) => (
+            <li key={a.rev} className="rel-row">
+              <span className="rel-site">
+                <span>
+                  판 {a.rev} · <strong>{ACTION_STATE_LABEL[a.state] ?? a.state}</strong>
+                  {a.agency ? ` · ${AGENCY_LABEL[a.agency] ?? a.agency}` : ""}
+                  {a.ref ? ` · 접수 ${a.ref}` : ""}
+                </span>
+                <span className="muted small">
+                  {a.actor === "system:recheck" ? "재확인(시스템)" : a.actor} · {fmt(a.created_at)}
+                  {a.note ? ` · ${clip(a.note, 120)}` : ""}
+                </span>
+              </span>
+              <span />
+              <span />
             </li>
           ))}
         </ul>
