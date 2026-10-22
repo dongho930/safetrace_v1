@@ -19,6 +19,8 @@ import {
   createUser,
   downloadGroupCsv,
   getLinks,
+  getReferral,
+  type Referral,
   listGroups,
   type CaseLinks,
   type RelatedGroup,
@@ -1575,7 +1577,7 @@ function Summary({ c, running, reasons, picked, onPick }: { c: CaseOut | null; r
 const CIRCLED = [..."①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"];
 
 // ── 조사 경과 탭: 근거 화면(기본) · 경로 지도 · 조사 녹화 · 행동 기록 ─────────────
-type TabId = "screens" | "path" | "related" | "links" | "rec" | "log";
+type TabId = "screens" | "path" | "related" | "links" | "referral" | "rec" | "log";
 type VerifyState = { ok: boolean; records: number; errors: string[] } | null;
 
 function CaseTabs({
@@ -1613,6 +1615,7 @@ function CaseTabs({
     ["path", "경로 지도"],
     ["related", `연관 사이트 ${nCands}`],
     ["links", "연결된 사건"],
+    ...(canCreate ? ([["referral", "처리 요청"]] as [TabId, string][]) : []),
     ["rec", recs.length > 1 ? `조사 녹화 ${recs.length}` : "조사 녹화"],
     ["log", `행동 기록 ${events.length}`],
   ];
@@ -1660,6 +1663,7 @@ function CaseTabs({
         {tab === "screens" && <ScreensTab id={id} c={c} events={events} screens={screens} pick={pick} onPick={onPick} />}
         {tab === "path" && c && <PathTab c={c} events={events} />}
         {tab === "links" && <LinksTab id={id} onOpen={onOpen} />}
+        {tab === "referral" && canCreate && <ReferralTab id={id} rev={c?.verdict?.rev ?? 0} related={related} />}
         {tab === "related" && c && <RelatedTab id={id} c={c} events={events} related={related} canCreate={canCreate} onOpen={onOpen} onChanged={onChanged} />}
         {tab === "rec" && (
           <div className="floor">
@@ -1679,6 +1683,85 @@ function CaseTabs({
         )}
       </div>
     </>
+  );
+}
+
+// 처리 요청: 판정 유형에 맞는 처리 기관·참고 조문과 기관 양식에 옮겨 쓸 요청서 초안(조사관 이상).
+// 확정 판정이 없으면 AI 판단 기준 초안이다. 판정이 바뀌면(rev) 다시 받는다
+function ReferralTab({ id, rev, related }: { id: string; rev: number; related: boolean }) {
+  const [r, setR] = useState<Referral | null>(null);
+  const [err, setErr] = useState("");
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (related) return;
+    let live = true;
+    setR(null);
+    setErr("");
+    getReferral(id)
+      .then((v) => live && setR(v))
+      .catch((e) => live && setErr(e instanceof Error ? e.message : "불러오지 못했습니다"));
+    return () => {
+      live = false;
+    };
+  }, [id, rev, related]);
+  if (related) return <div className="floor"><p className="muted">연관 사이트 조사가 끝나면 요청서를 만들 수 있습니다</p></div>;
+  if (err) return <div className="floor"><p className="err">{err}</p></div>;
+  if (!r) return <div className="floor"><p className="muted">불러오는 중…</p></div>;
+  if (!r.applicable) return <div className="floor"><p className="muted">{r.reason_ko || "요청 대상이 아닙니다"}</p></div>;
+  const copy = () => {
+    navigator.clipboard
+      .writeText(r.text)
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      })
+      .catch(() => setErr("복사하지 못했습니다(브라우저 권한)"));
+  };
+  const Org = ({ a, main }: { a: typeof r.agency; main?: boolean }) => (
+    <li className="ref-org">
+      <span className="ref-org-name">
+        {main && <span className="chip st-REVIEW_REQUIRED">처리 기관</span>} {a.name}
+      </span>
+      <span className="muted small">
+        {a.does}
+        {a.when ? ` · ${a.when}` : ""}
+      </span>
+      <span className="mono small">
+        ☎ {a.phone} ·{" "}
+        <a href={a.url} target="_blank" rel="noopener noreferrer">
+          {a.url}
+        </a>
+      </span>
+    </li>
+  );
+  return (
+    <div className="floor referral">
+      <p className="ref-head">
+        <strong>{r.threat_ko}</strong> · {r.basis === "confirmed" ? "담당자 판정 기준" : "AI 판단 기준 초안 — 담당자 판정 뒤 다시 확인"}
+      </p>
+      <ul className="ref-orgs">
+        <Org a={r.agency} main />
+        {r.also.map((a) => (
+          <Org key={a.id} a={a} />
+        ))}
+      </ul>
+      <h3 className="sub-h">참고 조문 (해당 여부는 받는 기관이 판단)</h3>
+      <ul className="ref-laws">
+        {r.laws.map((l) => (
+          <li key={l.cite}>
+            <strong>{l.cite}</strong> <span className="muted">{l.text}</span>
+          </li>
+        ))}
+      </ul>
+      <h3 className="sub-h">
+        요청서 초안{" "}
+        <button type="button" className="btn btn-ghost btn-sm" onClick={copy}>
+          {copied ? "복사함" : "복사"}
+        </button>
+      </h3>
+      <pre className="ref-text">{r.text}</pre>
+      <p className="muted small">{r.notice}</p>
+    </div>
   );
 }
 

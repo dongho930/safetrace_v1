@@ -477,3 +477,32 @@ export function cleanCase(v: unknown): CaseOut | null {
       : null,
   };
 }
+
+// 처리 기관 안내·요청서 초안(조사관 이상). 기관·조문은 서버의 고정 표에서, 요청서 글의 제목·주소는 조사 대상 페이지 값을
+// 서버가 한 줄로 정리한 것이다. 화면에는 글자로만 넣는다(링크로 만드는 것은 서버 고정 표의 기관 주소뿐)
+export type Agency = { id: string; name: string; phone: string; url: string; does: string; when?: string };
+export type Referral =
+  | { applicable: false; reason_ko: string; notice: string }
+  | { applicable: true; threat_ko: string; basis: "confirmed" | "ai"; draft: boolean; agency: Agency; also: Agency[]; laws: { cite: string; text: string }[]; subject: string; text: string; notice: string };
+const agency = (x: unknown): Agency[] =>
+  isObj(x) && typeof x.name === "string" && typeof x.url === "string" && /^https:\/\/[a-z0-9.-]+\/$/.test(x.url)
+    ? [{ id: text(x.id, 16), name: x.name.slice(0, 80), phone: text(x.phone, 16), url: x.url, does: text(x.does, 120), when: text(x.when, 120) }]
+    : [];
+export const getReferral = async (id: string): Promise<Referral> => {
+  const v = await req<unknown>(`/api/cases/${encodeURIComponent(id)}/referral`);
+  const o = isObj(v) ? v : {};
+  const ag = agency(o.agency)[0];
+  if (o.applicable !== true || !ag) return { applicable: false, reason_ko: text(o.reason_ko, 200), notice: text(o.notice, 400) };
+  return {
+    applicable: true,
+    threat_ko: text(o.threat_ko, 32),
+    basis: o.basis === "confirmed" ? "confirmed" : "ai",
+    draft: o.draft !== false,
+    agency: ag,
+    also: list(o.also).slice(0, 5).flatMap(agency),
+    laws: list(o.laws).slice(0, 5).flatMap((x) => (isObj(x) && typeof x.cite === "string" ? [{ cite: x.cite.slice(0, 120), text: text(x.text, 300) }] : [])),
+    subject: text(o.subject, 300),
+    text: text(o.text, 8000),
+    notice: text(o.notice, 400),
+  };
+};

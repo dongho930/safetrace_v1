@@ -1259,3 +1259,14 @@ def export_report(case_id: str, fmt: str, p: Annotated[Principal, Depends(need("
     if fmt == "json":
         return JSONResponse(rep, headers=headers)
     return Response(_report_pdf(rep), media_type="application/pdf", headers=headers)
+
+
+@app.get("/api/cases/{case_id}/referral")
+def get_referral(case_id: str, p: Annotated[Principal, Depends(need("investigator"))]):
+    """처리 기관 안내와 요청서 초안(보고서 요약에서 만든다). 기관에 옮겨 쓰는 글이라 조사관 이상, 감사로그."""
+    c = _get_case(case_id)
+    if c.status not in TERMINAL:
+        raise HTTPException(409, "조사가 끝난 뒤에 요청서를 만들 수 있습니다")
+    store.audit(p.name, "referral.view", case_id)
+    pkg, records, _ = _package_snapshot(c, p.name)
+    return _report_of(pkg, records)["referral"]

@@ -438,3 +438,12 @@ button.reason:hover { border-color: var(--line-strong); }
 .row-badge { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 4px; font-size: 11px; font-weight: 700; color: var(--primary); background: var(--primary-tint); }
 .source-filter { width: auto; padding-right: 24px; }
 .sub-h { margin: 14px 0 4px; font-size: 13px; font-weight: 700; color: var(--ink-2); }
+
+/* 처리 요청 탭: 처리 기관·참고 조문·요청서 초안 */
+.referral .ref-head { margin: 0 0 8px; font-size: 13px; color: var(--ink-2); }
+.ref-orgs { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.ref-org { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: var(--r-card); background: var(--surface); }
+.ref-org-name { font-weight: 700; font-size: 13px; }
+.ref-org a { color: var(--primary); }
+.ref-laws { margin: 0; padding-left: 18px; font-size: 12.5px; display: grid; gap: 4px; }
+.ref-text { margin: 6px 0; padding: 10px 12px; max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; font-size: 12.5px; line-height: 1.6; font-variant-numeric: tabular-nums; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-card); }
