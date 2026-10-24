@@ -40,6 +40,18 @@ BS = chr(92)
     ("https://user:pw@한국.example:443/로그인", None, {("url", "https://xn--3e0b707e.example/로그인"),
                                                      ("domain", "xn--3e0b707e.example")}, set()),
     ("javascript:alert(1)", None, set(), {"format"}),
+    # 최종 주소가 다른 사이트면 에이전트가 누른 링크일 수 있다(피싱 화면의 연락 버튼 → api.whatsapp.com, 로컬 사건에서 관찰)
+    ("https://dana.blogspot.com/p", "https://api.whatsapp.com/send", {("url", "https://dana.blogspot.com/p"),
+                                                                       ("domain", "dana.blogspot.com")}, {"elsewhere"}),
+    ("https://a.blogspot.com/p", "https://b.blogspot.com/q", {("url", "https://a.blogspot.com/p"), ("domain", "a.blogspot.com")},
+     {"elsewhere"}),  # 공용 호스팅은 같은 호스트만 같은 운영자
+    # 같은 사이트의 다른 하위 도메인, 단축 URL 이 보낸 목적지는 낸다
+    ("https://login.evil.example/a", "https://www.evil.example/b", {
+        ("url", "https://login.evil.example/a"), ("domain", "login.evil.example"), ("url", "https://www.evil.example/b"),
+        ("domain", "www.evil.example")}, set()),
+    ("https://lrl.kr/AbC", "https://n-payost.shop/x", {("url", "https://lrl.kr/AbC"), ("url", "https://n-payost.shop/x"),
+                                                       ("domain", "n-payost.shop")}, {"shortener"}),
+    ("http://testpages:8900/smish/", "http://testpages-alt:8900/x", set(), {"internal"}),  # 점 없는 내부 이름
 ])
 def test_network_indicators(url, final, want, excluded):
     got, ex = ioc.network_indicators(url, final)
@@ -52,10 +64,11 @@ def test_contact_indicators_and_stix_urls():
     got, ex = ioc.contact_indicators([
         {"kind": "telegram", "value": "abc_d"}, {"kind": "kakao", "value": "o/sTestOnly1"}, {"kind": "kakao", "value": "id:x1"},
         {"kind": "form", "value": "https://www.facebook.com/x"}, {"kind": "form", "value": "https://collect.example.net/p"},
-        {"kind": "phone", "value": "01000005678"}, {"kind": "nope", "value": "x"}, {"kind": "telegram", "value": "a b"}])
+        {"kind": "phone", "value": "01000005678"}, {"kind": "nope", "value": "x"}, {"kind": "telegram", "value": "a b"},
+        {"kind": "form", "value": "https://translate.googleapis.com/translate_voting"}])  # 번역 위젯(Meta 키트에서 관찰)
     assert [(t, v) for t, v, _ in got] == [("telegram", "abc_d"), ("kakao", "o/sTestOnly1"), ("kakao", "id:x1"),
                                            ("form", "https://collect.example.net/p"), ("phone", "01000005678")]
-    assert ex == {("official", "form", "www.facebook.com")}
+    assert ex == {("official", "form", "www.facebook.com"), ("widget", "form", "translate.googleapis.com")}
     assert [ioc.contact_url(t, v) for t, v, _ in got] == ["https://t.me/abc_d", "https://open.kakao.com/o/sTestOnly1", None,
                                                           "https://collect.example.net/p", None]
 

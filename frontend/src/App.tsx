@@ -485,8 +485,8 @@ const IOC_TYPE: Record<string, string> = dict({
 });
 const IOC_EXCLUDED: Record<string, string> = dict({
   official: "공식 브랜드·사행사업자 도메인", generic: "흔한 대형 사이트", service: "사이트 빌더·서비스 홈", internal: "내부·예약 IP",
-  shortener: "단축 서비스(호스트)", shortener_page: "단축 서비스의 안내 화면", shared_root: "공용 호스팅 본 도메인", pii: "주소에 개인정보 모양",
-  format: "형식 오류",
+  shortener: "단축 서비스(호스트)", shortener_page: "단축 서비스의 안내 화면", shared_root: "공용 호스팅 본 도메인",
+  elsewhere: "다른 사이트의 최종 주소(누른 링크일 수 있음)", widget: "입력 위젯(번역 등)", pii: "주소에 개인정보 모양", format: "형식 오류",
 });
 const IOC_DAYS = [1, 7, 30, 90];
 
@@ -525,7 +525,8 @@ function IocDialog({ onClose }: { onClose: () => void }) {
     <Dialog title="IOC 내보내기" onClose={onClose}>
       <p className="small" style={{ margin: 0 }}>
         담당자가 <b>위협으로 확정</b>한 사건의 지표(신고 주소·최종 주소의 URL·도메인·IP)를 다른 기관·차단 장비가 읽는 형식으로 내려받습니다. 공식 브랜드 도메인·흔한 대형
-        사이트·단축 서비스와 공용 호스팅의 본 도메인, 개인정보가 든 주소는 빼고 URL 의 쿼리는 지웁니다.
+        사이트·단축 서비스와 공용 호스팅의 본 도메인, 개인정보가 든 주소는 빼고 URL 의 쿼리는 지웁니다. 최종 주소는 신고 주소와 같은 사이트이거나 신고 주소가 단축 URL 일
+        때만 넣습니다(다른 사이트면 조사 중 누른 링크일 수 있어서).
       </p>
       <div className="ioc-opts">
         <label>

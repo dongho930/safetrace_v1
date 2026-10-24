@@ -23,6 +23,7 @@ from urllib.parse import unquote, urlsplit
 
 from .decision.brands import SHARED_HOSTING, SHORTENER_HOSTS, on_domain, site_of
 from .masking import mask_pii
+from .related import WIDGET_FORM_HOSTS
 
 DAYS_MAX = 90
 CASES_MAX = 1000  # 한 번에 내보내는 사건(확정 시각 최신순)
@@ -39,7 +40,8 @@ TYPE_KO = {"url": "URL", "domain": "도메인", "ipv4": "IPv4", "ipv6": "IPv6", 
 ROLE_KO = {"start": "신고 주소", "final": "최종 주소", "contact": "페이지에 적힌 운영 정보"}
 EXCLUDED_KO = {"official": "공식 브랜드·사행사업자 도메인", "generic": "흔한 대형 사이트", "service": "사이트 빌더·서비스 홈",
                "internal": "내부·예약 IP", "shortener": "단축 서비스(호스트)", "shortener_page": "단축 서비스의 안내 화면",
-               "shared_root": "공용 호스팅 본 도메인", "pii": "개인정보 모양", "format": "형식 오류"}
+               "shared_root": "공용 호스팅 본 도메인", "elsewhere": "다른 사이트의 최종 주소(누른 링크일 수 있음)",
+               "widget": "입력 위젯(번역 등)", "pii": "개인정보 모양", "format": "형식 오류"}
 CSV_HEADER = ["유형", "값", "위협 유형", "근거", "사건 수", "사건 id", "처음 확정(UTC)", "마지막 확정(UTC)", "연관 묶음"]
 
 THREAT_KO = {"phishing": "피싱", "scam": "사기", "illegal_gambling": "불법 도박", "malware": "악성코드"}
@@ -54,8 +56,8 @@ def _host_reason(host: str) -> str | None:
     from .agent.candidates import GENERIC_SITES, PLATFORM_SITES, SERVICE_HOMES, _official
     from .related import _non_public_ip
 
-    if _non_public_ip(host):
-        return "internal"
+    if _non_public_ip(host) or "." not in host.strip("[]").replace(":", "."):
+        return "internal"  # 내부·예약 IP 와 점 없는 이름(시험 서버 testpages·localhost 같은 내부 이름)
     if _official(host):
         return "official"
     site = site_of(host)
@@ -89,11 +91,34 @@ def _ascii_host(host: str) -> str | None:
         return None
 
 
+def _same_site_key(host: str) -> str:
+    return host if on_domain(host, SHARED_HOSTING) else site_of(host)
+
+
+def _host_of(u: object) -> str:
+    try:
+        return _ascii_host(urlsplit(u).hostname or "") or "" if isinstance(u, str) else ""
+    except ValueError:
+        return ""
+
+
 def network_indicators(url: str | None, final_url: str | None) -> tuple[list[tuple[str, str, str]], set[tuple[str, str, str]]]:
-    """신고 주소·최종 주소에서 (유형, 값, 근거) 목록과 뺀 것 {(이유, 유형, 값)}."""
+    """신고 주소·최종 주소에서 (유형, 값, 근거) 목록과 뺀 것 {(이유, 유형, 값)}.
+
+    최종 주소는 조사가 끝난 화면이라 에이전트가 누른 링크의 다른 사이트일 수 있다(로컬 사건에서 관찰: 피싱 화면의 연락
+    버튼 → api.whatsapp.com, 가짜 거래소 화면의 링크 → 진짜 거래소). 그래서 신고 주소와 같은 사이트(공용 호스팅은 같은
+    호스트)이거나 신고 주소가 단축 URL 일 때(단축 URL 이 보낸 목적지)만 낸다. 다른 사이트의 최종 주소는 'elsewhere' 로 센다."""
     out: list[tuple[str, str, str]] = []
     excluded: set[tuple[str, str, str]] = set()
+    start_host = _host_of(url)
+    via_shortener = bool(start_host) and on_domain(start_host, SHORTENER_HOSTS)
     for role, u in (("start", url), ("final", final_url)):
+        fh = _host_of(u) if role == "final" else ""
+        if fh and fh != start_host and not via_shortener and (
+                not start_host or _same_site_key(fh) != _same_site_key(start_host)):
+            if not (_host_reason(fh) or fh in SHARED_HOSTING):  # 공식·흔한 사이트 등이면 아래 규칙의 이유로 센다
+                excluded.add(("elsewhere", "domain", fh))
+                continue
         if not isinstance(u, str) or not u:
             continue
         try:
@@ -152,7 +177,7 @@ def contact_indicators(items: list[dict]) -> tuple[list[tuple[str, str, str]], s
                 host = _ascii_host(urlsplit(value).hostname or "")
             except ValueError:
                 host = None
-            reason = "format" if not host else _host_reason(host)
+            reason = "format" if not host else _host_reason(host) or ("widget" if on_domain(host, WIDGET_FORM_HOSTS) else None)
             if reason:
                 excluded.add((reason, "form", host or "-"))
                 continue
