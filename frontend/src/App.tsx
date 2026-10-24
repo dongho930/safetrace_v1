@@ -1801,8 +1801,15 @@ function Summary({ c, running, reasons, picked, onPick }: { c: CaseOut | null; r
 }
 const CIRCLED = [..."①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"];
 
-// ── 조사 경과 탭: 근거 화면(기본) · 경로 지도 · 조사 녹화 · 행동 기록 ─────────────
+// ── 조사 경과 탭: 성격별 세 묶음(증거 → 연관 → 조치, 분석가가 일하는 순서). 기본은 근거 화면 ─────────────
 type TabId = "screens" | "path" | "related" | "links" | "intel" | "referral" | "actions" | "rec" | "log";
+// 증거: 이 사이트에서 본 것(화면 → 흐름 → 영상 → 원본 기록), 연관: 같은 조직(이 신고에서 찾은 사이트 → 운영자를 가리키는 값 →
+// 그 둘로 이어진 다른 사건), 조치: 요청서 → 요청 뒤 추적
+const TAB_GROUPS: { id: string; name: string; tabs: TabId[] }[] = [
+  { id: "evidence", name: "증거", tabs: ["screens", "path", "rec", "log"] },
+  { id: "related", name: "연관", tabs: ["related", "intel", "links"] },
+  { id: "action", name: "조치", tabs: ["referral", "actions"] },
+];
 type VerifyState = { ok: boolean; records: number; errors: string[] } | null;
 
 function CaseTabs({
@@ -1837,17 +1844,22 @@ function CaseTabs({
   const nCands = (c?.candidates ?? []).filter((x) => typeof x !== "string").length;
   // 녹화: 원래 주소와 연관 후보 하위 조사마다 하나씩. 한 재생 막대로 이어 재생한다(사건이 바뀌면 처음부터)
   const recs = useMemo(() => recordings(events), [events]);
-  const tabs: [TabId, string][] = [
-    ["screens", `근거 화면 ${screens.length}`],
-    ["path", "경로 지도"],
-    ["related", `연관 사이트 ${nCands}`],
-    ["links", "연결된 사건"],
-    ...(canCreate ? ([["intel", "운영 정보"]] as [TabId, string][]) : []),
-    ...(canCreate ? ([["referral", "처리 요청"]] as [TabId, string][]) : []),
-    ["actions", c?.action ? `조치 · ${ACTION_STATE_LABEL[c.action.state] ?? c.action.state}` : "조치 추적"],
-    ["rec", recs.length > 1 ? `조사 녹화 ${recs.length}` : "조사 녹화"],
-    ["log", `행동 기록 ${events.length}`],
-  ];
+  const label: Record<TabId, string> = {
+    screens: `근거 화면 ${screens.length}`,
+    path: "경로 지도",
+    rec: recs.length > 1 ? `조사 녹화 ${recs.length}` : "조사 녹화",
+    log: `행동 기록 ${events.length}`,
+    related: `연관 사이트 ${nCands}`,
+    intel: "운영 정보",
+    links: "연결된 사건",
+    referral: "처리 요청",
+    actions: c?.action ? `조치 · ${ACTION_STATE_LABEL[c.action.state] ?? c.action.state}` : "조치 추적",
+  };
+  // 운영 정보·처리 요청은 조사관 이상만
+  const shown = (t: TabId) => canCreate || (t !== "intel" && t !== "referral");
+  const groups = TAB_GROUPS.map((g) => ({ ...g, tabs: g.tabs.filter(shown) })).filter((g) => g.tabs.length);
+  // ←→ 는 묶음을 넘어 화면에 보이는 순서대로 옮긴다
+  const tabs: [TabId, string][] = groups.flatMap((g) => g.tabs.map((t) => [t, label[t]] as [TabId, string]));
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
   const onKey = (e: React.KeyboardEvent, i: number) => {
     const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
@@ -1860,24 +1872,39 @@ function CaseTabs({
   return (
     <>
       <div className="tabs" role="tablist" aria-label="조사 경과 보기">
-        {tabs.map(([t, label], i) => (
-          <button
-            key={t}
-            ref={(el) => {
-              refs.current[i] = el;
-            }}
-            type="button"
-            role="tab"
-            id={`tab-${t}`}
-            aria-selected={tab === t}
-            aria-controls={`panel-${t}`}
-            tabIndex={tab === t ? 0 : -1}
-            className="tab"
-            onClick={() => onTab(t)}
-            onKeyDown={(e) => onKey(e, i)}
-          >
-            {label}
-          </button>
+        {groups.map((g) => (
+          <div key={g.id} className="tab-group" role="presentation" data-active={g.tabs.includes(tab) || undefined}>
+            {/* 묶음 이름은 글자로만 보이고, 화면 낭독기는 각 탭의 설명(aria-describedby)으로 듣는다 */}
+            <span className="tab-group-name" id={`tabgroup-${g.id}`} aria-hidden="true">
+              {g.name}
+            </span>
+            <div className="tab-group-row" role="presentation">
+              {g.tabs.map((t) => {
+                const i = tabs.findIndex(([x]) => x === t);
+                return (
+                  <button
+                    key={t}
+                    ref={(el) => {
+                      refs.current[i] = el;
+                    }}
+                    type="button"
+                    role="tab"
+                    id={`tab-${t}`}
+                    aria-selected={tab === t}
+                    aria-controls={`panel-${t}`}
+                    aria-describedby={`tabgroup-${g.id}`}
+                    tabIndex={tab === t ? 0 : -1}
+                    className="tab"
+                    data-group={g.id}
+                    onClick={() => onTab(t)}
+                    onKeyDown={(e) => onKey(e, i)}
+                  >
+                    {label[t]}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         ))}
         <div className="spacer" />
         {tab === "path" && (
