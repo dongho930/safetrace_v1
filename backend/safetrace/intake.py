@@ -1,7 +1,9 @@
 """자동 수집: 공개 피싱 피드에서 주소를 받아 사람 손 없이 조사를 접수한다(사용자 결정 2026-10-24 A안).
 
-- 출처는 서버 코드에 고정한 이름만(agent/feeds.py FEEDS). 받는 일은 격리된 조사 컨테이너가 검문 프록시로 GET 만 하고,
-  API 는 자기가 만든 대기 번호(FeedFetch)의 결과만 한 번 받는다(재확인과 같은 방식)
+- 출처는 서버 코드에 고정한 이름만(agent/feeds.py FEEDS). 받는 일은 브라우저 조사 워커와 떨어진 수집 컨테이너(feeder,
+  격리망·검문 프록시로 GET 만)가 하고, API 는 자기가 만든 대기 번호(FeedFetch)의 결과만, feeder 와 API 만 가진 키의 서명이
+  맞을 때 한 번 받는다. 조사 대상 페이지를 여는 브라우저 워커가 뚫려도 피드 결과를 꾸며 임의 주소를 자동 조사시키지 못한다
+  (Codex 1회차 F1)
 - 받은 글은 믿지 않는 값이다: 줄 수·길이 상한, 주소 형식 검사(netguard.parse_url), 같은 호스트는 며칠 안에 다시 넣지 않음,
   같은 키트 모양(공용 호스팅이면 호스팅 + 첫 경로, 아니면 등록 도메인)은 한 번에 몇 개까지, 한 번에 넣는 수 상한
 - 사건은 끝나지 않은 자동 수집 사건이 한도(기본 1) 아래일 때만 하나씩 만든다: 조사 컨테이너가 하나여도 사람 신고가 길어야
@@ -12,6 +14,8 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import hmac
 import io
 import itertools
 from collections import Counter
@@ -33,6 +37,12 @@ FETCH_TTL = timedelta(minutes=10)  # 이 안에 결과가 오지 않은 받기�
 MAX_LINES = 3000
 URL_MAX = 2048
 SKIP_KEYS = ("format", "same_host", "seen_host", "kit", "over_cap")
+
+
+def feed_mac(key: bytes, fetch_id: int, source: str, text: str) -> str:
+    """피드 결과 서명: 받기 번호·출처·본문 해시에 묶는다(다른 번호·출처로 옮겨 쓸 수 없다)."""
+    digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+    return hmac.new(key, f"safetrace.feed/1|{fetch_id}|{source}|{digest}".encode(), hashlib.sha256).hexdigest()
 
 
 def parse(source: str, text: str, truncated: bool) -> list[str]:
@@ -176,14 +186,20 @@ def request_fetch(store: Store, source: str, at: datetime | None = None) -> Feed
 
 
 def record_fetch(store: Store, fetch_id: object, res: object, *, seen_hosts: set[str], allowed_ports: list[int],
-                 cap: int, kit_max: int, at: datetime | None = None) -> FeedFetch | None:
-    """워커가 보낸 받기 결과. API 가 만든 대기 중인 번호일 때만 한 번 받고, 고른 주소를 대기열에 넣는다."""
+                 cap: int, kit_max: int, key: bytes | None, at: datetime | None = None) -> FeedFetch | None:
+    """수집 컨테이너가 보낸 받기 결과. API 가 만든 대기 중인 번호이고, key 가 있으면 그 키의 서명(feed_mac)이 맞을 때만 한 번
+    받아 고른 주소를 대기열에 넣는다. key=None 은 같은 프로세스에서 받은 결과(개발 모드)만 쓴다."""
     if type(fetch_id) is not int or not isinstance(res, dict):
         return None
     with store.session() as s, s.begin():
         f = s.get(FeedFetch, fetch_id, with_for_update=True)
         if f is None or f.state != "pending":
             return None
+        if key is not None:
+            text = res.get("text") if isinstance(res.get("text"), str) else ""
+            mac = res.get("mac") if isinstance(res.get("mac"), str) else ""
+            if not key or not hmac.compare_digest(mac, feed_mac(key, f.id, f.source, text)):
+                return None  # 서명이 없거나 맞지 않는 결과는 받지 않는다(대기 줄은 그대로 두어 진짜 결과를 기다린다)
         f.done_at = _at(at)
         if res.get("ok") is not True or not isinstance(res.get("text"), str):
             f.state = "failed"

@@ -7,10 +7,11 @@ from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import select
 
 from safetrace import accounts, intake
-from safetrace.agent import feeds, worker
+from safetrace.agent import feeder, feeds
 from safetrace.store import AuditLog, Case, FeedFetch, FeedItem, now
 from tests.conftest import INVESTIGATOR, SERVICE_ADMIN, VIEWER
 
@@ -84,7 +85,7 @@ def test_fetch_result_only_once_for_own_pending_number(clean_intake):
     store = clean_intake
     f = intake.request_fetch(store, "openphish")
     assert f is not None and intake.request_fetch(store, "openphish") is None  # 같은 출처에 대기 중인 받기는 하나
-    kw = {"seen_hosts": set(), "allowed_ports": PORTS, "cap": 30, "kit_max": 2}
+    kw = {"seen_hosts": set(), "allowed_ports": PORTS, "cap": 30, "kit_max": 2, "key": None}
     assert intake.record_fetch(store, 10**9, {"ok": True, "text": "https://x.example/"}, **kw) is None  # 모르는 번호
     assert intake.record_fetch(store, str(f.id), {"ok": True, "text": "https://x.example/"}, **kw) is None  # 정수만
     tag = secrets.token_hex(4)
@@ -103,11 +104,11 @@ def test_due_sources_intervals(clean_intake):
     t0 = now() + timedelta(days=30)  # 다른 시험·실행이 남긴 받기보다 늦게
     f = intake.request_fetch(store, "phishtank", at=t0)
     assert "phishtank" not in intake.due_sources(store, ["phishtank"], at=t0 + timedelta(hours=7))  # 대기 중
-    intake.record_fetch(store, f.id, {"ok": True, "text": PT_HEAD}, seen_hosts=set(), allowed_ports=PORTS, cap=1, kit_max=1)
+    intake.record_fetch(store, f.id, {"ok": True, "text": PT_HEAD}, seen_hosts=set(), allowed_ports=PORTS, cap=1, kit_max=1, key=None)
     assert "phishtank" not in intake.due_sources(store, ["phishtank"], at=t0 + timedelta(hours=5))
     assert "phishtank" in intake.due_sources(store, ["phishtank"], at=t0 + timedelta(hours=6, minutes=1))
     g = intake.request_fetch(store, "phishtank", at=t0 + timedelta(hours=7))
-    intake.record_fetch(store, g.id, {"ok": False, "reason": "http_429"}, seen_hosts=set(), allowed_ports=PORTS, cap=1, kit_max=1)
+    intake.record_fetch(store, g.id, {"ok": False, "reason": "http_429"}, seen_hosts=set(), allowed_ports=PORTS, cap=1, kit_max=1, key=None)
     assert "phishtank" in intake.due_sources(store, ["phishtank"], at=t0 + timedelta(hours=8, minutes=1))  # 실패는 1시간 뒤
     assert intake.due_sources(store, ["nope"], at=t0) == []
     # 결과가 오지 않은 받기는 만료되고, 1시간 뒤 다시 받는다
@@ -128,6 +129,21 @@ def client():
 
 def h(tok):
     return {"Authorization": f"Bearer {tok}"}
+
+
+KEY = b"k" * 32
+
+
+@pytest.fixture
+def feed_key(monkeypatch):
+    from safetrace.api import main as m
+
+    monkeypatch.setattr(m.settings, "feed_key", SecretStr(KEY.decode()))
+    return KEY
+
+
+def _signed(fid: int, source: str, text: str) -> dict:
+    return {"ok": True, "text": text, "truncated": False, "mac": intake.feed_mac(KEY, fid, source, text)}
 
 
 @pytest.fixture(scope="module")
@@ -151,7 +167,7 @@ def test_toggle_is_admin_human_only(client, admin, clean_intake):
     assert acts[-2:] == ["intake.enable", "intake.disable"]
 
 
-def test_tick_requests_fetch_and_creates_one_case_at_a_time(client, admin, clean_intake, monkeypatch):
+def test_tick_requests_fetch_and_creates_one_case_at_a_time(client, admin, clean_intake, monkeypatch, feed_key):
     from safetrace.api import main as m
 
     store = clean_intake
@@ -165,7 +181,7 @@ def test_tick_requests_fetch_and_creates_one_case_at_a_time(client, admin, clean
     assert sorted(src for _, src in fetches) == ["openphish", "phishtank"]
     tag = secrets.token_hex(4)
     fid = dict((src, i) for i, src in fetches)["openphish"]
-    m.record_feed(fid, {"ok": True, "text": "\n".join(f"https://n{i}-{tag}.example/login" for i in range(5)), "truncated": False})
+    m.record_feed(fid, _signed(fid, "openphish", "\n".join(f"https://n{i}-{tag}.example/login" for i in range(5))))
     assert m.intake_tick(at=t) == 1  # 끝나지 않은 자동 사건 한도(1)
     assert m.intake_tick(at=t) == 0  # 앞 사건이 끝나기 전에는 더 만들지 않는다
     cid, url = jobs[0]
@@ -194,7 +210,7 @@ def test_tick_requests_fetch_and_creates_one_case_at_a_time(client, admin, clean
     assert m.intake_tick(at=t) == 0
 
 
-def test_daily_cap(client, admin, clean_intake, monkeypatch):
+def test_daily_cap(client, admin, clean_intake, monkeypatch, feed_key):
     from safetrace.api import main as m
 
     monkeypatch.setattr(m, "enqueue", lambda cid, url: None)
@@ -203,11 +219,11 @@ def test_daily_cap(client, admin, clean_intake, monkeypatch):
     monkeypatch.setattr(m.settings, "intake_daily_max", 0)
     client.post("/api/intake", json={"enabled": True}, headers=h(admin[1]))
     f = intake.request_fetch(clean_intake, "openphish", at=now() + timedelta(days=90))
-    m.record_feed(f.id, {"ok": True, "text": f"https://cap-{secrets.token_hex(4)}.example/"})
+    m.record_feed(f.id, _signed(f.id, "openphish", f"https://cap-{secrets.token_hex(4)}.example/"))
     assert m.intake_tick() == 0
 
 
-# ── 워커 ─────────────────────────
+# ── 수집 컨테이너(feeder) ─────────────────────────
 class _FakeRedis:
     def __init__(self):
         self.added = []
@@ -216,16 +232,26 @@ class _FakeRedis:
         self.added.append((stream, fields))
 
 
-def test_worker_fetches_only_named_sources(monkeypatch):
+def test_feeder_fetches_only_named_sources_and_signs(monkeypatch):
     calls = []
-    monkeypatch.setattr(worker, "fetch_feed", lambda src, proxy, allow: calls.append(src) or {"ok": True, "text": "x"})
+    monkeypatch.setattr(feeder, "fetch", lambda src, proxy, allow: calls.append(src) or {"ok": True, "text": "https://x.example/"})
     r = _FakeRedis()
     s = type("S", (), {"egress_proxy": None, "test_allowlist": []})()
-    worker.run_feed(r, s, {"fetch_id": "7", "source": "https://evil.example/feed"})  # 주소를 넘겨도 받지 않는다
-    worker.run_feed(r, s, {"fetch_id": "x", "source": "openphish"})
+    feeder.run_one(r, s, KEY, {"fetch_id": "7", "source": "https://evil.example/feed"})  # 주소를 넘겨도 받지 않는다
+    feeder.run_one(r, s, KEY, {"fetch_id": "x", "source": "openphish"})
     assert calls == [] and r.added == []
-    worker.run_feed(r, s, {"fetch_id": "7", "source": "openphish"})
+    feeder.run_one(r, s, KEY, {"fetch_id": "7", "source": "openphish"})
     assert calls == ["openphish"] and r.added[0][1]["feed_id"] == "7" and r.added[0][1]["case_id"] == ""
+    assert json.loads(r.added[0][1]["payload"])["mac"] == intake.feed_mac(KEY, 7, "openphish", "https://x.example/")
+
+
+def test_browser_worker_does_not_take_feed_jobs():
+    """피드 받기는 수집 컨테이너만: 조사 대상 페이지를 여는 브라우저 워커는 st:feeds 를 읽지 않는다."""
+    import inspect
+
+    from safetrace.agent import worker
+
+    assert "st:feeds" not in inspect.getsource(worker)
 
 
 def test_feed_fetch_needs_egress_proxy():
@@ -234,7 +260,7 @@ def test_feed_fetch_needs_egress_proxy():
     assert out["ok"] is False and out["reason"] == "no_egress_proxy"
 
 
-def test_next_case_starts_when_one_finishes(client, admin, clean_intake, monkeypatch):
+def test_next_case_starts_when_one_finishes(client, admin, clean_intake, monkeypatch, feed_key):
     """자동 수집 사건이 끝나면 바퀴를 기다리지 않고 바로 다음 것을 접수한다(조사 컨테이너가 쉬지 않게)."""
     from safetrace.api import main as m
 
@@ -244,10 +270,53 @@ def test_next_case_starts_when_one_finishes(client, admin, clean_intake, monkeyp
     client.post("/api/intake", json={"enabled": True}, headers=h(admin[1]))
     f = intake.request_fetch(clean_intake, "openphish", at=now() + timedelta(days=120))
     tag = secrets.token_hex(4)
-    m.record_feed(f.id, {"ok": True, "text": f"https://x1-{tag}.example/\nhttps://x2-{tag}.example/"})
+    m.record_feed(f.id, _signed(f.id, "openphish", f"https://x1-{tag}.example/\nhttps://x2-{tag}.example/"))
     assert m._intake_drip() == 1
     m.record_event(jobs[0], {"type": "status", "status": "COMPLETED", "reason": "agent_finished"})
     assert len(jobs) == 2  # 끝난 이벤트를 받자마자 다음 사건
     client.post("/api/intake", json={"enabled": False}, headers=h(admin[1]))
     m.record_event(jobs[1], {"type": "status", "status": "COMPLETED", "reason": "agent_finished"})
     assert len(jobs) == 2  # 꺼져 있으면 만들지 않는다
+
+
+# ── Codex 1회차 정탐 재현 ─────────────────────────
+def test_forged_feed_result_is_rejected(client, admin, clean_intake, monkeypatch, feed_key):
+    """F1: 브라우저 워커도 Redis 이벤트를 쓸 수 있다. feeder 의 서명이 없거나 다른 번호·출처·본문의 서명이면 받지 않고,
+    대기 줄은 그대로 두어 진짜 결과를 받는다."""
+    from safetrace.api import main as m
+
+    jobs = []
+    monkeypatch.setattr(m, "enqueue", lambda cid, url: jobs.append(url))
+    monkeypatch.setattr(m, "enqueue_feed", lambda fid, src: None)
+    client.post("/api/intake", json={"enabled": True}, headers=h(admin[1]))
+    f = intake.request_fetch(clean_intake, "openphish", at=now() + timedelta(days=150))
+    other = intake.request_fetch(clean_intake, "phishtank", at=now() + timedelta(days=150))
+    tag = secrets.token_hex(4)
+    evil, real = f"https://target-{tag}.example/", f"https://real-{tag}.example/"
+    m.record_feed(f.id, {"ok": True, "text": evil})                                                         # 서명 없음
+    m.record_feed(f.id, {"ok": True, "text": evil, "mac": "0" * 64})                                        # 틀린 서명
+    m.record_feed(f.id, {"ok": True, "text": evil, "mac": intake.feed_mac(KEY, other.id, "phishtank", evil)})  # 다른 번호
+    m.record_feed(f.id, {"ok": True, "text": evil, "mac": intake.feed_mac(KEY, f.id, "phishtank", evil)})      # 다른 출처
+    m.record_feed(f.id, {**_signed(f.id, "openphish", real), "text": evil})                                 # 본문 바꿈
+    monkeypatch.setattr(m.settings, "feed_key", SecretStr(""))
+    m.record_feed(f.id, {"ok": True, "text": evil, "mac": intake.feed_mac(b"", f.id, "openphish", evil)})     # 키가 없는 API
+    monkeypatch.setattr(m.settings, "feed_key", SecretStr(KEY.decode()))
+    assert m._intake_drip() == 0 and jobs == []
+    with clean_intake.session() as s:
+        assert s.get(FeedFetch, f.id).state == "pending"  # 진짜 결과를 기다린다
+    m.record_feed(f.id, _signed(f.id, "openphish", real))
+    assert m._intake_drip() == 1 and jobs == [real]
+
+
+def test_disabled_intake_creates_nothing_even_if_queued(client, admin, clean_intake, monkeypatch, feed_key):
+    """F2: 끈 뒤에는 대기열에 주소가 있어도, 이미 시작한 바퀴·끝난 사건의 다음 접수가 새 사건을 만들지 않는다(잠금 안에서 다시 봄)."""
+    from safetrace.api import main as m
+
+    jobs = []
+    monkeypatch.setattr(m, "enqueue", lambda cid, url: jobs.append(url))
+    monkeypatch.setattr(m, "enqueue_feed", lambda fid, src: None)
+    client.post("/api/intake", json={"enabled": True}, headers=h(admin[1]))
+    f = intake.request_fetch(clean_intake, "openphish", at=now() + timedelta(days=180))
+    m.record_feed(f.id, _signed(f.id, "openphish", f"https://q-{secrets.token_hex(4)}.example/"))
+    client.post("/api/intake", json={"enabled": False}, headers=h(admin[1]))
+    assert m._intake_drip() == 0 and jobs == []

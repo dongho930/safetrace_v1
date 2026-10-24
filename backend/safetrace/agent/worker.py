@@ -16,8 +16,6 @@ import redis
 
 from ..config import get_settings
 from ..live import RedisLivePublisher
-from .feeds import FEEDS
-from .feeds import fetch as fetch_feed
 from .recheck import check as recheck
 from .runner import investigate
 
@@ -25,7 +23,6 @@ log = logging.getLogger("safetrace.worker")
 
 JOBS = "st:jobs"
 CHECKS = "st:checks"  # 재확인(조치 추적): 신고 주소에 다시 접속해 지금 상태만 본다(agent/recheck.py)
-FEEDS_STREAM = "st:feeds"  # 자동 수집: 공개 피드 받기(agent/feeds.py, 출처 이름만 받는다)
 EVENTS = "st:events"
 GROUP = "agents"
 _CASE_ID = re.compile(r"^[a-f0-9\-]{36}$")
@@ -73,24 +70,11 @@ def run_check(r, s, fields: dict) -> None:
                                                                 ensure_ascii=False)}, maxlen=100000)
 
 
-def run_feed(r, s, fields: dict) -> None:
-    """피드 받기 한 건: 받을 주소는 출처 이름으로 이 코드가 정한다(메시지의 주소를 쓰지 않는다). 실패해도 워커는 계속 돈다."""
-    fetch_id, source = fields.get("fetch_id", ""), fields.get("source", "")
-    if not fetch_id.isdigit() or source not in FEEDS:
-        return
-    try:
-        res = fetch_feed(source, s.egress_proxy, set(s.test_allowlist))
-    except Exception as e:  # noqa: BLE001
-        log.exception("feed fetch failed")
-        res = {"ok": False, "reason": type(e).__name__}
-    r.xadd(EVENTS, {"case_id": "", "feed_id": fetch_id, "payload": json.dumps(res, ensure_ascii=False)}, maxlen=100000)
-
-
 def main():
     logging.basicConfig(level=logging.INFO)
     s = get_settings()
     r = redis.Redis.from_url(s.redis_url, decode_responses=True, socket_timeout=30)  # XREADGROUP block(5초)보다 길게
-    for stream in (JOBS, CHECKS, FEEDS_STREAM):
+    for stream in (JOBS, CHECKS):
         try:
             r.xgroup_create(stream, GROUP, id="0", mkstream=True)
         except redis.ResponseError:
@@ -108,17 +92,12 @@ def main():
             except redis.RedisError:
                 log.exception("recover failed")
             last_recover = time.monotonic()
-        resp = r.xreadgroup(GROUP, consumer, {JOBS: ">", CHECKS: ">", FEEDS_STREAM: ">"}, count=1, block=5000)
+        resp = r.xreadgroup(GROUP, consumer, {JOBS: ">", CHECKS: ">"}, count=1, block=5000)
         for stream, msgs in resp or []:
             if stream == CHECKS:
                 for msg_id, fields in msgs:
                     run_check(r, s, fields)
                     r.xack(CHECKS, GROUP, msg_id)
-                continue
-            if stream == FEEDS_STREAM:
-                for msg_id, fields in msgs:
-                    run_feed(r, s, fields)
-                    r.xack(FEEDS_STREAM, GROUP, msg_id)
                 continue
             for msg_id, fields in msgs:
                 case_id, url = fields.get("case_id", ""), fields.get("url", "")

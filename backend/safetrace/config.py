@@ -100,6 +100,8 @@ class Settings(BaseSettings):
     # (조사 컨테이너가 하나여도 사람 신고가 길어야 이만큼만 기다린다), 24시간 사건 상한, 한 번 받기에서 대기열에 넣는 수,
     # 같은 키트 모양 수, 같은 호스트를 다시 넣지 않는 기간
     intake_sources: list[str] = Field(default_factory=lambda: ["openphish", "phishtank"])
+    # 피드 결과 서명 키: 수집 컨테이너(feeder)와 API 에만 둔다. 브라우저 조사 워커에는 넣지 않는다
+    feed_key: SecretStr = SecretStr("")
     intake_tick_s: int = Field(15, ge=5, le=3600)
     intake_max_pending: int = Field(1, ge=0, le=10)
     intake_daily_max: int = Field(120, ge=0, le=2000)
