@@ -2277,6 +2277,20 @@ const SERIES_THREAT = "#C62828"; // 위협으로 본 사건(콘솔의 위협 색
 const SERIES_OTHER = "#2A78D6";
 const pctOf = (a: number, b: number) => (b ? `${Math.round((a / b) * 100)}%` : "-");
 const fmtNum = (v: number | null, unit: string) => (v == null ? "-" : `${v.toLocaleString("ko-KR")}${unit}`);
+// 1시간 미만은 분, 하루 이상은 일·시간으로(판정까지 걸린 시간·대기 시간)
+const fmtHours = (h: number | null) => {
+  if (h == null) return "-";
+  if (h < 1) return `${Math.round(h * 60)}분`;
+  if (h < 48) return `${Math.round(h * 10) / 10}시간`;
+  const r = Math.round(h);
+  return `${Math.floor(r / 24)}일 ${r % 24}시간`;
+};
+// 눈금 간격: 1·2·5 × 10^k 가운데 최댓값을 4칸 안팎으로 나누는 것
+const niceStep = (max: number) => {
+  const raw = Math.max(1, max / 4);
+  const p = 10 ** Math.floor(Math.log10(raw));
+  return [1, 2, 5, 10].map((m) => m * p).find((s) => s >= raw) ?? raw;
+};
 
 function DashboardPane() {
   const [days, setDays] = useState(30);
@@ -2328,10 +2342,10 @@ function DashboardPane() {
       ) : (
         <>
           <div className="dash-kpis">
-            <Kpi label="접수" value={k.received} sub={`끝남 ${k.finished} · 조사 중 ${k.pending}`} />
+            <Kpi label="접수" value={k.received} sub={`끝남 ${k.finished} · 조사 중 ${k.pending}${k.other ? ` · 기타 ${k.other}` : ""}`} />
             <Kpi label="AI 가 위협으로 봄" value={k.aiThreat} sub={`끝난 사건의 ${pctOf(k.aiThreat, k.finished)}`} />
             <Kpi label="담당자 위협 확정" value={k.confirmed} />
-            <Kpi label="판정 대기" value={k.waiting} sub={s.timing.waitingH.max != null ? `가장 오래 ${fmtNum(s.timing.waitingH.max, "시간")}` : undefined} tone={k.waiting ? "review" : undefined} />
+            <Kpi label="판정 대기" value={k.waiting} sub={s.timing.waitingH.max != null ? `가장 오래 ${fmtHours(s.timing.waitingH.max)}` : undefined} tone={k.waiting ? "review" : undefined} />
             <Kpi label="다시 나타남" value={k.reappeared} sub="차단·삭제 확인 뒤 다시 접속됨" tone={k.reappeared ? "threat" : undefined} />
           </div>
           <div className="dash-card">
@@ -2362,14 +2376,14 @@ function DashboardPane() {
                   <tr>
                     <th>접수 → 첫 판정</th>
                     <td>
-                      중앙 {fmtNum(s.timing.toVerdictH.median, "시간")} · p90 {fmtNum(s.timing.toVerdictH.p90, "시간")}
+                      중앙 {fmtHours(s.timing.toVerdictH.median)} · p90 {fmtHours(s.timing.toVerdictH.p90)}
                       <span className="muted"> ({s.timing.toVerdictH.n}건)</span>
                     </td>
                   </tr>
                   <tr>
                     <th>판정 대기 중</th>
                     <td>
-                      중앙 {fmtNum(s.timing.waitingH.median, "시간")} · 가장 오래 {fmtNum(s.timing.waitingH.max, "시간")}
+                      중앙 {fmtHours(s.timing.waitingH.median)} · 가장 오래 {fmtHours(s.timing.waitingH.max)}
                     </td>
                   </tr>
                 </tbody>
@@ -2489,13 +2503,22 @@ function BarList({ items, label, note }: { items: Pair[]; label?: Record<string,
 // 날짜별 접수: 쌓은 세로 막대(아래 AI 가 위협으로 본 사건, 위 그 외). 막대에 마우스를 올리면 그날 수, 표로도 둔다
 function DailyChart({ rows }: { rows: Stats["daily"] }) {
   const [hover, setHover] = useState<number | null>(null);
-  const W = 960;
+  // 그림 좌표 1 = 화면 1px(viewBox 를 늘이면 글자가 화면 폭만큼 커진다): 칸 폭을 재서 쓴다
+  const box = useRef<HTMLDivElement>(null);
+  const [W, setW] = useState(960);
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => setW(Math.max(320, Math.floor(e.contentRect.width))));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const H = 200;
   const L = 36;
   const B = 22;
   const T = 8;
   const max = Math.max(1, ...rows.map((r) => r.received));
-  const step = Math.max(1, Math.ceil(max / 4));
+  const step = niceStep(max);
   const top = step * Math.ceil(max / step);
   const y = (v: number) => T + (H - T - B) * (1 - v / top);
   const slot = (W - L) / Math.max(1, rows.length);
@@ -2503,7 +2526,7 @@ function DailyChart({ rows }: { rows: Stats["daily"] }) {
   const every = Math.ceil(rows.length / 12);
   const h = hover != null ? rows[hover] : null;
   return (
-    <div className="daily">
+    <div className="daily" ref={box}>
       <div className="daily-legend small">
         <span>
           <i style={{ background: SERIES_THREAT }} /> AI 가 위협으로 봄
@@ -2512,7 +2535,7 @@ function DailyChart({ rows }: { rows: Stats["daily"] }) {
           <i style={{ background: SERIES_OTHER }} /> 그 외 접수
         </span>
       </div>
-      <svg viewBox={`0 0 ${W} ${H}`} className="daily-svg" role="img" aria-label="날짜별 접수 막대 그림(아래 표와 같은 값)" onMouseLeave={() => setHover(null)}>
+      <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H} className="daily-svg" role="img" aria-label="날짜별 접수 막대 그림(아래 표와 같은 값)" onMouseLeave={() => setHover(null)}>
         {Array.from({ length: Math.round(top / step) + 1 }, (_, i) => i * step).map((v) => (
           <g key={v}>
             <line x1={L} x2={W} y1={y(v)} y2={y(v)} className="daily-grid" />

@@ -44,10 +44,11 @@ def test_kpi_waiting_and_threat_basis():
         _c(5, threat="benign"),                                     # 정상
         _c(6, status="RUNNING", threat=None, main_at=None),          # 조사 중
         _c(7, status="RUNNING", main_status="COMPLETED"),           # 원래 결과 나옴(연관 조사 중) → 끝난 것으로
+        _c(8, status="DONE", threat=None),                          # 예전 판의 상태값 → 기타
     ]
     out = stats.build(cases, NOW, 7, False)
     k = out["kpi"]
-    assert (k["received"], k["pending"], k["finished"]) == (7, 1, 6)
+    assert (k["received"], k["pending"], k["finished"], k["other"]) == (8, 1, 6, 1)
     assert k["waiting"] == 4 and k["confirmed"] == 1 and k["reappeared"] == 1
     assert k["ai_threat"] == 4  # 1·3·4·7
     assert out["actions"]["reappeared"] == 1 and sum(out["actions"].values()) == 1  # 조치는 위협 확정 사건만
@@ -64,6 +65,8 @@ def test_agreement_rules_brands_hosting():
         _c(4, url="https://frytt.dev/", override=rule, verdict=v("threat", "phishing", "benign")),  # 규칙이 보냄
         _c(5, url="https://bit.ly/abc", final_url="https://y.vercel.app/a"),                      # 단축 URL 은 목적지
         _c(6, url="https://www.roblox.et/x"),
+        _c(7, url="http://testpages:8900/smish/"),                   # 시험 서버·내부 주소는 호스팅·도메인에서 뺀다
+        _c(8, url="http://10.0.0.5/x"),
     ]
     out = stats.build(cases, NOW, 7, False)
     a = out["agreement"]

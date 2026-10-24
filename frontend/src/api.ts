@@ -646,7 +646,7 @@ export type Stats = {
   cases: number;
   truncated: boolean;
   ms: number;
-  kpi: { received: number; finished: number; pending: number; aiThreat: number; confirmed: number; waiting: number; reappeared: number };
+  kpi: { received: number; finished: number; pending: number; other: number; aiThreat: number; confirmed: number; waiting: number; reappeared: number };
   daily: { date: string; received: number; aiThreat: number; confirmed: number }[];
   ai: Pair[];
   decisions: Pair[];
@@ -683,7 +683,7 @@ export const getStats = async (days: number): Promise<Stats> => {
     cases: statN(v.cases),
     truncated: v.truncated === true,
     ms: statN(v.ms),
-    kpi: { received: statN(k.received), finished: statN(k.finished), pending: statN(k.pending), aiThreat: statN(k.ai_threat), confirmed: statN(k.confirmed), waiting: statN(k.waiting), reappeared: statN(k.reappeared) },
+    kpi: { received: statN(k.received), finished: statN(k.finished), pending: statN(k.pending), other: statN(k.other), aiThreat: statN(k.ai_threat), confirmed: statN(k.confirmed), waiting: statN(k.waiting), reappeared: statN(k.reappeared) },
     daily: list(v.daily)
       .slice(0, 100)
       .flatMap((x) => {

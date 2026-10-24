@@ -76,6 +76,13 @@ def hosting_of(host: str) -> str:
     return "자체 도메인"
 
 
+def _internal(host: str) -> bool:
+    """내부·예약 IP 이거나 점 없는 이름(시험 서버 testpages·localhost)."""
+    from .related import _non_public_ip
+
+    return _non_public_ip(host) or "." not in host.replace(":", ".")
+
+
 def tld_of(host: str) -> str:
     site = site_of(host)
     return "." + site.split(".", 1)[1] if "." in site else "(없음)"
@@ -140,7 +147,7 @@ def build(cases: list[dict], now: datetime, days: int, truncated: bool) -> dict:
             h = _host(c.get("url"))
             if on_domain(h, SHORTENER_HOSTS):  # 단축 URL 은 그 목적지의 호스팅을 본다
                 h = _host(c.get("final_url")) or h
-            if h:
+            if h and not _internal(h):  # 시험 서버(testpages)·내부 IP 는 운영자의 호스팅이 아니다
                 hosting[hosting_of(h)] += 1
                 tlds[tld_of(h)] += 1
             b = brand_of(c)
@@ -157,7 +164,10 @@ def build(cases: list[dict], now: datetime, days: int, truncated: bool) -> dict:
         "days": days, "since": since.isoformat(), "generated_at": now.isoformat(), "truncated": truncated,
         "cases": len(cases),
         "kpi": {"received": len(cases), "finished": sum(v for k, v in status.items() if k in TERMINAL),
-                "pending": status["pending"], "ai_threat": sum(ai[t] for t in THREATS),
+                "pending": status["pending"],
+                # 끝남·조사 중이 아닌 상태(예전 판의 상태값 등). 접수 = 끝남 + 조사 중 + 기타
+                "other": sum(v for k, v in status.items() if k not in TERMINAL and k != "pending"),
+                "ai_threat": sum(ai[t] for t in THREATS),
                 "confirmed": sum(confirmed.values()), "waiting": len(waiting_age),
                 "reappeared": actions["reappeared"]},
         "daily": [{"date": d, **x} for d, x in daily.items()],

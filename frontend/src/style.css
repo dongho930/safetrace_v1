@@ -401,7 +401,7 @@ button.reason:hover { border-color: var(--line-strong); }
 .bars-n { font-variant-numeric: tabular-nums; color: var(--ink); text-align: right; white-space: nowrap; }
 .daily-legend { display: flex; gap: 16px; color: var(--ink-2); margin-bottom: 4px; }
 .daily-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
-.daily-svg { width: 100%; height: auto; display: block; }
+.daily-svg { display: block; max-width: 100%; }
 .daily-grid { stroke: var(--line-soft); stroke-width: 1; }
 .daily-axis { fill: var(--muted); font-size: 11px; }
 .daily-hover { fill: rgba(29, 86, 188, .08); pointer-events: none; }
