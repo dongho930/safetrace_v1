@@ -290,6 +290,55 @@ export async function downloadGroupCsv(key: string): Promise<void> {
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
+// IOC 내보내기(검토관 이상): 담당자가 위협으로 확정한 사건의 지표. 미리 보기는 수만(값 없음), 내려받기는 감사로그
+export type IocSummary = {
+  days: number;
+  cases: number;
+  truncated: boolean;
+  groups: number;
+  indicators: number;
+  byType: [string, number][];
+  byThreat: [string, number][];
+  excluded: [string, number][];
+  stixSkipped: number;
+  contacts: { included: boolean; verified: number; unverified: number; overLimit: number };
+  limits: { cases: number; chainCases: number; indicators: number };
+  ms: number;
+};
+const count = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0);
+const counts = (v: unknown): [string, number][] =>
+  isObj(v) ? Object.entries(v).slice(0, 20).flatMap(([k, n]): [string, number][] => (typeof n === "number" ? [[k.slice(0, 32), count(n)]] : [])) : [];
+export const iocSummary = async (days: number, contacts: boolean): Promise<IocSummary> => {
+  const o = await req<unknown>(`/api/ioc?days=${days}&contacts=${contacts}`);
+  const v = isObj(o) ? o : {};
+  const c = isObj(v.contacts) ? v.contacts : {};
+  const l = isObj(v.limits) ? v.limits : {};
+  return {
+    days: count(v.days),
+    cases: count(v.cases),
+    truncated: v.truncated === true,
+    groups: count(v.groups),
+    indicators: count(v.indicators),
+    byType: counts(v.by_type),
+    byThreat: counts(v.by_threat),
+    excluded: counts(v.excluded),
+    stixSkipped: count(v.stix_skipped),
+    contacts: { included: c.included === true, verified: count(c.verified), unverified: count(c.unverified), overLimit: count(c.over_limit) },
+    limits: { cases: count(l.cases), chainCases: count(l.chain_cases), indicators: count(l.indicators) },
+    ms: count(v.ms),
+  };
+};
+export async function downloadIoc(fmt: "csv" | "stix", days: number, contacts: boolean): Promise<void> {
+  const r = await send(`/api/ioc.${fmt}?days=${days}&contacts=${contacts}`, {});
+  const name = /filename="([^"]+)"/.exec(r.headers.get("Content-Disposition") ?? "")?.[1] ?? `safetrace-ioc.${fmt === "csv" ? "csv" : "stix.json"}`;
+  const url = URL.createObjectURL(await r.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
 // 연관 후보 하나를 새 사건으로 접수(조사관 이상). 이미 만든 후보면 그 사건을 돌려준다
 export const createRelated = async (id: string, url: string) => {
   const c = cleanCase(await req<unknown>(`/api/cases/${encodeURIComponent(id)}/related`, { method: "POST", body: JSON.stringify({ url }) }));

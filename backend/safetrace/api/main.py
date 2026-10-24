@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from .. import accounts, actions, package, related, report, verdicts
+from .. import accounts, actions, ioc, package, related, report, verdicts
 from ..accounts import ROLES, AccountError
 from ..config import get_settings
 from ..evidence import Head, Signer, VerifyResult, iter_evidence, open_evidence, verify_case
@@ -1557,3 +1557,86 @@ def get_referral(case_id: str, p: Annotated[Principal, Depends(need("investigato
     store.audit(p.name, "referral.view", case_id)
     pkg, records, _ = _package_snapshot(c, p.name)
     return _report_of(pkg, records)["referral"]
+
+
+# ── IOC 내보내기(분석가 업무) ─────────────────────────────────────────
+def _verdict_records(case_id: str, v: Verdict) -> list[dict] | None:
+    """검증한 체인 가운데 판정이 본 범위(판정에 묶인 증거 끝 seq·hash 까지). 연관 사이트를 조사하는 동안 저장한 판정은
+    원래 조사의 끝에 묶이므로, 그 뒤에 붙은 기록(침해된 워커가 넣은 운영 정보 등)은 담당자가 본 것이 아니다(Codex 1회차 F1).
+    끝이 없거나 체인과 맞지 않으면 None."""
+    recs = _verified_records(case_id)
+    if recs is None or type(v.head_seq) is not int or not isinstance(v.head_hash, str):
+        return None
+    at = next((r for r in recs if r.get("seq") == v.head_seq), None)
+    if at is None or not hmac.compare_digest(str(at.get("hash")), v.head_hash):
+        return None
+    return [r for r in recs if type(r.get("seq")) is int and r["seq"] <= v.head_seq]
+
+
+def _ioc_export(days: int, contacts: bool) -> dict:
+    """담당자의 현재 판정이 위협이고 그 확정이 최근 days 일 안인 사건(확정 시각 최신순, 상한 ioc.CASES_MAX)의 지표.
+    운영 정보(contacts 일 때만)와 단축 URL 의 목적지는 앞쪽 ioc.CHAIN_CASES_MAX 건의 검증한 체인에서, **판정이 본 증거
+    끝까지만** 꺼낸다(_verdict_records, DB 의 연결 줄은 가린 값·열쇠뿐)."""
+    since = now_utc() - timedelta(days=days)
+    top = select(Verdict.case_id, func.max(Verdict.rev).label("rev")).group_by(Verdict.case_id).subquery()
+    with store.session() as s:
+        rows = s.execute(select(Verdict, Case).join(top, (Verdict.case_id == top.c.case_id) & (Verdict.rev == top.c.rev))
+                         .join(Case, Case.id == Verdict.case_id)
+                         .where(Verdict.decision == "threat", Verdict.created_at >= since)
+                         .order_by(Verdict.created_at.desc(), Verdict.case_id).limit(ioc.CASES_MAX + 1)).all()
+    truncated = len(rows) > ioc.CASES_MAX
+    rows = rows[: ioc.CASES_MAX]
+    cases, chk, reads = [], {"verified": 0, "unverified": 0, "over_limit": 0}, 0
+    for v, c in rows:
+        recs, read = None, False
+        if (contacts or ioc.needs_landing(c.url, c.final_url)) and reads < ioc.CHAIN_CASES_MAX:
+            reads, read = reads + 1, True
+            recs = _verdict_records(c.id, v)
+        if contacts:
+            chk["over_limit" if not read else "unverified" if recs is None else "verified"] += 1
+        cases.append({"id": c.id, "url": c.url, "final_url": c.final_url, "threat": v.threat, "at": v.created_at,
+                      "landing": ioc.landing(recs) if recs is not None else None,
+                      "contacts": _intel_of(recs)[0] if contacts and recs is not None else None})
+    inds, excluded, cut = ioc.collect(cases)
+    case_group = ioc.indicator_groups(inds)  # 연관 묶음은 내보내는 지표를 함께 가진 사건끼리(판정이 본 범위의 값만)
+    return {"days": days, "since": since.isoformat(), "cases": len(cases), "truncated": truncated or cut,
+            "indicators": inds, "excluded": excluded, "case_group": case_group, "groups": len(set(case_group.values())),
+            "contacts": {"included": contacts, **chk} if contacts else {"included": False}}
+
+
+@app.get("/api/ioc")
+def ioc_summary(p: Annotated[Principal, Depends(need("reviewer"))], days: int = Query(30, ge=1, le=ioc.DAYS_MAX),
+                contacts: bool = False):
+    """내보내기 미리 보기: 사건·지표 수, 유형별·위협 유형별 수, 뺀 이유별 수(값은 보이지 않는다). 검토관 이상."""
+    t0 = time.monotonic()
+    ex = _ioc_export(days, contacts)
+    skipped = sum(1 for x in ex["indicators"] if ioc.stix_pattern(x["type"], x["value"]) is None)
+    return {"days": days, "since": ex["since"], "cases": ex["cases"], "truncated": ex["truncated"], "groups": ex["groups"],
+            "contacts": ex["contacts"], **ioc.summary(ex["indicators"], ex["excluded"], skipped),
+            "limits": {"cases": ioc.CASES_MAX, "chain_cases": ioc.CHAIN_CASES_MAX, "indicators": ioc.INDICATORS_MAX},
+            "ms": round((time.monotonic() - t0) * 1000)}
+
+
+@app.get("/api/ioc.{fmt}")
+def ioc_download(fmt: str, p: Annotated[Principal, Depends(need("reviewer"))],
+                 days: int = Query(30, ge=1, le=ioc.DAYS_MAX), contacts: bool = False):
+    """IOC 내려받기(CSV·STIX 2.1). 밖으로 나가는 자료라 검토관 이상, 감사로그(기간·운영 정보 포함 여부·수)."""
+    if fmt not in ("csv", "stix"):
+        raise HTTPException(404, "not found")
+    ex = _ioc_export(days, contacts)
+    inds = ex["indicators"]
+    tag = f"{now_utc().strftime('%Y%m%d')}-{days}d" + ("-contacts" if contacts else "")
+    if fmt == "csv":
+        body, media, name, skipped = ioc.to_csv(inds, ex["case_group"]), "text/csv; charset=utf-8", f"safetrace-ioc-{tag}.csv", 0
+    else:
+        bundle, skipped = ioc.to_stix(inds, ex["case_group"])
+        body = json.dumps(bundle, ensure_ascii=False, indent=1)
+        media, name = "application/stix+json;version=2.1", f"safetrace-ioc-{tag}.stix.json"
+    c = ex["contacts"]
+    store.audit(p.name, "ioc.export", None,
+                f"fmt={fmt} days={days} contacts={int(contacts)} cases={ex['cases']} indicators={len(inds)}"
+                f" skipped={skipped} truncated={int(ex['truncated'])}"
+                + (f" verified={c['verified']} unverified={c['unverified']} over_limit={c['over_limit']}" if contacts else ""))
+    return Response(body, media_type=media, headers={"Content-Disposition": f'attachment; filename="{name}"',
+                                                     "X-SafeTrace-Cases": str(ex["cases"]),
+                                                     "X-SafeTrace-Truncated": str(int(ex["truncated"]))})
