@@ -232,3 +232,22 @@ def test_feed_fetch_needs_egress_proxy():
     assert feeds.fetch("nope", None)["reason"] == "unknown_source"
     out = feeds.fetch("openphish", None, set())  # 검문 프록시가 없으면(개발 모드) 허용 목록 밖에 접속하지 않는다
     assert out["ok"] is False and out["reason"] == "no_egress_proxy"
+
+
+def test_next_case_starts_when_one_finishes(client, admin, clean_intake, monkeypatch):
+    """자동 수집 사건이 끝나면 바퀴를 기다리지 않고 바로 다음 것을 접수한다(조사 컨테이너가 쉬지 않게)."""
+    from safetrace.api import main as m
+
+    jobs = []
+    monkeypatch.setattr(m, "enqueue", lambda cid, url: jobs.append(cid))
+    monkeypatch.setattr(m, "enqueue_feed", lambda fid, src: None)
+    client.post("/api/intake", json={"enabled": True}, headers=h(admin[1]))
+    f = intake.request_fetch(clean_intake, "openphish", at=now() + timedelta(days=120))
+    tag = secrets.token_hex(4)
+    m.record_feed(f.id, {"ok": True, "text": f"https://x1-{tag}.example/\nhttps://x2-{tag}.example/"})
+    assert m._intake_drip() == 1
+    m.record_event(jobs[0], {"type": "status", "status": "COMPLETED", "reason": "agent_finished"})
+    assert len(jobs) == 2  # 끝난 이벤트를 받자마자 다음 사건
+    client.post("/api/intake", json={"enabled": False}, headers=h(admin[1]))
+    m.record_event(jobs[1], {"type": "status", "status": "COMPLETED", "reason": "agent_finished"})
+    assert len(jobs) == 2  # 꺼져 있으면 만들지 않는다

@@ -214,6 +214,7 @@ def record_event(case_id: str, payload: dict) -> None:
         recs = _verified_records(case_id)  # 닫고 검증한 체인(한 번만 읽고 검증해 아래 둘이 함께 쓴다)
         _write_intel(case_id, recs)
         _auto_related(case_id, recs)
+        _intake_next(case_id)
 
 
 def _verified_records(case_id: str) -> list[dict] | None:
@@ -431,8 +432,8 @@ def record_feed(fetch_id: int, res: dict) -> None:
 
 
 def intake_tick(at=None) -> int:
-    """자동 수집 한 바퀴: 오래된 받기 만료, 때가 된 출처 받기 요청, 끝나지 않은 자동 수집 사건이 한도 아래면 대기열에서
-    하나씩 사건을 만든다(사람 신고가 길어야 한도만큼만 기다리게). 꺼져 있으면 아무것도 하지 않는다. 반환: 만든 사건 수."""
+    """자동 수집 한 바퀴: 오래된 받기 만료, 때가 된 출처 받기 요청, 대기열에서 사건 만들기(_intake_drip).
+    꺼져 있으면 아무것도 하지 않는다. 반환: 만든 사건 수."""
     intake.expire_fetches(store, at)
     if not intake.is_enabled(store):
         return 0
@@ -441,6 +442,12 @@ def intake_tick(at=None) -> int:
         if f is not None:
             store.audit(intake.INTAKE_ACTOR, "intake.fetch_request", detail=f"id={f.id} source={src}")
             enqueue_feed(f.id, src)
+    return _intake_drip(at)
+
+
+def _intake_drip(at=None) -> int:
+    """끝나지 않은 자동 수집 사건이 한도 아래면 대기열에서 하나씩 사건을 만든다(사람 신고가 길어야 한도만큼만 기다리게).
+    바퀴마다, 그리고 자동 수집 사건이 끝날 때마다 부른다(조사 컨테이너가 바퀴를 기다리며 쉬지 않게). 반환: 만든 사건 수."""
     made = 0
     since = (at or now_utc()) - timedelta(hours=24)
     with _intake_lock, store.session() as s:  # 세기와 넣기 사이에 다른 접수가 끼지 않게
@@ -468,6 +475,17 @@ def intake_tick(at=None) -> int:
             made += 1
             room -= 1
     return made
+
+
+def _intake_next(case_id: str) -> None:
+    """자동 수집 사건이 끝나면 바로 다음 것을 접수한다(켜져 있을 때만). 실패해도 이벤트 처리는 계속."""
+    try:
+        with store.session() as s:
+            c = s.get(Case, case_id)
+        if c is not None and c.created_by == intake.INTAKE_ACTOR and intake.is_enabled(store):
+            _intake_drip()
+    except Exception:  # noqa: BLE001
+        log.exception("intake next failed")
 
 
 def _intake_forever():
