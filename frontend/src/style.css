@@ -368,6 +368,11 @@ button.reason:hover { border-color: var(--line-strong); }
 .users td { padding: 6px 4px; border-bottom: 1px solid var(--line-soft); }
 .users .field { padding: 5px 8px; width: auto; }
 .users-act { text-align: right; white-space: nowrap; }
+.ioc-opts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; font-size: 13px; }
+.ioc-opts .field { width: auto; padding: 5px 8px; }
+.ioc-check { display: inline-flex; align-items: center; gap: 6px; }
+.ioc-sum th { width: 88px; vertical-align: top; }
+.ioc-actions { display: flex; gap: 8px; }
 
 /* 좁은 화면(900px 미만): 세 칸을 세로로 쌓는다 */
 @media (max-width: 899px) {

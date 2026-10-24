@@ -34,6 +34,9 @@ import {
   type RelatedGroup,
   dict,
   downloadExport,
+  downloadIoc,
+  iocSummary,
+  type IocSummary,
   fileBlob,
   fileUrl,
   getCase,
@@ -172,7 +175,7 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [source, setSource] = useState("");
   const [error, setError] = useState("");
-  const [dialog, setDialog] = useState<"" | "users" | "password">("");
+  const [dialog, setDialog] = useState<"" | "users" | "password" | "ioc">("");
   const fit = useFitZoom();
 
   const signOut = useCallback(() => {
@@ -236,6 +239,11 @@ export default function App() {
           <button type="button" className="topnav-btn" aria-current="page">
             사건 처리
           </button>
+          {ROLE_RANK[user.role] >= ROLE_RANK.reviewer && (
+            <button type="button" className="topnav-btn" onClick={() => setDialog("ioc")}>
+              IOC 내보내기
+            </button>
+          )}
           {user.kind === "user" && user.role === "admin" && (
             <button type="button" className="topnav-btn" onClick={() => setDialog("users")}>
               계정 관리
@@ -259,6 +267,7 @@ export default function App() {
       </header>
       {dialog === "users" && <UsersDialog me={user} onClose={() => setDialog("")} />}
       {dialog === "password" && <PasswordDialog onClose={() => setDialog("")} onChanged={signOut} />}
+      {dialog === "ioc" && <IocDialog onClose={() => setDialog("")} />}
 
       <div className="workspace">
         <FolderNav
@@ -466,6 +475,135 @@ function RoleSelect({ value, onChange, label, disabled }: { value: Role; onChang
         </option>
       ))}
     </select>
+  );
+}
+
+// ── IOC 내보내기(검토관 이상): 담당자가 위협으로 확정한 사건의 지표를 CSV·STIX 2.1 로 ─────────────
+const IOC_TYPE: Record<string, string> = dict({
+  url: "URL", domain: "도메인", ipv4: "IPv4", ipv6: "IPv6", telegram: "텔레그램", kakao: "카카오톡", line: "라인", whatsapp: "왓츠앱",
+  discord: "디스코드", phone: "휴대전화", account: "입금 계좌", form: "입력값을 보내는 곳",
+});
+const IOC_EXCLUDED: Record<string, string> = dict({
+  official: "공식 브랜드·사행사업자 도메인", generic: "흔한 대형 사이트", service: "사이트 빌더·서비스 홈", internal: "내부·예약 IP",
+  shortener: "단축 서비스(호스트)", shortener_page: "단축 서비스의 안내 화면", shared_root: "공용 호스팅 본 도메인", pii: "주소에 개인정보 모양",
+  format: "형식 오류",
+});
+const IOC_DAYS = [1, 7, 30, 90];
+
+function IocDialog({ onClose }: { onClose: () => void }) {
+  const [days, setDays] = useState(30);
+  const [contacts, setContacts] = useState(false);
+  const [sum, setSum] = useState<IocSummary | null>(null);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState<"" | "csv" | "stix">("");
+  useEffect(() => {
+    let live = true;
+    setSum(null);
+    setMsg("");
+    iocSummary(days, contacts).then(
+      (s) => live && setSum(s),
+      (e: Error) => live && setMsg(e.message),
+    );
+    return () => {
+      live = false;
+    };
+  }, [days, contacts]);
+  const listed = (xs: [string, number][], label: Record<string, string>) => xs.map(([k, n]) => `${label[k] ?? k} ${n}`).join(" · ") || "없음";
+  const get = async (fmt: "csv" | "stix") => {
+    setBusy(fmt);
+    setMsg("");
+    try {
+      await downloadIoc(fmt, days, contacts);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "내려받기 실패");
+    } finally {
+      setBusy("");
+    }
+  };
+  const c = sum?.contacts;
+  return (
+    <Dialog title="IOC 내보내기" onClose={onClose}>
+      <p className="small" style={{ margin: 0 }}>
+        담당자가 <b>위협으로 확정</b>한 사건의 지표(신고 주소·최종 주소의 URL·도메인·IP)를 다른 기관·차단 장비가 읽는 형식으로 내려받습니다. 공식 브랜드 도메인·흔한 대형
+        사이트·단축 서비스와 공용 호스팅의 본 도메인, 개인정보가 든 주소는 빼고 URL 의 쿼리는 지웁니다.
+      </p>
+      <div className="ioc-opts">
+        <label>
+          확정 기간{" "}
+          <select className="field" value={days} onChange={(e) => setDays(Number(e.target.value))}>
+            {IOC_DAYS.map((d) => (
+              <option key={d} value={d}>
+                최근 {d}일
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="ioc-check">
+          <input type="checkbox" checked={contacts} onChange={(e) => setContacts(e.target.checked)} /> 운영 정보 포함(텔레그램·카카오톡·입력값을 보내는 곳·전화·계좌)
+        </label>
+      </div>
+      {contacts && (
+        <p className="warn small" style={{ margin: 0 }}>
+          전화·계좌는 페이지에 적힌 원래 값입니다. 받는 기관과 처리 근거를 확인한 뒤 내보내세요.
+        </p>
+      )}
+      {msg && (
+        <p className="err" role="alert">
+          {msg}
+        </p>
+      )}
+      {sum ? (
+        <table className="users ioc-sum">
+          <tbody>
+            <tr>
+              <th>사건</th>
+              <td>
+                {sum.cases}건 · 연관 묶음 {sum.groups}개
+                {sum.truncated && <span className="warn"> · 상한(사건 {sum.limits.cases}건·지표 {sum.limits.indicators}개)에서 잘림, 기간을 줄이세요</span>}
+              </td>
+            </tr>
+            <tr>
+              <th>지표</th>
+              <td>
+                {sum.indicators}개 · {listed(sum.byType, IOC_TYPE)}
+              </td>
+            </tr>
+            <tr>
+              <th>위협 유형</th>
+              <td>{listed(sum.byThreat, THREAT_LABEL)}</td>
+            </tr>
+            <tr>
+              <th>뺀 것</th>
+              <td>{listed(sum.excluded, IOC_EXCLUDED)}</td>
+            </tr>
+            {c?.included && (
+              <tr>
+                <th>운영 정보</th>
+                <td>
+                  증거 체인을 검증한 {c.verified}건에서
+                  {c.unverified > 0 && ` · 검증하지 못해 뺀 ${c.unverified}건`}
+                  {c.overLimit > 0 && ` · 최신 ${sum.limits.contactCases}건만(나머지 ${c.overLimit}건 뺌)`}
+                  {sum.stixSkipped > 0 && ` · STIX 표준 형식이 없는 ${sum.stixSkipped}개(전화·계좌 등)는 CSV 에만`}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      ) : (
+        !msg && <p className="muted small">세는 중…</p>
+      )}
+      <div className="ioc-actions">
+        <button type="button" className="btn btn-primary" disabled={!sum || sum.indicators === 0 || !!busy} onClick={() => get("csv")}>
+          {busy === "csv" ? "만드는 중…" : "CSV 내려받기"}
+        </button>
+        <button type="button" className="btn btn-ghost" disabled={!sum || sum.indicators === 0 || !!busy} onClick={() => get("stix")}>
+          {busy === "stix" ? "만드는 중…" : "STIX 2.1 내려받기"}
+        </button>
+      </div>
+      <p className="faint small" style={{ margin: 0 }}>
+        내려받기는 감사로그에 남습니다. 같은 값은 내보낼 때마다 같은 STIX id 라 받는 쪽이 중복을 거를 수 있고, 연관 묶음은 STIX campaign 으로 들어갑니다.
+      </p>
+    </Dialog>
   );
 }
 
