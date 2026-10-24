@@ -16,6 +16,7 @@ import csv
 import hashlib
 import io
 import ipaddress
+import re
 import uuid
 from collections import Counter
 from datetime import UTC, datetime
@@ -23,7 +24,7 @@ from urllib.parse import unquote, urlsplit
 
 from .decision.brands import SHARED_HOSTING, SHORTENER_HOSTS, on_domain, site_of
 from .masking import mask_pii
-from .related import WIDGET_FORM_HOSTS
+from .related import WIDGET_FORM_HOSTS, WILDCARD_DNS
 
 DAYS_MAX = 90
 CASES_MAX = 1000  # 한 번에 내보내는 사건(확정 시각 최신순)
@@ -81,15 +82,25 @@ def _digest(v: str) -> str:
 
 
 _DECODE_MAX = 3
+# 숫자 덩어리(사이에 '-'·'.' 하나씩 허용): 글자·밑줄에 붙어도 찾는다(mask_pii 는 단어 경계 \b 에 기대서 customer_010… 을
+# 놓친다, Codex 2회차 F3). 숫자가 10~16자리면 전화·계좌·카드·주민번호일 수 있어 개인정보로 본다(날짜 2026-10-24 는 8자리)
+_DIGIT_RUN = re.compile(r"(?<!\d)\d+(?:[-.]\d+)*(?!\d)")
+_IPV4_SHAPE = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")  # 93.184.215.14.nip.io 의 IP 는 번호가 아니다
+
+
+def _digits_pii(v: str) -> bool:
+    return any(10 <= sum(ch.isdigit() for ch in m.group(0)) <= 16 and not _IPV4_SHAPE.fullmatch(m.group(0))
+               for m in _DIGIT_RUN.finditer(v))
 
 
 def _has_pii(v: str) -> bool:
     """개인정보 모양이 있는지. URL 인코딩을 여러 번 한 값(alice%2540example.com)도 풀면서 본다(Codex 1회차 F3).
-    _DECODE_MAX 번 풀어도 더 풀리는 값은 개인정보가 숨어 있을 수 있어 있다고 본다(내보내지 않는다)."""
+    _DECODE_MAX 번 풀어도 더 풀리는 값은 개인정보가 숨어 있을 수 있어 있다고 본다(내보내지 않는다).
+    지표 하나를 덜 내는 쪽으로 넓게 본다(URL 이 빠져도 도메인 지표는 남는다)."""
     cur = v
     for _ in range(_DECODE_MAX):
         nxt = unquote(cur)
-        if mask_pii(cur) != nxt:  # mask_pii 는 '%' 가 있으면 한 번 풀어서 본다(runner._has_pii 와 같다)
+        if mask_pii(cur) != nxt or _digits_pii(nxt):  # mask_pii 는 '%' 가 있으면 한 번 풀어서 본다(runner._has_pii 와 같다)
             return True
         if nxt == cur:
             return False
@@ -106,7 +117,9 @@ def _ascii_host(host: str) -> str | None:
 
 
 def _same_site_key(host: str) -> str:
-    return host if on_domain(host, SHARED_HOSTING) else site_of(host)
+    """같은 운영자로 볼 열쇠. 공용 호스팅·와일드카드 DNS(nip.io 등)는 하위 도메인마다 다른 운영자·서버라 호스트 그대로
+    (related.link_key 와 같은 기준, Codex 2회차 F2)."""
+    return host if on_domain(host, SHARED_HOSTING) or on_domain(host, WILDCARD_DNS) else site_of(host)
 
 
 def _host_of(u: object) -> str:
@@ -132,7 +145,7 @@ def landing(records: list[dict]) -> str | None:
 
 
 def _plain_reason(host: str) -> str | None:
-    return _host_reason(host) or ("shared_root" if host in SHARED_HOSTING else None)
+    return _host_reason(host) or ("shared_root" if host in SHARED_HOSTING or host in WILDCARD_DNS else None)
 
 
 def network_indicators(url: str | None, final_url: str | None,
@@ -286,6 +299,16 @@ def collect(cases: list[dict]) -> tuple[list[dict], Counter, bool]:
                 x["cases"].append(c["id"])
             x["first"], x["last"] = min(x["first"], c["at"]), max(x["last"], c["at"])
     return list(acc.values()), Counter(r for r, _, _ in excluded), truncated
+
+
+def indicator_groups(indicators: list[dict]) -> dict[str, str]:
+    """사건 id → 연관 묶음 열쇠: 내보내는 지표(같은 도메인·URL·운영 정보)를 함께 가진 사건끼리 잇는다. 사건 연결 표
+    (case_sites)는 판정 뒤에 체인에 붙은 기록에서도 열쇠가 나와 그것으로 campaign 을 꾸밀 수 있어 쓰지 않는다(Codex 2회차 F1).
+    지표는 모두 판정이 본 범위의 값이다."""
+    from .related import groups
+
+    rows = [(cid, f"{x['type']}|{x['value']}", False) for x in indicators for cid in x["cases"]]
+    return group_keys(groups(rows, 2))
 
 
 def group_keys(groups: list[set[str]]) -> dict[str, str]:

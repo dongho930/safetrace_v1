@@ -1598,11 +1598,7 @@ def _ioc_export(days: int, contacts: bool) -> dict:
                       "landing": ioc.landing(recs) if recs is not None else None,
                       "contacts": _intel_of(recs)[0] if contacts and recs is not None else None})
     inds, excluded, cut = ioc.collect(cases)
-    ids = [c["id"] for c in cases]
-    with store.session() as s:  # 연관 묶음(같은 사이트·운영 정보·키트 지문)은 내보내는 사건끼리만 잇는다
-        site_rows = s.execute(select(CaseSite.case_id, CaseSite.site, CaseSite.generic)
-                              .where(CaseSite.case_id.in_(ids))).all() if ids else []
-    case_group = ioc.group_keys(related.groups([tuple(r) for r in site_rows], 2))
+    case_group = ioc.indicator_groups(inds)  # 연관 묶음은 내보내는 지표를 함께 가진 사건끼리(판정이 본 범위의 값만)
     return {"days": days, "since": since.isoformat(), "cases": len(cases), "truncated": truncated or cut,
             "indicators": inds, "excluded": excluded, "case_group": case_group, "groups": len(set(case_group.values())),
             "contacts": {"included": contacts, **chk} if contacts else {"included": False}}

@@ -55,6 +55,14 @@ BS = chr(92)
     ("https://phish.example/u/alice%2540example.com", None, {("domain", "phish.example")}, {"pii"}),
     ("https://phish.example/u/alice%25252540example.com", None, {("domain", "phish.example")}, {"pii"}),
     ("http://testpages:8900/smish/", "http://testpages-alt:8900/x", set(), {"internal"}),  # 점 없는 내부 이름
+    # Codex 2회차 F2: 와일드카드 DNS 는 하위 도메인마다 다른 서버라 공용 호스팅처럼 같은 호스트만 같은 사이트
+    ("https://93.184.215.14.nip.io/a", "https://1.1.1.1.nip.io/help", {("url", "https://93.184.215.14.nip.io/a"),
+                                                                        ("domain", "93.184.215.14.nip.io")}, {"elsewhere"}),
+    # Codex 2회차 F3: 글자·밑줄에 붙은 전화번호도 개인정보(단어 경계에 기대지 않는다). 날짜 같은 짧은 숫자는 그대로
+    ("https://phish.example/u/customer_01012345678", None, {("domain", "phish.example")}, {"pii"}),
+    ("https://phish.example/u/id010-1234-5678x", None, {("domain", "phish.example")}, {"pii"}),
+    ("https://phish.example/2026-10-24/login", None, {("url", "https://phish.example/2026-10-24/login"),
+                                                      ("domain", "phish.example")}, set()),
 ])
 def test_network_indicators(url, final, want, excluded):
     got, ex = ioc.network_indicators(url, final)
@@ -236,13 +244,14 @@ def test_case_limit_truncates_newest_first(client, reviewer, monkeypatch):
 
 
 def test_stix_bundle_is_consistent(client, reviewer):
-    """STIX 2.1 묶음: 필수 속성, 참조하는 id 가 모두 있음, 같은 연관 묶음(같은 사이트 열쇠)의 사건은 한 campaign."""
+    """STIX 2.1 묶음: 필수 속성, 참조하는 id 가 모두 있음, 내보내는 지표를 함께 가진 사건은 한 campaign.
+    Codex 2회차 F1: 사건 연결 표(case_sites)의 열쇠는 판정 뒤에 붙은 기록에서도 나올 수 있어 campaign 근거로 쓰지 않는다."""
     u, tok = reviewer
     tag = secrets.token_hex(4)
     link = f"kit:dom:{secrets.token_hex(16)}"
-    a = _case(u, f"https://a-{tag}.example/x", sites=(link,))
-    b = _case(u, f"https://b-{tag}.example/y", sites=(link,))
-    lone = _case(u, f"https://c-{tag}.example/z")
+    a = _case(u, f"https://ab-{tag}.example/x", sites=(link,))
+    b = _case(u, f"https://ab-{tag}.example/y")
+    lone = _case(u, f"https://c-{tag}.example/z", sites=(link,))  # a 와 연결 표 열쇠만 같다
     r = client.get("/api/ioc.stix?days=1", headers=h(tok))
     assert r.status_code == 200 and r.headers["content-type"].startswith("application/stix+json")
     bundle = r.json()
@@ -261,14 +270,14 @@ def test_stix_bundle_is_consistent(client, reviewer):
             assert o["relationship_type"] == "indicates" and objs[o["source_ref"]]["type"] == "indicator"
             assert objs[o["target_ref"]]["type"] == "campaign"
     mine = {o["pattern"]: o for o in objs.values() if o["type"] == "indicator" and tag in o["pattern"]}
-    assert set(mine) == {f"[url:value = 'https://{x}-{tag}.example/{p}']" for x, p in (("a", "x"), ("b", "y"), ("c", "z"))} | {
-        f"[domain-name:value = '{x}-{tag}.example']" for x in "abc"}
+    assert set(mine) == {f"[url:value = 'https://{x}-{tag}.example/{p}']" for x, p in (("ab", "x"), ("ab", "y"), ("c", "z"))} | {
+        f"[domain-name:value = '{x}-{tag}.example']" for x in ("ab", "c")}
     camp = {o["target_ref"] for o in objs.values() if o["type"] == "relationship" and o["source_ref"] in
             {m["id"] for m in mine.values()}}
-    assert len(camp) == 1  # a·b 는 한 묶음, c 는 묶음 없음
+    assert len(camp) == 1  # a·b 는 같은 도메인으로 한 묶음, c 는 묶음 없음
     linked = {o["source_ref"] for o in objs.values() if o["type"] == "relationship" and o["target_ref"] in camp}
-    assert {objs[i]["external_references"][0]["external_id"] for i in linked & {m["id"] for m in mine.values()}} == {a, b}
-    assert lone not in {objs[i]["external_references"][0]["external_id"] for i in linked}
+    refs = {r["external_id"] for i in linked for r in objs[i]["external_references"]}
+    assert {a, b} <= refs and lone not in refs
     # 같은 값은 내보낼 때마다 같은 id(받는 쪽이 중복을 거른다)
     again = {o["pattern"]: o["id"] for o in client.get("/api/ioc.stix?days=1", headers=h(tok)).json()["objects"]
              if o["type"] == "indicator" and tag in o["pattern"]}
