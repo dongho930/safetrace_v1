@@ -50,7 +50,9 @@ def main():
         raise SystemExit("ST_FEED_KEY 가 없습니다(feeder 와 api 에만 넣는다)")
     r = redis.Redis.from_url(s.redis_url, decode_responses=True, socket_timeout=30)
     try:
-        r.xgroup_create(STREAM, GROUP, id="0", mkstream=True)
+        # 처음 만들 때는 새 요청부터(예전 받기 요청을 다시 받지 않게 — PhishTank 는 키 없이 하루 몇 번까지).
+        # 꺼져 있던 동안 들어온 요청은 API 가 10분 뒤 만료시키고 1시간 뒤 다시 요청한다
+        r.xgroup_create(STREAM, GROUP, id="$", mkstream=True)
     except redis.ResponseError:
         pass
     consumer = socket.gethostname()
