@@ -50,6 +50,11 @@ services:
       ST_ALLOWED_PORTS: "[80,443]"
       ST_TRUSTED_PROXIES: '["web"]'   # 로그인 제한에 쓸 접속 주소: web(nginx)이 넘긴 X-Forwarded-For 만 믿는다
       ST_FEED_KEY: ${ST_FEED_KEY:?}   # 자동 수집 피드 결과의 feeder 서명 확인용
+      # 자동 수집 한도(.env 로 바꿀 수 있다): 24시간 사건, 끝나지 않은 자동 사건, 한 번 받기에서 고르는 수, 대기열 보관 시간
+      ST_INTAKE_DAILY_MAX: ${ST_INTAKE_DAILY_MAX:-120}
+      ST_INTAKE_MAX_PENDING: ${ST_INTAKE_MAX_PENDING:-1}
+      ST_INTAKE_ROUND_MAX: ${ST_INTAKE_ROUND_MAX:-30}
+      ST_INTAKE_ITEM_MAX_AGE_H: ${ST_INTAKE_ITEM_MAX_AGE_H:-12}
     volumes: [evidence:/evidence:ro]
     read_only: true
     tmpfs: [/tmp]

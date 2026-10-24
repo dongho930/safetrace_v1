@@ -707,7 +707,7 @@ export const getStats = async (days: number): Promise<Stats> => {
 
 // 자동 수집(공개 피싱 피드 → 조사 접수). 상태는 열람자 이상, 켜기·끄기는 사람 관리자만. 주소 값은 오지 않는다
 export type IntakeSource = { state: string; requestedAt: string; doneAt: string | null; got: number | null; picked: number | null; reason: string | null } | null;
-export type Intake = { enabled: boolean; updatedBy: string | null; updatedAt: string | null; sources: [string, IntakeSource][]; queued: number; pending: number; created24h: number };
+export type Intake = { enabled: boolean; updatedBy: string | null; updatedAt: string | null; sources: [string, IntakeSource][]; queued: number; pending: number; created24h: number; stale48h: number };
 const cleanIntake = (v: unknown): Intake => {
   const o = isObj(v) ? v : {};
   const n = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : 0);
@@ -727,6 +727,7 @@ const cleanIntake = (v: unknown): Intake => {
     queued: n(o.queued),
     pending: n(o.pending),
     created24h: n(o.created_24h),
+    stale48h: n(o.stale_48h),
   };
 };
 export const getIntake = async () => cleanIntake(await req<unknown>("/api/intake"));

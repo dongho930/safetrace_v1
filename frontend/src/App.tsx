@@ -748,7 +748,7 @@ function IntakeBox({ canToggle }: { canToggle: boolean }) {
         )}
       </div>
       <p className="small muted">
-        대기 {st.queued} · 조사 {st.pending} · 24시간 {st.created24h}건
+        대기 {st.queued} · 조사 {st.pending} · 24시간 {st.created24h}건{st.stale48h > 0 && ` · 오래돼 버림 ${st.stale48h}`}
       </p>
       {st.sources.map(([k, x]) => (
         <p key={k} className="small muted">

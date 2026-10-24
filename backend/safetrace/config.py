@@ -108,6 +108,7 @@ class Settings(BaseSettings):
     intake_round_max: int = Field(30, ge=1, le=300)
     intake_kit_max: int = Field(2, ge=1, le=50)
     intake_dedup_days: int = Field(7, ge=1, le=30)
+    intake_item_max_age_h: int = Field(12, ge=1, le=168)  # 대기열에서 이보다 오래된 주소는 버린다(피싱 사이트는 금방 사라진다)
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
 
 

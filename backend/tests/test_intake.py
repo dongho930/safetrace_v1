@@ -183,15 +183,16 @@ def test_tick_requests_fetch_and_creates_one_case_at_a_time(client, admin, clean
     tag = secrets.token_hex(4)
     fid = dict((src, i) for i, src in fetches)["openphish"]
     m.record_feed(fid, _signed(fid, "openphish", "\n".join(f"https://n{i}-{tag}.example/login" for i in range(5))))
-    assert m.intake_tick(at=t) == 1  # 끝나지 않은 자동 사건 한도(1)
-    assert m.intake_tick(at=t) == 0  # 앞 사건이 끝나기 전에는 더 만들지 않는다
+    # 사건 만들기는 실제 지금 시각으로(60일 뒤로 돌리면 방금 넣은 주소가 보관 시간을 넘겨 '오래됨'이 된다)
+    assert m._intake_drip() == 1  # 끝나지 않은 자동 사건 한도(1)
+    assert m._intake_drip() == 0  # 앞 사건이 끝나기 전에는 더 만들지 않는다
     cid, url = jobs[0]
     with store.session() as s:
         c = s.get(Case, cid)
         assert (c.source, c.created_by, c.url) == ("feed", intake.INTAKE_ACTOR, f"https://n0-{tag}.example/login")
         c.status = "COMPLETED"
         s.commit()
-    assert m.intake_tick(at=t) == 1 and jobs[1][1] == f"https://n1-{tag}.example/login"
+    assert m._intake_drip() == 1 and jobs[1][1] == f"https://n1-{tag}.example/login"
     # 사람 신고는 자동 사건과 상관없이 받는다(전체 대기 한도에 자동 수집 사건을 세지 않는다)
     inv = "intkinv" + tag[:4]  # 시험 DB 에 남은 공용 시험 토큰의 접수 한도와 상관없게 새 계정으로
     accounts.create_user(store, inv, PW, "investigator")
@@ -359,3 +360,30 @@ def test_feeder_takes_only_signed_fresh_requests(monkeypatch):
     assert feeder.run_one(r, s, KEY, _req("13"), st) == "too_soon"    # 간격 안의 다른 번호
     assert feeder.run_one(r, s, KEY, _req("14", "phishtank"), st) == "fetched"  # 출처마다 따로
     assert calls == ["openphish", "phishtank"]
+
+
+def test_queue_drops_old_items_and_takes_newest_fetch_first(client, admin, clean_intake, monkeypatch):
+    """들어오는 주소(하루 최대 6번 × 30)가 조사 상한(120)보다 많아, 오래된 것부터 꺼내면 이미 사라진 사이트만 조사하게 된다:
+    가장 최근 받기부터 꺼내고, 보관 시간(기본 12시간)이 지난 주소는 '오래됨'으로 버린다."""
+    from safetrace.api import main as m
+
+    store, jobs = clean_intake, []
+    monkeypatch.setattr(m, "enqueue", lambda cid, url: jobs.append(url))
+    monkeypatch.setattr(m, "enqueue_feed", lambda fid, src: None)
+    monkeypatch.setattr(m.settings, "intake_max_pending", 3)
+    client.post("/api/intake", json={"enabled": True}, headers=h(admin[1]))
+    tag, t = secrets.token_hex(4), now() + timedelta(days=210)
+    kw = {"seen_hosts": set(), "allowed_ports": PORTS, "cap": 30, "kit_max": 2, "key": None}
+    old = intake.request_fetch(store, "openphish", at=t - timedelta(hours=13))
+    intake.record_fetch(store, old.id, {"ok": True, "text": f"https://old-{tag}.example/"}, at=t - timedelta(hours=13), **kw)
+    mid = intake.request_fetch(store, "phishtank", at=t - timedelta(hours=2))
+    intake.record_fetch(store, mid.id, {"ok": True, "text": _pt([(f"https://mid-{tag}.example/", "yes", "yes")])},
+                        at=t - timedelta(hours=2), **kw)
+    new = intake.request_fetch(store, "openphish", at=t)
+    intake.record_fetch(store, new.id, {"ok": True, "text": f"https://new1-{tag}.example/\nhttps://new2-{tag}.example/"},
+                        at=t, **kw)
+    assert m._intake_drip(at=t) == 3
+    assert jobs == [f"https://new1-{tag}.example/", f"https://new2-{tag}.example/", f"https://mid-{tag}.example/"]
+    with store.session() as s:
+        assert s.scalar(select(FeedItem).where(FeedItem.fetch_id == old.id)).state == "stale"
+    assert client.get("/api/intake", headers=h(VIEWER)).json()["limits"]["item_max_age_h"] == 12
