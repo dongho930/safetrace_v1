@@ -486,7 +486,8 @@ const IOC_TYPE: Record<string, string> = dict({
 const IOC_EXCLUDED: Record<string, string> = dict({
   official: "공식 브랜드·사행사업자 도메인", generic: "흔한 대형 사이트", service: "사이트 빌더·서비스 홈", internal: "내부·예약 IP",
   shortener: "단축 서비스(호스트)", shortener_page: "단축 서비스의 안내 화면", shared_root: "공용 호스팅 본 도메인",
-  elsewhere: "다른 사이트의 최종 주소(누른 링크일 수 있음)", widget: "입력 위젯(번역 등)", pii: "주소에 개인정보 모양", format: "형식 오류",
+  elsewhere: "다른 사이트의 최종 주소(누른 링크일 수 있음)", unverified_destination: "단축 URL 목적지를 확인하지 못함", widget: "입력 위젯(번역 등)",
+  pii: "주소에 개인정보 모양", format: "형식 오류",
 });
 const IOC_DAYS = [1, 7, 30, 90];
 
@@ -583,7 +584,7 @@ function IocDialog({ onClose }: { onClose: () => void }) {
                 <td>
                   증거 체인을 검증한 {c.verified}건에서
                   {c.unverified > 0 && ` · 검증하지 못해 뺀 ${c.unverified}건`}
-                  {c.overLimit > 0 && ` · 최신 ${sum.limits.contactCases}건만(나머지 ${c.overLimit}건 뺌)`}
+                  {c.overLimit > 0 && ` · 최신 ${sum.limits.chainCases}건만(나머지 ${c.overLimit}건 뺌)`}
                   {sum.stixSkipped > 0 && ` · STIX 표준 형식이 없는 ${sum.stixSkipped}개(전화·계좌 등)는 CSV 에만`}
                 </td>
               </tr>

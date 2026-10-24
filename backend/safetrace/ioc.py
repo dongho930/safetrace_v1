@@ -27,7 +27,7 @@ from .related import WIDGET_FORM_HOSTS
 
 DAYS_MAX = 90
 CASES_MAX = 1000  # 한 번에 내보내는 사건(확정 시각 최신순)
-CONTACT_CASES_MAX = 200  # 운영 정보를 넣을 때 증거 체인을 검증하는 사건(검증에 파일 해시가 들어 비싸다)
+CHAIN_CASES_MAX = 200  # 증거 체인을 검증해 읽는 사건(운영 정보·단축 URL 목적지, 검증에 파일 해시가 들어 비싸다)
 INDICATORS_MAX = 5000
 CASE_IDS_PER_ROW = 20
 VALUE_MAX = 2048
@@ -37,11 +37,12 @@ CONTACT_TYPES = ("telegram", "kakao", "line", "whatsapp", "discord", "phone", "a
 TYPE_KO = {"url": "URL", "domain": "도메인", "ipv4": "IPv4", "ipv6": "IPv6", "telegram": "텔레그램", "kakao": "카카오톡",
            "line": "라인", "whatsapp": "왓츠앱", "discord": "디스코드", "phone": "휴대전화", "account": "입금 계좌",
            "form": "입력값을 보내는 곳"}
-ROLE_KO = {"start": "신고 주소", "final": "최종 주소", "contact": "페이지에 적힌 운영 정보"}
+ROLE_KO = {"start": "신고 주소", "landing": "단축 URL 목적지", "final": "최종 주소", "contact": "페이지에 적힌 운영 정보"}
 EXCLUDED_KO = {"official": "공식 브랜드·사행사업자 도메인", "generic": "흔한 대형 사이트", "service": "사이트 빌더·서비스 홈",
                "internal": "내부·예약 IP", "shortener": "단축 서비스(호스트)", "shortener_page": "단축 서비스의 안내 화면",
                "shared_root": "공용 호스팅 본 도메인", "elsewhere": "다른 사이트의 최종 주소(누른 링크일 수 있음)",
-               "widget": "입력 위젯(번역 등)", "pii": "개인정보 모양", "format": "형식 오류"}
+               "unverified_destination": "단축 URL 목적지를 확인하지 못함", "widget": "입력 위젯(번역 등)",
+               "pii": "개인정보 모양", "format": "형식 오류"}
 CSV_HEADER = ["유형", "값", "위협 유형", "근거", "사건 수", "사건 id", "처음 확정(UTC)", "마지막 확정(UTC)", "연관 묶음"]
 
 THREAT_KO = {"phishing": "피싱", "scam": "사기", "illegal_gambling": "불법 도박", "malware": "악성코드"}
@@ -79,8 +80,21 @@ def _digest(v: str) -> str:
     return hashlib.sha256(v.encode()).hexdigest()[:16]
 
 
+_DECODE_MAX = 3
+
+
 def _has_pii(v: str) -> bool:
-    return mask_pii(v) != unquote(v)  # mask_pii 는 '%' 가 있으면 풀어서 본다(runner._has_pii 와 같다)
+    """개인정보 모양이 있는지. URL 인코딩을 여러 번 한 값(alice%2540example.com)도 풀면서 본다(Codex 1회차 F3).
+    _DECODE_MAX 번 풀어도 더 풀리는 값은 개인정보가 숨어 있을 수 있어 있다고 본다(내보내지 않는다)."""
+    cur = v
+    for _ in range(_DECODE_MAX):
+        nxt = unquote(cur)
+        if mask_pii(cur) != nxt:  # mask_pii 는 '%' 가 있으면 한 번 풀어서 본다(runner._has_pii 와 같다)
+            return True
+        if nxt == cur:
+            return False
+        cur = nxt
+    return unquote(cur) != cur
 
 
 def _ascii_host(host: str) -> str | None:
@@ -102,23 +116,54 @@ def _host_of(u: object) -> str:
         return ""
 
 
-def network_indicators(url: str | None, final_url: str | None) -> tuple[list[tuple[str, str, str]], set[tuple[str, str, str]]]:
+def needs_landing(url: str | None, final_url: str | None) -> bool:
+    """단축 URL 사건인데 최종 주소가 단축 서비스 밖이라 목적지(첫 화면)를 체인에서 확인해야 하는지."""
+    start, final = _host_of(url), _host_of(final_url)
+    return bool(start) and on_domain(start, SHORTENER_HOSTS) and bool(final) and final != start
+
+
+def landing(records: list[dict]) -> str | None:
+    """검증한 체인(판정이 본 범위)의 원래 조사 첫 관찰 화면 주소: 자동 이동이 끝나고 아무것도 누르기 전의 화면."""
+    for r in records:
+        d = r.get("data") if isinstance(r, dict) else None
+        if r.get("kind") == "observe" and isinstance(d, dict) and not isinstance(d.get("sub"), int):
+            return d["url"] if isinstance(d.get("url"), str) else None
+    return None
+
+
+def _plain_reason(host: str) -> str | None:
+    return _host_reason(host) or ("shared_root" if host in SHARED_HOSTING else None)
+
+
+def network_indicators(url: str | None, final_url: str | None,
+                       landing: str | None = None) -> tuple[list[tuple[str, str, str]], set[tuple[str, str, str]]]:
     """신고 주소·최종 주소에서 (유형, 값, 근거) 목록과 뺀 것 {(이유, 유형, 값)}.
 
     최종 주소는 조사가 끝난 화면이라 에이전트가 누른 링크의 다른 사이트일 수 있다(로컬 사건에서 관찰: 피싱 화면의 연락
-    버튼 → api.whatsapp.com, 가짜 거래소 화면의 링크 → 진짜 거래소). 그래서 신고 주소와 같은 사이트(공용 호스팅은 같은
-    호스트)이거나 신고 주소가 단축 URL 일 때(단축 URL 이 보낸 목적지)만 낸다. 다른 사이트의 최종 주소는 'elsewhere' 로 센다."""
+    버튼 → api.whatsapp.com, 가짜 거래소 화면의 링크 → 진짜 거래소). 그래서 기준 사이트와 같은 사이트(공용 호스팅은 같은
+    호스트)일 때만 내고, 다른 사이트면 'elsewhere' 로 센다. 기준은 신고 주소, 신고 주소가 단축 URL 이면 그 목적지인
+    landing(검증한 체인의 첫 관찰 화면, Codex 1회차 F2) — landing 이 없으면 목적지를 확인하지 못해 최종 주소를 내지 않는다."""
     out: list[tuple[str, str, str]] = []
     excluded: set[tuple[str, str, str]] = set()
     start_host = _host_of(url)
-    via_shortener = bool(start_host) and on_domain(start_host, SHORTENER_HOSTS)
-    for role, u in (("start", url), ("final", final_url)):
-        fh = _host_of(u) if role == "final" else ""
-        if fh and fh != start_host and not via_shortener and (
-                not start_host or _same_site_key(fh) != _same_site_key(start_host)):
-            if not (_host_reason(fh) or fh in SHARED_HOSTING):  # 공식·흔한 사이트 등이면 아래 규칙의 이유로 센다
-                excluded.add(("elsewhere", "domain", fh))
-                continue
+    anchor: str | None = start_host
+    todo: list[tuple[str, str | None]] = [("start", url)]
+    if start_host and on_domain(start_host, SHORTENER_HOSTS):
+        lh = _host_of(landing)
+        anchor = lh if lh and lh != start_host else None
+        if anchor:
+            todo.append(("landing", landing))
+    fh = _host_of(final_url)
+    if fh and fh != start_host and not _plain_reason(fh):  # 공식·흔한 사이트 등이면 아래에서 그 이유로 센다
+        if anchor is None:
+            excluded.add(("unverified_destination", "domain", fh))
+        elif _same_site_key(fh) != _same_site_key(anchor):
+            excluded.add(("elsewhere", "domain", fh))
+        else:
+            todo.append(("final", final_url))
+    elif fh:
+        todo.append(("final", final_url))
+    for role, u in todo:
         if not isinstance(u, str) or not u:
             continue
         try:
@@ -131,7 +176,7 @@ def network_indicators(url: str | None, final_url: str | None) -> tuple[list[tup
         if p.scheme not in ("http", "https") or not host:
             excluded.add(("format", "url", u[:200]))
             continue
-        reason = _host_reason(host) or ("shared_root" if host in SHARED_HOSTING else None)
+        reason = _plain_reason(host)
         if reason:  # 공용 호스팅 본 도메인(pages.dev 자체)의 화면도 운영자의 것이 아니다
             excluded.add((reason, "domain", host))
             continue
@@ -181,6 +226,9 @@ def contact_indicators(items: list[dict]) -> tuple[list[tuple[str, str, str]], s
             if reason:
                 excluded.add((reason, "form", host or "-"))
                 continue
+            if _has_pii(value):  # 수집할 때 한 번 가렸지만 여러 번 인코딩한 값은 남을 수 있다(Codex 1회차 F3)
+                excluded.add(("pii", "form", _digest(value)))
+                continue
         out.append((kind, value, "contact"))
     return out, excluded
 
@@ -219,7 +267,7 @@ def collect(cases: list[dict]) -> tuple[list[dict], Counter, bool]:
     excluded: set[tuple[str, str, str]] = set()
     truncated = False
     for c in cases:
-        found, ex = network_indicators(c["url"], c.get("final_url"))
+        found, ex = network_indicators(c["url"], c.get("final_url"), c.get("landing"))
         excluded |= ex
         if c.get("contacts") is not None:
             more, ex = contact_indicators(c["contacts"])

@@ -302,7 +302,7 @@ export type IocSummary = {
   excluded: [string, number][];
   stixSkipped: number;
   contacts: { included: boolean; verified: number; unverified: number; overLimit: number };
-  limits: { cases: number; contactCases: number; indicators: number };
+  limits: { cases: number; chainCases: number; indicators: number };
   ms: number;
 };
 const count = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0);
@@ -324,7 +324,7 @@ export const iocSummary = async (days: number, contacts: boolean): Promise<IocSu
     excluded: counts(v.excluded),
     stixSkipped: count(v.stix_skipped),
     contacts: { included: c.included === true, verified: count(c.verified), unverified: count(c.unverified), overLimit: count(c.over_limit) },
-    limits: { cases: count(l.cases), contactCases: count(l.contact_cases), indicators: count(l.indicators) },
+    limits: { cases: count(l.cases), chainCases: count(l.chain_cases), indicators: count(l.indicators) },
     ms: count(v.ms),
   };
 };

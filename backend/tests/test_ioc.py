@@ -49,8 +49,11 @@ BS = chr(92)
     ("https://login.evil.example/a", "https://www.evil.example/b", {
         ("url", "https://login.evil.example/a"), ("domain", "login.evil.example"), ("url", "https://www.evil.example/b"),
         ("domain", "www.evil.example")}, set()),
-    ("https://lrl.kr/AbC", "https://n-payost.shop/x", {("url", "https://lrl.kr/AbC"), ("url", "https://n-payost.shop/x"),
-                                                       ("domain", "n-payost.shop")}, {"shortener"}),
+    # 단축 URL 의 목적지는 최종 주소(누른 뒤일 수 있음)가 아니라 검증한 체인의 첫 화면에서만(아래 시험). 없으면 뺀다
+    ("https://lrl.kr/AbC", "https://n-payost.shop/x", {("url", "https://lrl.kr/AbC")}, {"shortener", "unverified_destination"}),
+    # 여러 번 URL 인코딩한 개인정보도 풀어서 본다(Codex 1회차 F3)
+    ("https://phish.example/u/alice%2540example.com", None, {("domain", "phish.example")}, {"pii"}),
+    ("https://phish.example/u/alice%25252540example.com", None, {("domain", "phish.example")}, {"pii"}),
     ("http://testpages:8900/smish/", "http://testpages-alt:8900/x", set(), {"internal"}),  # 점 없는 내부 이름
 ])
 def test_network_indicators(url, final, want, excluded):
@@ -58,6 +61,24 @@ def test_network_indicators(url, final, want, excluded):
     assert {(t, v) for t, v, _ in got} == want
     assert {r for r, _, _ in ex} == excluded
     assert not any("alice" in v or "5678" in v for _, v, _ in got) and not any("alice" in v for _, _, v in ex)
+
+
+def test_shortener_destination_comes_from_landing_not_final():
+    """Codex 1회차 F2: 단축 URL 사건의 최종 주소는 에이전트가 누른 링크의 다른 사이트일 수 있다. 목적지는 첫 화면(landing)."""
+    got, ex = ioc.network_indicators("https://bit.ly/AbCd", "https://innocent.example/help")
+    assert {(t, v) for t, v, _ in got} == {("url", "https://bit.ly/AbCd")} and ("unverified_destination", "domain",
+                                                                                "innocent.example") in ex
+    got, ex = ioc.network_indicators("https://bit.ly/AbCd", "https://innocent.example/help", landing="https://phish.example/x?a=1")
+    assert {(t, v) for t, v, _ in got} == {("url", "https://bit.ly/AbCd"), ("url", "https://phish.example/x"),
+                                           ("domain", "phish.example")}
+    assert ("elsewhere", "domain", "innocent.example") in ex
+    got, _ = ioc.network_indicators("https://bit.ly/AbCd", "https://www.phish.example/y", landing="https://phish.example/x")
+    assert {(t, v) for t, v, _ in got} >= {("url", "https://phish.example/x"), ("url", "https://www.phish.example/y")}
+
+
+def test_form_contact_with_nested_encoded_pii_is_dropped():
+    got, ex = ioc.contact_indicators([{"kind": "form", "value": "https://collect.example.net/u/alice%2540example.com"}])
+    assert got == [] and {r for r, _, _ in ex} == {"pii"}
 
 
 def test_contact_indicators_and_stix_urls():
@@ -200,7 +221,7 @@ def test_summary_counts_without_values(client, reviewer):
     s = client.get("/api/ioc?days=1", headers=h(tok)).json()
     assert s["cases"] >= 1 and s["by_type"]["url"] >= 1 and s["by_type"]["domain"] >= 1 and s["excluded"]["official"] >= 1
     assert f"sum-{tag}" not in json.dumps(s)  # 미리 보기에는 값이 없다(감사로그 없이 보는 화면)
-    assert s["limits"] == {"cases": ioc.CASES_MAX, "contact_cases": ioc.CONTACT_CASES_MAX, "indicators": ioc.INDICATORS_MAX}
+    assert s["limits"] == {"cases": ioc.CASES_MAX, "chain_cases": ioc.CHAIN_CASES_MAX, "indicators": ioc.INDICATORS_MAX}
 
 
 def test_case_limit_truncates_newest_first(client, reviewer, monkeypatch):
@@ -277,6 +298,8 @@ def test_contacts_only_when_asked_from_verified_chain(client, reviewer):
         with store.session() as s, s.begin():
             c = s.get(Case, cid)
             c.head_seq, c.head_hash = w.head.seq, w.head.hash if not bad else "0" * 64
+            v = s.scalar(select(Verdict).where(Verdict.case_id == cid))
+            v.head_seq, v.head_hash = c.head_seq, c.head_hash  # 판정이 본 증거 끝(판정 저장과 같게)
         ids.append(cid)
     plain = client.get("/api/ioc.csv?days=1", headers=h(tok)).text
     assert "01077776666" not in plain and f"tg_{tag}" not in plain
@@ -292,3 +315,38 @@ def test_contacts_only_when_asked_from_verified_chain(client, reviewer):
     detail = _store().session().scalars(select(AuditLog.detail).where(AuditLog.action == "ioc.export")
                                         .order_by(AuditLog.id.desc()).limit(1)).one()
     assert "fmt=stix days=1 contacts=1" in detail and "unverified=" in detail
+
+
+def test_chain_values_are_bounded_by_verdict_head(client, reviewer):
+    """Codex 1회차 F1: 연관 사이트를 조사하는 동안 저장한 판정은 원래 조사의 끝에 묶인다. 그 뒤에 체인에 붙은 기록(침해된
+    워커가 sub 없이 넣은 운영 정보·화면)은 담당자가 본 범위가 아니라 지표로 내지 않는다. 단축 URL 의 목적지도 같은 범위의
+    첫 화면에서만 꺼낸다(F2)."""
+    from safetrace.agent.runner import make_sealer
+    from safetrace.api.main import settings
+    from safetrace.evidence import EvidenceWriter
+
+    u, tok = reviewer
+    tag = secrets.token_hex(4)
+    store = _store()
+    with store.session() as s, s.begin():
+        c = Case(url=f"https://bit.ly/{tag}", final_url=f"https://innocent-{tag}.example/help", source="test",
+                 status="COMPLETED", created_by="t", threat={"threat": "phishing", "probability": 0.9})
+        s.add(c)
+    w = EvidenceWriter(settings.evidence_dir, c.id, make_sealer(settings))
+    w.append("start", {"url": c.url})
+    w.append("observe", {"step": 0, "url": f"https://dest-{tag}.example/login?u=1"})
+    w.append("intel", {"obs": 1, "url": f"https://dest-{tag}.example/login", "items": [
+        {"kind": "telegram", "value": f"before_{tag}", "src": "link"}]})
+    seen = w.head  # 담당자가 판정할 때 본 끝
+    w.append("observe", {"step": 1, "url": f"https://innocent-{tag}.example/help"})
+    w.append("intel", {"obs": 3, "url": f"https://innocent-{tag}.example/help", "items": [
+        {"kind": "telegram", "value": f"after_{tag}", "src": "link"}]})
+    with store.session() as s, s.begin():
+        x = s.get(Case, c.id)
+        x.head_seq, x.head_hash = w.head.seq, w.head.hash
+        s.add(Verdict(case_id=c.id, rev=1, decision="threat", threat="phishing", reviewer=u.username, user_id=u.id,
+                      ai_threat="phishing", head_seq=seen.seq, head_hash=seen.hash))
+    text = client.get("/api/ioc.csv?days=1&contacts=true", headers=h(tok)).text
+    assert f"https://bit.ly/{tag}" in text and f"https://dest-{tag}.example/login" in text and f"dest-{tag}.example," in text
+    assert f"before_{tag}" in text
+    assert f"after_{tag}" not in text and f"innocent-{tag}" not in text

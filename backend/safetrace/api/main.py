@@ -1560,9 +1560,23 @@ def get_referral(case_id: str, p: Annotated[Principal, Depends(need("investigato
 
 
 # ── IOC 내보내기(분석가 업무) ─────────────────────────────────────────
+def _verdict_records(case_id: str, v: Verdict) -> list[dict] | None:
+    """검증한 체인 가운데 판정이 본 범위(판정에 묶인 증거 끝 seq·hash 까지). 연관 사이트를 조사하는 동안 저장한 판정은
+    원래 조사의 끝에 묶이므로, 그 뒤에 붙은 기록(침해된 워커가 넣은 운영 정보 등)은 담당자가 본 것이 아니다(Codex 1회차 F1).
+    끝이 없거나 체인과 맞지 않으면 None."""
+    recs = _verified_records(case_id)
+    if recs is None or type(v.head_seq) is not int or not isinstance(v.head_hash, str):
+        return None
+    at = next((r for r in recs if r.get("seq") == v.head_seq), None)
+    if at is None or not hmac.compare_digest(str(at.get("hash")), v.head_hash):
+        return None
+    return [r for r in recs if type(r.get("seq")) is int and r["seq"] <= v.head_seq]
+
+
 def _ioc_export(days: int, contacts: bool) -> dict:
     """담당자의 현재 판정이 위협이고 그 확정이 최근 days 일 안인 사건(확정 시각 최신순, 상한 ioc.CASES_MAX)의 지표.
-    운영 정보는 contacts 일 때만, 앞쪽 ioc.CONTACT_CASES_MAX 건의 검증한 체인에서 꺼낸다(DB 의 연결 줄은 가린 값·열쇠뿐)."""
+    운영 정보(contacts 일 때만)와 단축 URL 의 목적지는 앞쪽 ioc.CHAIN_CASES_MAX 건의 검증한 체인에서, **판정이 본 증거
+    끝까지만** 꺼낸다(_verdict_records, DB 의 연결 줄은 가린 값·열쇠뿐)."""
     since = now_utc() - timedelta(days=days)
     top = select(Verdict.case_id, func.max(Verdict.rev).label("rev")).group_by(Verdict.case_id).subquery()
     with store.session() as s:
@@ -1572,17 +1586,17 @@ def _ioc_export(days: int, contacts: bool) -> dict:
                          .order_by(Verdict.created_at.desc(), Verdict.case_id).limit(ioc.CASES_MAX + 1)).all()
     truncated = len(rows) > ioc.CASES_MAX
     rows = rows[: ioc.CASES_MAX]
-    cases, chk = [], {"verified": 0, "unverified": 0, "over_limit": 0}
-    for i, (v, c) in enumerate(rows):
-        items = None
-        if contacts and i >= ioc.CONTACT_CASES_MAX:
-            chk["over_limit"] += 1
-        elif contacts:
-            recs = _verified_records(c.id)
-            chk["unverified" if recs is None else "verified"] += 1
-            items = _intel_of(recs)[0] if recs is not None else None
+    cases, chk, reads = [], {"verified": 0, "unverified": 0, "over_limit": 0}, 0
+    for v, c in rows:
+        recs, read = None, False
+        if (contacts or ioc.needs_landing(c.url, c.final_url)) and reads < ioc.CHAIN_CASES_MAX:
+            reads, read = reads + 1, True
+            recs = _verdict_records(c.id, v)
+        if contacts:
+            chk["over_limit" if not read else "unverified" if recs is None else "verified"] += 1
         cases.append({"id": c.id, "url": c.url, "final_url": c.final_url, "threat": v.threat, "at": v.created_at,
-                      "contacts": items})
+                      "landing": ioc.landing(recs) if recs is not None else None,
+                      "contacts": _intel_of(recs)[0] if contacts and recs is not None else None})
     inds, excluded, cut = ioc.collect(cases)
     ids = [c["id"] for c in cases]
     with store.session() as s:  # 연관 묶음(같은 사이트·운영 정보·키트 지문)은 내보내는 사건끼리만 잇는다
@@ -1603,7 +1617,7 @@ def ioc_summary(p: Annotated[Principal, Depends(need("reviewer"))], days: int = 
     skipped = sum(1 for x in ex["indicators"] if ioc.stix_pattern(x["type"], x["value"]) is None)
     return {"days": days, "since": ex["since"], "cases": ex["cases"], "truncated": ex["truncated"], "groups": ex["groups"],
             "contacts": ex["contacts"], **ioc.summary(ex["indicators"], ex["excluded"], skipped),
-            "limits": {"cases": ioc.CASES_MAX, "contact_cases": ioc.CONTACT_CASES_MAX, "indicators": ioc.INDICATORS_MAX},
+            "limits": {"cases": ioc.CASES_MAX, "chain_cases": ioc.CHAIN_CASES_MAX, "indicators": ioc.INDICATORS_MAX},
             "ms": round((time.monotonic() - t0) * 1000)}
 
 
