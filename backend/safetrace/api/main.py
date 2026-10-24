@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from .. import accounts, actions, ioc, package, related, report, verdicts
+from .. import accounts, actions, ioc, package, related, report, stats, verdicts
 from ..accounts import ROLES, AccountError
 from ..config import get_settings
 from ..evidence import Head, Signer, VerifyResult, iter_evidence, open_evidence, verify_case
@@ -1640,3 +1640,39 @@ def ioc_download(fmt: str, p: Annotated[Principal, Depends(need("reviewer"))],
     return Response(body, media_type=media, headers={"Content-Disposition": f'attachment; filename="{name}"',
                                                      "X-SafeTrace-Cases": str(ex["cases"]),
                                                      "X-SafeTrace-Truncated": str(int(ex["truncated"]))})
+
+
+# ── 현황판(분석가·모니터링 담당자) ─────────────────────────────────────────
+@app.get("/api/stats")
+def stats_view(p: Annotated[Principal, Depends(need("viewer"))], days: int = Query(30, ge=1, le=stats.DAYS_MAX)):
+    """기간(접수 시각, 1~90일) 안 사건의 접수·처리·판정·조치 집계. 값(주소·연락처)은 없고 수·이름표만이라 열람자도 본다.
+    최신 stats.CASES_MAX 건까지 센다(넘으면 truncated)."""
+    t0 = time.monotonic()
+    now = now_utc()
+    with store.session() as s:
+        rows = list(s.scalars(select(Case).where(Case.created_at >= now - timedelta(days=days))
+                              .order_by(Case.created_at.desc()).limit(stats.CASES_MAX + 1)))
+    truncated = len(rows) > stats.CASES_MAX
+    rows = rows[: stats.CASES_MAX]
+    ids = [c.id for c in rows]
+    latest, phases, parents = verdicts.latest_for(store, ids), store.phases_for(ids), store.parents_for(ids)
+    acts = actions.latest_for(store, ids)
+    with store.session() as s:
+        first = dict(s.execute(select(Verdict.case_id, func.min(Verdict.created_at)).where(Verdict.case_id.in_(ids))
+                               .group_by(Verdict.case_id)).all()) if ids else {}
+    cases = []
+    for c in rows:
+        ph, v = phases.get(c.id), latest.get(c.id)
+        cases.append({
+            "id": c.id, "url": c.url, "final_url": c.final_url, "source": c.source, "status": c.status,
+            "main_status": ph.main_status if ph is not None and c.status == "RUNNING" else None,
+            "threat": c.threat, "created_at": c.created_at,
+            # 원래 결과 시각: 연관 사이트를 조사한 사건은 원래 결과 이벤트, 아니면 끝난 시각
+            "main_at": ph.at if ph is not None else (c.updated_at if c.status in TERMINAL else None),
+            "verdict": {"decision": v.decision, "threat": v.threat, "ai_threat": v.ai_threat} if v else None,
+            "first_verdict_at": first.get(c.id), "auto": parents[c.id][0].auto if c.id in parents else None,
+            "action": acts[c.id].state if c.id in acts else None,
+        })
+    out = stats.build(cases, now, days, truncated)
+    out["ms"] = round((time.monotonic() - t0) * 1000)
+    return out
