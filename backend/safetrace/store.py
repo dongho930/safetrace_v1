@@ -172,6 +172,47 @@ class CaseCheck(Base):
     seconds: Mapped[float | None] = mapped_column(Float)
 
 
+class IntakeState(Base):
+    """자동 수집 켜기·끄기(한 줄, id=1). 없으면 꺼짐. 사람 관리자만 바꾼다(intake.py)."""
+
+    __tablename__ = "intake_state"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    updated_by: Mapped[str] = mapped_column(String(64))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class FeedFetch(Base):
+    """피드 한 번 받기. API 가 대기(pending) 줄을 먼저 만들고, 조사 컨테이너는 그 번호의 결과만 채울 수 있다(재확인과 같다)."""
+
+    __tablename__ = "feed_fetches"
+    __table_args__ = (Index("uq_feed_fetches_pending", "source", unique=True, sqlite_where=text("state = 'pending'"),
+                            postgresql_where=text("state = 'pending'")),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(16), index=True)  # openphish | phishtank
+    state: Mapped[str] = mapped_column(String(12), default="pending")  # pending | done | failed | expired
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    got: Mapped[int | None] = mapped_column(Integer)  # 받은 주소 수
+    picked: Mapped[int | None] = mapped_column(Integer)  # 대기열에 넣은 수
+    skipped: Mapped[dict | None] = mapped_column(JSON)  # 뺀 이유별 수
+    reason: Mapped[str | None] = mapped_column(String(64))
+
+
+class FeedItem(Base):
+    """대기열에 넣은 피드 주소. 끝나지 않은 자동 사건이 한도 아래일 때 하나씩 사건으로 만든다."""
+
+    __tablename__ = "feed_items"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fetch_id: Mapped[int] = mapped_column(ForeignKey("feed_fetches.id"), index=True)
+    source: Mapped[str] = mapped_column(String(16))
+    url: Mapped[str] = mapped_column(String(2048))
+    host: Mapped[str] = mapped_column(String(253), index=True)
+    state: Mapped[str] = mapped_column(String(12), default="queued", index=True)  # queued | created | dropped
+    case_id: Mapped[str | None] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class User(Base):
     """담당자 계정. 비밀번호는 Argon2id 해시로만 저장한다(accounts.py)."""
 

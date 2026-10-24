@@ -29,6 +29,9 @@ import {
   type Check,
   getReferral,
   getStats,
+  getIntake,
+  setIntake,
+  type Intake,
   type Pair,
   type Stats,
   type Referral,
@@ -293,6 +296,7 @@ export default function App() {
           groupsOn={groupsView}
           onGroups={() => setGroupsView(true)}
           canCreate={ROLE_RANK[user.role] >= ROLE_RANK.investigator}
+          canToggleIntake={user.kind === "user" && user.role === "admin"}
           onCreated={(c) => {
             setSelected(c.id);
             refresh();
@@ -712,6 +716,50 @@ function UsersDialog({ me: current, onClose }: { me: Me; onClose: () => void }) 
   );
 }
 
+// 자동 수집(공개 피싱 피드 → 조사 접수): 상태는 모두, 켜기·끄기는 사람 관리자만. 30초마다 새로 고침
+const SOURCE_LABEL: Record<string, string> = dict({ openphish: "OpenPhish", phishtank: "PhishTank" });
+const FETCH_STATE: Record<string, string> = dict({ pending: "받는 중", done: "받음", failed: "실패", expired: "응답 없음" });
+function IntakeBox({ canToggle }: { canToggle: boolean }) {
+  const [st, setSt] = useState<Intake | null>(null);
+  const [msg, setMsg] = useState("");
+  const load = useCallback(() => getIntake().then(setSt, (e: Error) => setMsg(e.message)), []);
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 30_000);
+    return () => clearInterval(t);
+  }, [load]);
+  if (!st) return msg ? <p className="intake-box small err">{msg}</p> : null;
+  return (
+    <section className="intake-box" aria-label="자동 수집">
+      <div className="intake-head">
+        <span className={st.enabled ? "intake-dot on" : "intake-dot"} />
+        <b>자동 수집 {st.enabled ? "켜짐" : "꺼짐"}</b>
+        {canToggle && (
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={() => {
+              setMsg("");
+              setIntake(!st.enabled).then(setSt, (e: Error) => setMsg(e.message));
+            }}
+          >
+            {st.enabled ? "끄기" : "켜기"}
+          </button>
+        )}
+      </div>
+      <p className="small muted">
+        대기 {st.queued} · 조사 {st.pending} · 24시간 {st.created24h}건
+      </p>
+      {st.sources.map(([k, x]) => (
+        <p key={k} className="small muted">
+          {SOURCE_LABEL[k] ?? k}: {x ? `${FETCH_STATE[x.state] ?? x.state} ${fmtTime(x.doneAt ?? x.requestedAt)}${x.picked != null ? ` · ${x.picked}/${x.got ?? 0}` : ""}` : "아직 안 받음"}
+        </p>
+      ))}
+      {msg && <p className="small err">{msg}</p>}
+    </section>
+  );
+}
+
 // ── 왼쪽: 접수 버튼 + 분류 폴더 ─────────────────────────
 function FolderNav({
   cases,
@@ -720,6 +768,7 @@ function FolderNav({
   groupsOn,
   onGroups,
   canCreate,
+  canToggleIntake,
   onCreated,
 }: {
   cases: CaseOut[];
@@ -728,6 +777,7 @@ function FolderNav({
   groupsOn: boolean;
   onGroups: () => void;
   canCreate: boolean;
+  canToggleIntake: boolean;
   onCreated: (c: CaseOut) => void;
 }) {
   const [adding, setAdding] = useState(false);
@@ -758,6 +808,7 @@ function FolderNav({
         <span className="folder-label">연관 묶음</span>
         <span className="folder-n" />
       </button>
+      <IntakeBox canToggle={canToggleIntake} />
       <p className="folder-note">
         AI 판단은 참고 의견입니다.
         <br />
@@ -809,6 +860,7 @@ function CaseList({
           <option value="report">신고</option>
           <option value="kisa">KISA</option>
           <option value="related">연관</option>
+          <option value="feed">자동 수집</option>
           <option value="test">시험</option>
         </select>
         <input id="case-search" className="field search" type="search" placeholder="URL 검색" value={query} maxLength={200} onChange={(e) => onQuery(e.target.value)} />
@@ -830,6 +882,7 @@ function CaseList({
               <span className="row-time">{fmtTime(c.created_at)}</span>
               <span className="row-sub">
                 {c.source === "related" && <span className="row-badge">{c.auto ? "연관·자동" : "연관"}</span>}
+                {c.source === "feed" && <span className="row-badge">자동 수집</span>}
                 {caseSummary(c)}
               </span>
               <StatusChip c={c} />
@@ -844,7 +897,7 @@ function CaseList({
 
 // ── 실시간 화면(목록 칸 맨 위, 항상 표시): 에이전트는 한 번에 한 건을 조사한다 ─────────────
 function LiveMonitor({ cases, onOpen, onEnded }: { cases: CaseOut[]; onOpen: (id: string) => void; onEnded: () => void }) {
-  const running = cases.find((c) => c.status === "RUNNING" && !c.auto) ?? cases.find((c) => c.status === "RUNNING");
+  const running = cases.find((c) => c.status === "RUNNING" && !c.auto && c.source !== "feed") ?? cases.find((c) => c.status === "RUNNING");
   // 목록은 최신순이므로 가장 오래된 대기 사건(다음 차례)은 뒤에서 찾는다
   const queued = running ? undefined : [...cases].reverse().find((c) => c.status === "QUEUED");
   return (
