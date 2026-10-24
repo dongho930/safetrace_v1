@@ -704,3 +704,30 @@ export const getStats = async (days: number): Promise<Stats> => {
     related: { auto: statN(r.auto), manual: statN(r.manual), autoAiThreat: statN(r.auto_ai_threat), autoConfirmed: statN(r.auto_confirmed) },
   };
 };
+
+// 자동 수집(공개 피싱 피드 → 조사 접수). 상태는 열람자 이상, 켜기·끄기는 사람 관리자만. 주소 값은 오지 않는다
+export type IntakeSource = { state: string; requestedAt: string; doneAt: string | null; got: number | null; picked: number | null; reason: string | null } | null;
+export type Intake = { enabled: boolean; updatedBy: string | null; updatedAt: string | null; sources: [string, IntakeSource][]; queued: number; pending: number; created24h: number };
+const cleanIntake = (v: unknown): Intake => {
+  const o = isObj(v) ? v : {};
+  const n = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : 0);
+  const srcs = isObj(o.sources) ? o.sources : {};
+  return {
+    enabled: o.enabled === true,
+    updatedBy: strOr(o.updated_by)?.slice(0, 64) ?? null,
+    updatedAt: strOr(o.updated_at)?.slice(0, 40) ?? null,
+    sources: Object.entries(srcs)
+      .slice(0, 5)
+      .map(([k, x]): [string, IntakeSource] => [
+        k.slice(0, 16),
+        isObj(x) && typeof x.state === "string" && typeof x.requested_at === "string"
+          ? { state: x.state.slice(0, 12), requestedAt: x.requested_at.slice(0, 40), doneAt: strOr(x.done_at)?.slice(0, 40) ?? null, got: typeof x.got === "number" ? x.got : null, picked: typeof x.picked === "number" ? x.picked : null, reason: strOr(x.reason)?.slice(0, 64) ?? null }
+          : null,
+      ]),
+    queued: n(o.queued),
+    pending: n(o.pending),
+    created24h: n(o.created_24h),
+  };
+};
+export const getIntake = async () => cleanIntake(await req<unknown>("/api/intake"));
+export const setIntake = async (enabled: boolean) => cleanIntake(await req<unknown>("/api/intake", { method: "POST", body: JSON.stringify({ enabled }) }));

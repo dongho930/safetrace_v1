@@ -2,12 +2,13 @@
 #
 # 네트워크 분리
 #   core     : api, db, redis, decision          (DB 는 core 에만 있음)
-#   sandbox  : agent, egress, redis, decision   (internal: 외부로 직접 나갈 수 없음)
+#   sandbox  : agent, feeder, egress, redis, decision   (internal: 외부로 직접 나갈 수 없음)
 #   outside  : egress 만 연결 (인터넷 출구 1곳)
 #   signing  : signer, agent, api                (internal: 서명 서비스 전용)
 #
 # 에이전트 워커는 DB 접속 정보도 Jev API 키도 증거 서명 키도 없다. 외부 접속은 egress 검문 프록시로만 나간다.
 # 증거 볼륨은 agent 가 쓰고 api 는 읽기 전용으로 마운트한다. 서명은 signer 가 하고 키는 signer 와 api(검증)만 가진다.
+# 자동 수집의 피드 받기는 브라우저 조사 워커(agent)가 아니라 feeder 가 하고, 결과 서명 키는 feeder 와 api 만 가진다.
 
 name: safetrace_v1  # 다른 로컬 safetrace 프로젝트와 볼륨·네트워크가 겹치지 않게
 
@@ -48,6 +49,7 @@ services:
       ST_CORS_ORIGINS: ${ST_CORS_ORIGINS:-["http://localhost:8080"]}
       ST_ALLOWED_PORTS: "[80,443]"
       ST_TRUSTED_PROXIES: '["web"]'   # 로그인 제한에 쓸 접속 주소: web(nginx)이 넘긴 X-Forwarded-For 만 믿는다
+      ST_FEED_KEY: ${ST_FEED_KEY:?}   # 자동 수집 피드 결과의 feeder 서명 확인용
     volumes: [evidence:/evidence:ro]
     read_only: true
     tmpfs: [/tmp]
@@ -131,6 +133,26 @@ services:
         limits: {cpus: "2", memory: 2g}
     depends_on: [redis, decision, egress, signer]
     networks: [sandbox, signing]
+
+  # 자동 수집의 피드 받기(공개 피싱 피드). 조사 대상 페이지를 열지 않는 작은 컨테이너라 브라우저 워커와 떨어뜨린다.
+  # 바깥은 검문 프록시로만, 결과는 ST_FEED_KEY 로 서명한다(브라우저 워커에는 이 키가 없다). DB·증거·Jev 키 없음
+  feeder:
+    <<: *common
+    build: ./backend
+    command: ["python", "-m", "safetrace.agent.feeder"]
+    environment:
+      ST_DATABASE_URL: "sqlite:////tmp/unused.db"
+      ST_REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      ST_EGRESS_PROXY: http://egress:3128
+      ST_FEED_KEY: ${ST_FEED_KEY:?}
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    deploy:
+      resources:
+        limits: {cpus: "0.5", memory: 256m}
+    depends_on: [redis, egress]
+    networks: [sandbox]
 
   web:
     <<: *common

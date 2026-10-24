@@ -21,6 +21,7 @@ TypeSafe의 의사결정 모델 **Jev**가 다음 행동과 위협 유형을 정
 | `backend/safetrace/evidence.py` | 증거 해시 체인·HMAC 서명·검증 |
 | `backend/safetrace/signer/` | 서명 서비스: 증거 서명 키를 에이전트와 분리, seq·시각을 서비스가 정하고 사건별 체인을 열고 닫음 |
 | `backend/safetrace/api/` | FastAPI: 사건 접수·조회, SSE 실시간 진행, 증거 파일·무결성 검증, 담당자 판정, 검토 패키지 |
+| `backend/safetrace/intake.py`, `agent/feeder.py`, `agent/feeds.py` | 자동 수집: 공개 피싱 피드(OpenPhish·PhishTank)를 수집 컨테이너(feeder)가 받아 서명하고, API 가 검사·중복 제거 후 조사 접수 |
 | `frontend/` | 실시간 조사 콘솔(React 19 + TypeScript + Vite) |
 | `testpages/` | 단계형 가짜 위협 페이지 + 에이전트 공격 시나리오 10종 + 요청 기록 서버 |
 | `data/normal_sites.csv` | 정상 대조 사이트 168개(정부 허가 사행사업 공식 사이트 6개 포함) |
@@ -69,6 +70,17 @@ docker compose exec api python -m safetrace.accounts add <아이디> --role admi
 
 - `sandbox` 네트워크는 `internal`: 에이전트는 인터넷에 직접 나갈 수 없고 `egress` 프록시로만 나간다.
 - 에이전트에는 DB 접속 정보와 Jev 키가 없다. Jev 키는 `decision`에만 있다.
+- 자동 수집의 피드 받기는 브라우저 조사 워커가 아니라 `feeder`(격리망, 검문 프록시로만, CPU 0.5·메모리 256MB)가 하고, 결과 서명 키 `ST_FEED_KEY` 는 `feeder`·`api` 만 가진다.
+
+## 자동 수집
+
+콘솔 왼쪽 아래 '자동 수집'에서 사람 관리자가 켜면, 사람이 접수하지 않아도 공개 피싱 피드의 주소를 조사한다(`POST /api/intake`, 상태 `GET /api/intake`).
+
+- 출처: OpenPhish 공개 피드(12시간마다, 비상업 이용만), PhishTank(6시간마다, 키 없이 최신순 앞부분 256KB). 받을 주소는 수집 코드에 고정돼 있다.
+- 고르기: 형식 검사, 같은 호스트는 7일 안에 다시 넣지 않음(사람 신고 포함), 같은 키트 모양(공용 호스팅 + 첫 경로, 아니면 등록 도메인)은 한 번에 2개, 한 번 받기에 30개.
+- 사람 신고 우선: 끝나지 않은 자동 수집 사건이 1건 아래일 때만 하나씩 접수한다(조사 컨테이너가 하나여도 사람 신고는 길어야 한 건 기다린다). 24시간 120건 상한. 사람 접수 한도에는 세지 않는다.
+- 판정은 그대로 검토관이 한다. 목록에 '자동 수집' 배지, 출처 거르기 '자동 수집'.
+- 설정 `ST_INTAKE_*`(출처·바퀴 간격·한도), 비밀값 `ST_FEED_KEY`(`.env.example`).
 
 ## 연관 사이트
 

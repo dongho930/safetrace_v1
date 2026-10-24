@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from .. import accounts, actions, ioc, package, related, report, stats, verdicts
+from .. import accounts, actions, intake, ioc, package, related, report, stats, verdicts
 from ..accounts import ROLES, AccountError
 from ..config import get_settings
 from ..evidence import Head, Signer, VerifyResult, iter_evidence, open_evidence, verify_case
@@ -45,7 +45,7 @@ from ..netguard import BlockedURL, parse_url
 from ..preview import preview_image
 from ..ratelimit import FailureLimiter
 from ..signer.client import ChainAdmin, SignerError
-from ..store import TERMINAL, AuditLog, Case, CaseAction, CaseCheck, CaseLink, CasePhase, CaseSite, Store, Verdict
+from ..store import TERMINAL, AuditLog, Case, CaseAction, CaseCheck, CaseLink, CasePhase, CaseSite, FeedItem, Store, Verdict
 from ..store import now as now_utc
 
 log = logging.getLogger("safetrace.api")
@@ -214,6 +214,7 @@ def record_event(case_id: str, payload: dict) -> None:
         recs = _verified_records(case_id)  # 닫고 검증한 체인(한 번만 읽고 검증해 아래 둘이 함께 쓴다)
         _write_intel(case_id, recs)
         _auto_related(case_id, recs)
+        _intake_next(case_id)
 
 
 def _verified_records(case_id: str) -> list[dict] | None:
@@ -397,6 +398,112 @@ def _recheck_forever():
             log.exception("recheck scheduler error")
 
 
+# ── 자동 수집(intake.py) ─────────────────────────────────────────
+def enqueue_feed(fetch_id: int, source: str) -> None:
+    """피드 받기 한 건을 수집 컨테이너(feeder)에 맡긴다(운영: Redis st:feeds, 개발: 같은 프로세스 스레드). 주소는 넘기지 않고
+    출처 이름만 — 받을 주소는 수집 코드(agent/feeds.py)에 고정돼 있다."""
+    if _redis is not None:
+        key = settings.feed_key.get_secret_value().encode()  # 요청에도 서명: feeder 는 API 가 만든 요청만 받는다
+        _redis.xadd("st:feeds", {"fetch_id": str(fetch_id), "source": source,
+                                 "mac": intake.request_mac(key, fetch_id, source) if key else ""})
+        return
+    from ..agent.feeds import fetch  # 개발 모드에서만
+
+    def job():
+        try:
+            res = fetch(source, settings.egress_proxy, set(settings.test_allowlist))
+        except Exception as e:  # noqa: BLE001
+            res = {"ok": False, "reason": type(e).__name__}
+        record_feed(fetch_id, res, trusted=True)  # 같은 프로세스에서 받은 결과(서명 없음)
+
+    _executor.submit(job)
+
+
+def record_feed(fetch_id: int, res: dict, trusted: bool = False) -> None:
+    """피드 받기 결과. API 가 만든 대기 번호이고 feeder 의 서명(ST_FEED_KEY)이 맞을 때만 한 번 받는다. Redis 로 온 결과는
+    누가 썼는지 알 수 없어(브라우저 워커도 이벤트를 쓸 수 있다) 서명을 본다. trusted 는 같은 프로세스에서 받은 결과(개발 모드)."""
+    f = intake.record_fetch(store, fetch_id, res, seen_hosts=intake.recent_hosts(store, settings.intake_dedup_days),
+                            allowed_ports=settings.allowed_ports, cap=settings.intake_round_max,
+                            kit_max=settings.intake_kit_max,
+                            key=None if trusted else settings.feed_key.get_secret_value().encode())
+    if f is None:
+        store.audit("system", "intake.fetch_rejected", detail=f"id={str(fetch_id)[:12]}")
+        return
+    store.audit(intake.INTAKE_ACTOR, "intake.fetch", detail=f"id={f.id} source={f.source} state={f.state} got={f.got} "
+                f"picked={f.picked} skipped={json.dumps(f.skipped or {})} reason={f.reason or '-'}"
+                + (f" sec={float(res['seconds']):.2f}" if isinstance(res.get("seconds"), (int, float)) else "")
+                + (f" bytes={int(res['bytes'])}" if type(res.get("bytes")) is int else ""))
+
+
+def intake_tick(at=None) -> int:
+    """자동 수집 한 바퀴: 오래된 받기 만료, 때가 된 출처 받기 요청, 대기열에서 사건 만들기(_intake_drip).
+    꺼져 있으면 아무것도 하지 않는다. 반환: 만든 사건 수."""
+    intake.expire_fetches(store, at)
+    with _intake_lock:  # 끄기(intake_set)와 같은 잠금: 끈 뒤에는 새 받기를 맡기지 않는다(Codex 1회차 F2)
+        if not intake.is_enabled(store):
+            return 0
+        for src in intake.due_sources(store, settings.intake_sources, at):
+            f = intake.request_fetch(store, src, at)
+            if f is not None:
+                store.audit(intake.INTAKE_ACTOR, "intake.fetch_request", detail=f"id={f.id} source={src}")
+                enqueue_feed(f.id, src)
+    return _intake_drip(at)
+
+
+def _intake_drip(at=None) -> int:
+    """끝나지 않은 자동 수집 사건이 한도 아래면 대기열에서 하나씩 사건을 만든다(사람 신고가 길어야 한도만큼만 기다리게).
+    바퀴마다, 그리고 자동 수집 사건이 끝날 때마다 부른다(조사 컨테이너가 바퀴를 기다리며 쉬지 않게). 반환: 만든 사건 수."""
+    made = 0
+    since = (at or now_utc()) - timedelta(hours=24)
+    with _intake_lock, store.session() as s:  # 세기와 넣기 사이에 다른 접수·끄기가 끼지 않게
+        if not intake.is_enabled(store):  # 잠금 안에서 다시 본다: 끄기 응답 뒤에 새 사건이 생기지 않게(Codex 1회차 F2)
+            return 0
+        mine = Case.created_by == intake.INTAKE_ACTOR
+        pending = s.scalar(select(func.count()).select_from(Case).where(mine, Case.status.in_(PENDING)))
+        day = s.scalar(select(func.count()).select_from(Case).where(mine, Case.created_at >= since))
+        room = min(settings.intake_max_pending - pending, settings.intake_daily_max - day)
+        while room > 0:
+            item = s.scalar(select(FeedItem).where(FeedItem.state == "queued").order_by(FeedItem.id).limit(1))
+            if item is None:
+                break
+            try:
+                parse_url(item.url, settings.allowed_ports)
+            except BlockedURL:
+                item.state = "dropped"
+                s.commit()
+                continue
+            c = Case(url=item.url, source="feed", created_by=intake.INTAKE_ACTOR)
+            s.add(c)
+            s.flush()
+            item.state, item.case_id = "created", c.id
+            s.commit()
+            store.audit(intake.INTAKE_ACTOR, "case.create_feed", c.id, f"source={item.source} item={item.id}")
+            enqueue(c.id, c.url)
+            made += 1
+            room -= 1
+    return made
+
+
+def _intake_next(case_id: str) -> None:
+    """자동 수집 사건이 끝나면 바로 다음 것을 접수한다(켜져 있을 때만). 실패해도 이벤트 처리는 계속."""
+    try:
+        with store.session() as s:
+            c = s.get(Case, case_id)
+        if c is not None and c.created_by == intake.INTAKE_ACTOR:
+            _intake_drip()  # 켜져 있는지는 잠금 안에서 본다
+    except Exception:  # noqa: BLE001
+        log.exception("intake next failed")
+
+
+def _intake_forever():
+    while True:
+        time.sleep(settings.intake_tick_s)
+        try:
+            intake_tick()
+        except Exception:
+            log.exception("intake scheduler error")
+
+
 def enqueue(case_id: str, url: str):
     if _chains is not None:
         try:
@@ -436,6 +543,8 @@ def _consume_events_forever():
                     cid = f.get("case_id", "")
                     if _CASE_ID.match(cid):
                         record_event(cid, json.loads(f.get("payload", "{}")))
+                    elif str(f.get("feed_id", "")).isdigit():  # 자동 수집: 피드 받기 결과(사건이 아니라 받기 번호)
+                        record_feed(int(f["feed_id"]), json.loads(f.get("payload", "{}")))
                     _redis.xack("st:events", group, mid)
         except Exception:
             log.exception("event consumer error")
@@ -447,6 +556,7 @@ async def lifespan(_app: FastAPI):
         threading.Thread(target=_consume_events_forever, daemon=True).start()
     if settings.recheck_enabled:
         threading.Thread(target=_recheck_forever, daemon=True).start()
+    threading.Thread(target=_intake_forever, daemon=True).start()  # 켜고 끄기는 콘솔(관리자)이 DB 에 둔다
     yield
 
 
@@ -800,7 +910,8 @@ def _check_intake_limits(s, p: Principal) -> None:
         raise HTTPException(429, "끝나지 않은 사건이 너무 많습니다. 조사가 끝난 뒤 다시 접수하세요",
                             headers={"Retry-After": "60"})
     # 자동 연관 사건(system:related)은 자기 전용 한도(related_auto_max_pending)만 받는다: 사람 신고를 막지 않게
-    total = s.scalar(select(func.count()).select_from(Case).where(pending, Case.created_by != related.AUTO_ACTOR))
+    total = s.scalar(select(func.count()).select_from(Case).where(
+        pending, Case.created_by.not_in((related.AUTO_ACTOR, intake.INTAKE_ACTOR))))
     if total >= settings.case_max_pending_total:
         store.audit(p.name, "case.rejected", detail=f"limit=total pending={total}")
         raise HTTPException(503, "대기열이 가득 찼습니다. 잠시 뒤 다시 접수하세요", headers={"Retry-After": "60"})
@@ -1676,3 +1787,29 @@ def stats_view(p: Annotated[Principal, Depends(need("viewer"))], days: int = Que
     out = stats.build(cases, now, days, truncated)
     out["ms"] = round((time.monotonic() - t0) * 1000)
     return out
+
+
+# ── 자동 수집 켜기·끄기(관리자) ─────────────────────────────────────────
+class IntakeIn(BaseModel):
+    enabled: bool = Field(strict=True)  # "yes"·1 같은 값을 참으로 바꿔 받지 않는다
+
+
+def _intake_view() -> dict:
+    return {**intake.status(store, settings.intake_sources),
+            "limits": {"max_pending": settings.intake_max_pending, "daily_max": settings.intake_daily_max,
+                       "round_max": settings.intake_round_max, "dedup_days": settings.intake_dedup_days}}
+
+
+@app.get("/api/intake")
+def intake_status(p: Annotated[Principal, Depends(need("viewer"))]):
+    """자동 수집 상태: 켜짐, 출처별 마지막 받기(수만), 대기열·조사 중·최근 24시간 사건 수. 주소 값은 없다."""
+    return _intake_view()
+
+
+@app.post("/api/intake")
+def intake_set(body: IntakeIn, p: Annotated[Principal, Depends(need("admin", human=True))]):
+    """자동 수집 켜기·끄기(사람 관리자만, 감사로그). 끄면 새 받기·새 사건을 만들지 않는다(대기열은 남는다)."""
+    with _intake_lock:  # 사건 만들기·받기 요청과 같은 잠금: 응답 뒤에는 꺼진 상태로만 돈다
+        intake.set_enabled(store, body.enabled, p.name)
+    store.audit(p.name, "intake.enable" if body.enabled else "intake.disable")
+    return _intake_view()

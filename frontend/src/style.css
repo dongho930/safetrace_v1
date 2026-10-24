@@ -130,6 +130,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .folder-label { flex: 1; }
 .folder-n { font-size: 12px; color: var(--muted); }
 .folder-note { margin-top: auto; padding: 12px 10px 0; border-top: 1px solid var(--line-soft); font-size: 12px; color: var(--muted); line-height: 1.7; }
+.intake-box { margin-top: auto; padding: 10px 10px 8px; border-top: 1px solid var(--line-soft); display: grid; gap: 2px; }
+.intake-box p { margin: 0; }
+.intake-box + .folder-note { margin-top: 0; }
+.intake-head { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.intake-head .btn { margin-left: auto; }
+.intake-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle-line); }
+.intake-dot.on { background: var(--safe); }
 
 /* 목록 칸: 상세와 반씩 나눈다(1920 기준 860·860). 340 밑으로는 줄지 않는다 */
 .caselist { flex: 1 1 0; min-width: 340px; min-height: 0; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; }
