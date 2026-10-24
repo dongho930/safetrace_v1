@@ -403,7 +403,9 @@ def enqueue_feed(fetch_id: int, source: str) -> None:
     """피드 받기 한 건을 수집 컨테이너(feeder)에 맡긴다(운영: Redis st:feeds, 개발: 같은 프로세스 스레드). 주소는 넘기지 않고
     출처 이름만 — 받을 주소는 수집 코드(agent/feeds.py)에 고정돼 있다."""
     if _redis is not None:
-        _redis.xadd("st:feeds", {"fetch_id": str(fetch_id), "source": source})
+        key = settings.feed_key.get_secret_value().encode()  # 요청에도 서명: feeder 는 API 가 만든 요청만 받는다
+        _redis.xadd("st:feeds", {"fetch_id": str(fetch_id), "source": source,
+                                 "mac": intake.request_mac(key, fetch_id, source) if key else ""})
         return
     from ..agent.feeds import fetch  # 개발 모드에서만
 

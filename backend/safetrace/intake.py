@@ -39,10 +39,25 @@ URL_MAX = 2048
 SKIP_KEYS = ("format", "same_host", "seen_host", "kit", "over_cap")
 
 
-def feed_mac(key: bytes, fetch_id: int, source: str, text: str) -> str:
-    """피드 결과 서명: 받기 번호·출처·본문 해시에 묶는다(다른 번호·출처로 옮겨 쓸 수 없다)."""
+def result_fields(res: dict) -> tuple[bool, str, bool, str]:
+    """API 가 처리에 쓰는 결과 필드를 정해진 모양으로: (성공, 본문, 잘림, 실패 이유). 서명도 이 값 전체에 건다."""
+    text = res.get("text") if isinstance(res.get("text"), str) else ""
+    ok = res.get("ok") is True and isinstance(res.get("text"), str)
+    return ok, text, res.get("truncated") is True, str(res.get("reason") or "")[:64]
+
+
+def feed_mac(key: bytes, fetch_id: int, source: str, res: dict) -> str:
+    """피드 결과 서명: 받기 번호·출처와 처리에 쓰는 결과 필드 전체(성공·잘림·실패 이유·본문 해시)에 묶는다. 다른 번호·출처로
+    옮겨 쓰거나, 실패를 빈 성공으로·잘림 여부를 바꿔 쓸 수 없다(Codex 2회차 F1)."""
+    ok, text, cut, reason = result_fields(res)
     digest = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
-    return hmac.new(key, f"safetrace.feed/1|{fetch_id}|{source}|{digest}".encode(), hashlib.sha256).hexdigest()
+    msg = f"safetrace.feed/2|{fetch_id}|{source}|{int(ok)}|{int(cut)}|{reason}|{digest}"
+    return hmac.new(key, msg.encode("utf-8", "surrogatepass"), hashlib.sha256).hexdigest()
+
+
+def request_mac(key: bytes, fetch_id: int, source: str) -> str:
+    """받기 요청 서명(API → feeder): feeder 는 API 가 만든 요청만 받는다(Codex 2회차 F2)."""
+    return hmac.new(key, f"safetrace.feed-request/1|{fetch_id}|{source}".encode(), hashlib.sha256).hexdigest()
 
 
 def parse(source: str, text: str, truncated: bool) -> list[str]:
@@ -195,17 +210,17 @@ def record_fetch(store: Store, fetch_id: object, res: object, *, seen_hosts: set
         f = s.get(FeedFetch, fetch_id, with_for_update=True)
         if f is None or f.state != "pending":
             return None
+        ok, text, cut, reason = result_fields(res)
         if key is not None:
-            text = res.get("text") if isinstance(res.get("text"), str) else ""
             mac = res.get("mac") if isinstance(res.get("mac"), str) else ""
-            if not key or not hmac.compare_digest(mac, feed_mac(key, f.id, f.source, text)):
+            if not key or not hmac.compare_digest(mac, feed_mac(key, f.id, f.source, res)):
                 return None  # 서명이 없거나 맞지 않는 결과는 받지 않는다(대기 줄은 그대로 두어 진짜 결과를 기다린다)
         f.done_at = _at(at)
-        if res.get("ok") is not True or not isinstance(res.get("text"), str):
+        if not ok:
             f.state = "failed"
-            f.reason = str(res.get("reason") or "error")[:64]
+            f.reason = reason or "error"
             return f
-        urls = parse(f.source, res["text"][:1024 * 1024], res.get("truncated") is True)
+        urls = parse(f.source, text[:1024 * 1024], cut)
         picked, skipped = choose(urls, seen_hosts=seen_hosts, allowed_ports=allowed_ports, cap=cap, kit_max=kit_max)
         s.add_all(FeedItem(fetch_id=f.id, source=f.source, url=u, host=h, created_at=_at(at)) for u, h in picked)
         f.state, f.got, f.picked = "done", len(urls), len(picked)

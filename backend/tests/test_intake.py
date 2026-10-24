@@ -142,8 +142,9 @@ def feed_key(monkeypatch):
     return KEY
 
 
-def _signed(fid: int, source: str, text: str) -> dict:
-    return {"ok": True, "text": text, "truncated": False, "mac": intake.feed_mac(KEY, fid, source, text)}
+def _signed(fid: int, source: str, text: str, **over) -> dict:
+    res = {"ok": True, "text": text, "truncated": False, **over}
+    return {**res, "mac": intake.feed_mac(KEY, fid, source, res)}
 
 
 @pytest.fixture(scope="module")
@@ -232,17 +233,22 @@ class _FakeRedis:
         self.added.append((stream, fields))
 
 
+def _req(fid: str, source: str = "openphish") -> dict:
+    return {"fetch_id": fid, "source": source, "mac": intake.request_mac(KEY, int(fid), source)}
+
+
 def test_feeder_fetches_only_named_sources_and_signs(monkeypatch):
     calls = []
     monkeypatch.setattr(feeder, "fetch", lambda src, proxy, allow: calls.append(src) or {"ok": True, "text": "https://x.example/"})
-    r = _FakeRedis()
+    r, st = _FakeRedis(), feeder.State()
     s = type("S", (), {"egress_proxy": None, "test_allowlist": []})()
-    feeder.run_one(r, s, KEY, {"fetch_id": "7", "source": "https://evil.example/feed"})  # 주소를 넘겨도 받지 않는다
-    feeder.run_one(r, s, KEY, {"fetch_id": "x", "source": "openphish"})
+    assert feeder.run_one(r, s, KEY, {**_req("7"), "source": "https://evil.example/feed"}, st) == "bad_request"
+    assert feeder.run_one(r, s, KEY, {**_req("7"), "fetch_id": "x"}, st) == "bad_request"
     assert calls == [] and r.added == []
-    feeder.run_one(r, s, KEY, {"fetch_id": "7", "source": "openphish"})
+    assert feeder.run_one(r, s, KEY, _req("7"), st) == "fetched"
     assert calls == ["openphish"] and r.added[0][1]["feed_id"] == "7" and r.added[0][1]["case_id"] == ""
-    assert json.loads(r.added[0][1]["payload"])["mac"] == intake.feed_mac(KEY, 7, "openphish", "https://x.example/")
+    res = json.loads(r.added[0][1]["payload"])
+    assert res["mac"] == intake.feed_mac(KEY, 7, "openphish", {k: v for k, v in res.items() if k != "mac"})
 
 
 def test_browser_worker_does_not_take_feed_jobs():
@@ -295,11 +301,11 @@ def test_forged_feed_result_is_rejected(client, admin, clean_intake, monkeypatch
     evil, real = f"https://target-{tag}.example/", f"https://real-{tag}.example/"
     m.record_feed(f.id, {"ok": True, "text": evil})                                                         # 서명 없음
     m.record_feed(f.id, {"ok": True, "text": evil, "mac": "0" * 64})                                        # 틀린 서명
-    m.record_feed(f.id, {"ok": True, "text": evil, "mac": intake.feed_mac(KEY, other.id, "phishtank", evil)})  # 다른 번호
-    m.record_feed(f.id, {"ok": True, "text": evil, "mac": intake.feed_mac(KEY, f.id, "phishtank", evil)})      # 다른 출처
+    m.record_feed(f.id, {"ok": True, "text": evil, "mac": intake.feed_mac(KEY, other.id, "phishtank", {"ok": True, "text": evil})})  # 다른 번호
+    m.record_feed(f.id, {"ok": True, "text": evil, "mac": intake.feed_mac(KEY, f.id, "phishtank", {"ok": True, "text": evil})})      # 다른 출처
     m.record_feed(f.id, {**_signed(f.id, "openphish", real), "text": evil})                                 # 본문 바꿈
     monkeypatch.setattr(m.settings, "feed_key", SecretStr(""))
-    m.record_feed(f.id, {"ok": True, "text": evil, "mac": intake.feed_mac(b"", f.id, "openphish", evil)})     # 키가 없는 API
+    m.record_feed(f.id, {"ok": True, "text": evil, "mac": intake.feed_mac(b"", f.id, "openphish", {"ok": True, "text": evil})})     # 키가 없는 API
     monkeypatch.setattr(m.settings, "feed_key", SecretStr(KEY.decode()))
     assert m._intake_drip() == 0 and jobs == []
     with clean_intake.session() as s:
@@ -320,3 +326,36 @@ def test_disabled_intake_creates_nothing_even_if_queued(client, admin, clean_int
     m.record_feed(f.id, _signed(f.id, "openphish", f"https://q-{secrets.token_hex(4)}.example/"))
     client.post("/api/intake", json={"enabled": False}, headers=h(admin[1]))
     assert m._intake_drip() == 0 and jobs == []
+
+
+# ── Codex 2회차 정탐 재현 ─────────────────────────
+def test_signature_covers_success_and_truncation(clean_intake):
+    """F1: 서명이 본문만 덮으면 실패 결과를 빈 성공으로(재시도가 12시간 밀림), 잘림 여부를 바꿔(마지막 줄 처리) 쓸 수 있었다."""
+    store = clean_intake
+    kw = {"seen_hosts": set(), "allowed_ports": PORTS, "cap": 30, "kit_max": 2, "key": KEY}
+    f = intake.request_fetch(store, "openphish", at=now() + timedelta(days=200))
+    failed = _signed(f.id, "openphish", "", ok=False, reason="timeout")
+    assert intake.record_fetch(store, f.id, {**failed, "ok": True}, **kw) is None  # 실패를 성공으로
+    tag = secrets.token_hex(4)
+    good = _signed(f.id, "openphish", f"https://a-{tag}.example/\nhttps://b-{tag}.example/", truncated=False)
+    assert intake.record_fetch(store, f.id, {**good, "truncated": True}, **kw) is None  # 잘림 여부 바꿈
+    with store.session() as s:
+        assert s.get(FeedFetch, f.id).state == "pending"
+    assert intake.record_fetch(store, f.id, good, **kw).picked == 2
+
+
+def test_feeder_takes_only_signed_fresh_requests(monkeypatch):
+    """F2: 브라우저 워커도 st:feeds 에 쓸 수 있다. API 서명이 없는 요청·같은 번호 재전송·간격 안의 다른 번호로는 외부에서 받지 않는다."""
+    calls = []
+    monkeypatch.setattr(feeder, "fetch", lambda src, proxy, allow: calls.append(src) or {"ok": True, "text": ""})
+    r, st = _FakeRedis(), feeder.State()
+    s = type("S", (), {"egress_proxy": None, "test_allowlist": []})()
+    for i in range(5):  # 서명 없는 가짜 요청
+        assert feeder.run_one(r, s, KEY, {"fetch_id": str(999999 + i), "source": "openphish"}, st) == "unsigned"
+    assert feeder.run_one(r, s, KEY, {**_req("12"), "mac": intake.request_mac(b"x" * 32, 12, "openphish")}, st) == "unsigned"
+    assert calls == []
+    assert feeder.run_one(r, s, KEY, _req("12"), st) == "fetched"
+    assert feeder.run_one(r, s, KEY, _req("12"), st) == "duplicate"   # 서명된 요청을 다시 넣어도
+    assert feeder.run_one(r, s, KEY, _req("13"), st) == "too_soon"    # 간격 안의 다른 번호
+    assert feeder.run_one(r, s, KEY, _req("14", "phishtank"), st) == "fetched"  # 출처마다 따로
+    assert calls == ["openphish", "phishtank"]
