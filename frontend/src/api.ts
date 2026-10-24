@@ -638,3 +638,69 @@ export const getIntel = async (id: string): Promise<CaseIntel> => {
       ),
   };
 };
+
+// 현황판(열람자 이상): 기간 안 사건의 접수·처리·판정·조치 수. 서버가 센 값이지만 모양을 다시 맞춘다
+export type Pair = [string, number];
+export type Stats = {
+  days: number;
+  cases: number;
+  truncated: boolean;
+  ms: number;
+  kpi: { received: number; finished: number; pending: number; aiThreat: number; confirmed: number; waiting: number; reappeared: number };
+  daily: { date: string; received: number; aiThreat: number; confirmed: number }[];
+  ai: Pair[];
+  decisions: Pair[];
+  confirmed: Pair[];
+  rules: Pair[];
+  rulesConfirmed: Record<string, number>;
+  brands: Pair[];
+  hosting: Pair[];
+  tlds: Pair[];
+  actions: Pair[];
+  timing: { toMainS: { n: number; median: number | null; p90: number | null }; toVerdictH: { n: number; median: number | null; p90: number | null }; waitingH: { n: number; median: number | null; max: number | null } };
+  agreement: { pairs: number; sameClass: number; bothThreat: number; sameType: number; aiThreatReviewerBenign: number; aiBenignReviewerThreat: number };
+  related: { auto: number; manual: number; autoAiThreat: number; autoConfirmed: number };
+};
+const statN = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
+const statOpt = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+const statObj = (v: unknown): Record<string, unknown> => (isObj(v) ? v : {});
+const statPairs = (v: unknown): Pair[] =>
+  list(v).slice(0, 20).flatMap((x): Pair[] => (Array.isArray(x) && typeof x[0] === "string" && typeof x[1] === "number" ? [[x[0].slice(0, 40), statN(x[1])]] : []));
+const statDict = (v: unknown): Pair[] =>
+  isObj(v) ? Object.entries(v).slice(0, 20).flatMap(([k, n]): Pair[] => (typeof n === "number" ? [[k.slice(0, 40), statN(n)]] : [])) : [];
+const timing = (v: unknown) => {
+  const o = statObj(v);
+  return { n: statN(o.n), median: statOpt(o.median), p90: statOpt(o.p90), max: statOpt(o.max) };
+};
+export const getStats = async (days: number): Promise<Stats> => {
+  const v = statObj(await req<unknown>(`/api/stats?days=${days}`));
+  const k = statObj(v.kpi);
+  const t = statObj(v.timing);
+  const a = statObj(v.agreement);
+  const r = statObj(v.related);
+  return {
+    days: statN(v.days),
+    cases: statN(v.cases),
+    truncated: v.truncated === true,
+    ms: statN(v.ms),
+    kpi: { received: statN(k.received), finished: statN(k.finished), pending: statN(k.pending), aiThreat: statN(k.ai_threat), confirmed: statN(k.confirmed), waiting: statN(k.waiting), reappeared: statN(k.reappeared) },
+    daily: list(v.daily)
+      .slice(0, 100)
+      .flatMap((x) => {
+        const d = statObj(x);
+        return typeof d.date === "string" && /^\d{4}-\d\d-\d\d$/.test(d.date) ? [{ date: d.date, received: statN(d.received), aiThreat: statN(d.ai_threat), confirmed: statN(d.confirmed) }] : [];
+      }),
+    ai: statDict(v.ai),
+    decisions: statDict(v.decisions),
+    confirmed: statDict(v.confirmed),
+    rules: statPairs(v.rules),
+    rulesConfirmed: Object.fromEntries(statDict(v.rules_confirmed)),
+    brands: statPairs(v.brands),
+    hosting: statPairs(v.hosting),
+    tlds: statPairs(v.tlds),
+    actions: statDict(v.actions),
+    timing: { toMainS: timing(t.to_main_s), toVerdictH: timing(t.to_verdict_h), waitingH: timing(t.waiting_h) },
+    agreement: { pairs: statN(a.pairs), sameClass: statN(a.same_class), bothThreat: statN(a.both_threat), sameType: statN(a.same_type), aiThreatReviewerBenign: statN(a.ai_threat_reviewer_benign), aiBenignReviewerThreat: statN(a.ai_benign_reviewer_threat) },
+    related: { auto: statN(r.auto), manual: statN(r.manual), autoAiThreat: statN(r.auto_ai_threat), autoConfirmed: statN(r.auto_confirmed) },
+  };
+};

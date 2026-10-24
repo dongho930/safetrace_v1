@@ -28,6 +28,9 @@ import {
   type ActionState,
   type Check,
   getReferral,
+  getStats,
+  type Pair,
+  type Stats,
   type Referral,
   listGroups,
   type CaseLinks,
@@ -176,6 +179,7 @@ export default function App() {
   const [source, setSource] = useState("");
   const [error, setError] = useState("");
   const [dialog, setDialog] = useState<"" | "users" | "password" | "ioc">("");
+  const [view, setView] = useState<"cases" | "dashboard">("cases");
   const fit = useFitZoom();
 
   const signOut = useCallback(() => {
@@ -185,6 +189,7 @@ export default function App() {
     setCases([]);
     setSelected(null);
     setDialog("");
+    setView("cases");
   }, []);
 
   // 새로 고침해도 같은 탭이면 세션을 이어 쓴다(만료됐으면 로그인 화면으로)
@@ -236,8 +241,11 @@ export default function App() {
           <span className="brand-sub">위협 의심 사이트 조사</span>
         </div>
         <nav className="topnav" aria-label="주 메뉴">
-          <button type="button" className="topnav-btn" aria-current="page">
+          <button type="button" className="topnav-btn" aria-current={view === "cases" ? "page" : undefined} onClick={() => setView("cases")}>
             사건 처리
+          </button>
+          <button type="button" className="topnav-btn" aria-current={view === "dashboard" ? "page" : undefined} onClick={() => setView("dashboard")}>
+            현황판
           </button>
           {ROLE_RANK[user.role] >= ROLE_RANK.reviewer && (
             <button type="button" className="topnav-btn" onClick={() => setDialog("ioc")}>
@@ -269,6 +277,11 @@ export default function App() {
       {dialog === "password" && <PasswordDialog onClose={() => setDialog("")} onChanged={signOut} />}
       {dialog === "ioc" && <IocDialog onClose={() => setDialog("")} />}
 
+      {view === "dashboard" ? (
+        <Boundary what="현황판">
+          <DashboardPane />
+        </Boundary>
+      ) : (
       <div className="workspace">
         <FolderNav
           cases={cases}
@@ -330,6 +343,7 @@ export default function App() {
           </>
         )}
       </div>
+      )}
     </div>
   );
 }
@@ -2244,6 +2258,311 @@ function LinksTab({ id, onOpen }: { id: string; onOpen: (id: string) => void }) 
           </ul>
         </section>
       ))}
+    </div>
+  );
+}
+
+// ── 현황판(열람자 이상): 기간 안 사건의 접수·처리·판정·조치 수. 값(주소)은 없고 수·이름표만 ─────────────
+const DASH_DAYS = [7, 30, 90];
+const DASH_DECISION_LABEL: Record<string, string> = dict({ threat: "위협 확정", benign: "정상 확정", hold: "보류", none: "판정 전" });
+const RULE_LABEL: Record<string, string> = dict({
+  link_takedown: "링크 정지 안내", shortener_warning: "단축 서비스 위험 경고", official_redirect: "조사 전 공식 사이트로 넘김",
+  brand_lookalike: "브랜드 사칭 도메인", brand_name_domain: "브랜드 이름 그대로의 다른 도메인", brand_typo_domain: "브랜드 오타 도메인",
+  brand_login_shared_hosting: "공용 호스팅의 브랜드 로그인 화면", brand_clone_title: "공식 화면 제목을 그대로 쓴 로그인 화면",
+  official_betting_domain: "공식 사행사업자 도메인",
+});
+const AI_LABEL: Record<string, string> = dict({ ...THREAT_LABEL, none: "판단 없음" });
+const ACTION_LABEL_ALL: Record<string, string> = dict({ ...ACTION_STATE_LABEL, none: "아직 요청 안 함" });
+const SERIES_THREAT = "#C62828"; // 위협으로 본 사건(콘솔의 위협 색, 검증기 통과: 파랑과 CVD ΔE 26.7)
+const SERIES_OTHER = "#2A78D6";
+const pctOf = (a: number, b: number) => (b ? `${Math.round((a / b) * 100)}%` : "-");
+const fmtNum = (v: number | null, unit: string) => (v == null ? "-" : `${v.toLocaleString("ko-KR")}${unit}`);
+
+function DashboardPane() {
+  const [days, setDays] = useState(30);
+  const [s, setS] = useState<Stats | null>(null);
+  const [err, setErr] = useState("");
+  const load = useCallback(() => {
+    getStats(days).then(
+      (x) => {
+        setS(x);
+        setErr("");
+      },
+      (e: Error) => setErr(e.message),
+    );
+  }, [days]);
+  useEffect(() => {
+    setS(null);
+    load();
+    const t = setInterval(load, 60_000);
+    return () => clearInterval(t);
+  }, [load]);
+  const k = s?.kpi;
+  const a = s?.agreement;
+  return (
+    <section className="dash scroll" aria-label="현황판">
+      <div className="dash-head">
+        <h2>현황판</h2>
+        <label className="sr" htmlFor="dash-days">
+          기간
+        </label>
+        <select id="dash-days" className="field" value={days} onChange={(e) => setDays(Number(e.target.value))}>
+          {DASH_DAYS.map((d) => (
+            <option key={d} value={d}>
+              최근 {d}일
+            </option>
+          ))}
+        </select>
+        <span className="muted small">
+          접수 시각 기준{s ? ` · ${s.cases.toLocaleString("ko-KR")}건 · ${s.ms}ms` : ""}
+          {s?.truncated && <span className="warn"> · 최신 5,000건만 셈</span>}
+        </span>
+        <div className="spacer" />
+        <button type="button" className="btn btn-ghost btn-sm" onClick={load}>
+          새로 고침
+        </button>
+      </div>
+      {err && <p className="err">{err}</p>}
+      {!s || !k || !a ? (
+        !err && <p className="muted">세는 중…</p>
+      ) : (
+        <>
+          <div className="dash-kpis">
+            <Kpi label="접수" value={k.received} sub={`끝남 ${k.finished} · 조사 중 ${k.pending}`} />
+            <Kpi label="AI 가 위협으로 봄" value={k.aiThreat} sub={`끝난 사건의 ${pctOf(k.aiThreat, k.finished)}`} />
+            <Kpi label="담당자 위협 확정" value={k.confirmed} />
+            <Kpi label="판정 대기" value={k.waiting} sub={s.timing.waitingH.max != null ? `가장 오래 ${fmtNum(s.timing.waitingH.max, "시간")}` : undefined} tone={k.waiting ? "review" : undefined} />
+            <Kpi label="다시 나타남" value={k.reappeared} sub="차단·삭제 확인 뒤 다시 접속됨" tone={k.reappeared ? "threat" : undefined} />
+          </div>
+          <div className="dash-card">
+            <h3>날짜별 접수</h3>
+            <DailyChart rows={s.daily} />
+          </div>
+          <div className="dash-grid">
+            <div className="dash-card">
+              <h3>AI 판단 유형(끝난 사건)</h3>
+              <BarList items={s.ai} label={AI_LABEL} />
+            </div>
+            <div className="dash-card">
+              <h3>담당자 판정</h3>
+              <BarList items={s.decisions} label={DASH_DECISION_LABEL} />
+              {s.confirmed.length > 0 && <p className="small muted dash-note">위협 확정 유형: {s.confirmed.map(([t, n]) => `${THREAT_LABEL[t] ?? t} ${n}`).join(" · ")}</p>}
+            </div>
+            <div className="dash-card">
+              <h3>처리 시간</h3>
+              <table className="dash-table">
+                <tbody>
+                  <tr>
+                    <th>접수 → 원래 결과</th>
+                    <td>
+                      중앙 {fmtNum(s.timing.toMainS.median, "초")} · p90 {fmtNum(s.timing.toMainS.p90, "초")}
+                      <span className="muted"> ({s.timing.toMainS.n}건)</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>접수 → 첫 판정</th>
+                    <td>
+                      중앙 {fmtNum(s.timing.toVerdictH.median, "시간")} · p90 {fmtNum(s.timing.toVerdictH.p90, "시간")}
+                      <span className="muted"> ({s.timing.toVerdictH.n}건)</span>
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>판정 대기 중</th>
+                    <td>
+                      중앙 {fmtNum(s.timing.waitingH.median, "시간")} · 가장 오래 {fmtNum(s.timing.waitingH.max, "시간")}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div className="dash-card">
+              <h3>AI 와 담당자 판정</h3>
+              <table className="dash-table">
+                <tbody>
+                  <tr>
+                    <th>위협 여부 일치</th>
+                    <td>
+                      {a.sameClass}/{a.pairs} ({pctOf(a.sameClass, a.pairs)})
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>위협 유형 일치</th>
+                    <td>
+                      {a.sameType}/{a.bothThreat} ({pctOf(a.sameType, a.bothThreat)})
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>AI 위협 → 담당자 정상</th>
+                    <td>{a.aiThreatReviewerBenign}건</td>
+                  </tr>
+                  <tr>
+                    <th>AI 정상 → 담당자 위협</th>
+                    <td>{a.aiBenignReviewerThreat}건</td>
+                  </tr>
+                </tbody>
+              </table>
+              <p className="small muted dash-note">판정할 때의 AI 의견과 비교(판단 불가는 뺌)</p>
+            </div>
+            <div className="dash-card">
+              <h3>코드 규칙이 담당자 검토로 보낸 사건</h3>
+              <BarList items={s.rules} label={RULE_LABEL} note={(key) => (s.rulesConfirmed[key] ? `위협 확정 ${s.rulesConfirmed[key]}` : "")} />
+            </div>
+            <div className="dash-card">
+              <h3>사칭 브랜드(위협 사건)</h3>
+              <BarList items={s.brands} />
+              <p className="small muted dash-note">코드 규칙이 남긴 브랜드, 없으면 도메인 이름으로 본 브랜드(브랜드 목록의 것만)</p>
+            </div>
+            <div className="dash-card">
+              <h3>호스팅(위협 사건)</h3>
+              <BarList items={s.hosting} />
+            </div>
+            <div className="dash-card">
+              <h3>최상위 도메인(위협 사건)</h3>
+              <BarList items={s.tlds} />
+            </div>
+            <div className="dash-card">
+              <h3>조치 상태(위협 확정 사건)</h3>
+              <BarList items={s.actions.filter(([, n]) => n > 0)} label={ACTION_LABEL_ALL} />
+            </div>
+            <div className="dash-card">
+              <h3>연관 사건</h3>
+              <table className="dash-table">
+                <tbody>
+                  <tr>
+                    <th>자동으로 만든 사건</th>
+                    <td>
+                      {s.related.auto}건 · AI 위협 {s.related.autoAiThreat} · 위협 확정 {s.related.autoConfirmed}
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>담당자가 접수한 사건</th>
+                    <td>{s.related.manual}건</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <p className="small muted">위협 사건: 담당자 판정이 있으면 그 판정(위협 확정), 없으면 AI 판단. 날짜는 한국 시각.</p>
+        </>
+      )}
+    </section>
+  );
+}
+
+function Kpi({ label, value, sub, tone }: { label: string; value: number; sub?: string; tone?: "review" | "threat" }) {
+  return (
+    <div className={tone ? `dash-kpi ${tone}` : "dash-kpi"}>
+      <span className="dash-kpi-label">{label}</span>
+      <span className="dash-kpi-value">{value.toLocaleString("ko-KR")}</span>
+      {sub && <span className="dash-kpi-sub">{sub}</span>}
+    </div>
+  );
+}
+
+// 가로 막대 목록(한 계열): 이름표 · 막대 · 수. 수는 늘 글자로 보이고, 마우스를 올리면 비율
+function BarList({ items, label, note }: { items: Pair[]; label?: Record<string, string>; note?: (key: string) => string }) {
+  if (!items.length) return <p className="muted small">없음</p>;
+  const max = Math.max(...items.map(([, n]) => n), 1);
+  const total = items.reduce((t, [, n]) => t + n, 0);
+  return (
+    <ul className="bars">
+      {items.map(([key, n]) => {
+        const name = label?.[key] ?? key;
+        const extra = note?.(key);
+        return (
+          <li key={key} className="bars-row" title={`${name}: ${n}건 (${pctOf(n, total)})`}>
+            <span className="bars-label">{name}</span>
+            <span className="bars-track">
+              <span className="bars-fill" style={{ width: `${(n / max) * 100}%` }} />
+            </span>
+            <span className="bars-n">
+              {n.toLocaleString("ko-KR")}
+              {extra && <span className="muted"> · {extra}</span>}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+// 날짜별 접수: 쌓은 세로 막대(아래 AI 가 위협으로 본 사건, 위 그 외). 막대에 마우스를 올리면 그날 수, 표로도 둔다
+function DailyChart({ rows }: { rows: Stats["daily"] }) {
+  const [hover, setHover] = useState<number | null>(null);
+  const W = 960;
+  const H = 200;
+  const L = 36;
+  const B = 22;
+  const T = 8;
+  const max = Math.max(1, ...rows.map((r) => r.received));
+  const step = Math.max(1, Math.ceil(max / 4));
+  const top = step * Math.ceil(max / step);
+  const y = (v: number) => T + (H - T - B) * (1 - v / top);
+  const slot = (W - L) / Math.max(1, rows.length);
+  const bw = Math.max(2, Math.min(28, slot * 0.7));
+  const every = Math.ceil(rows.length / 12);
+  const h = hover != null ? rows[hover] : null;
+  return (
+    <div className="daily">
+      <div className="daily-legend small">
+        <span>
+          <i style={{ background: SERIES_THREAT }} /> AI 가 위협으로 봄
+        </span>
+        <span>
+          <i style={{ background: SERIES_OTHER }} /> 그 외 접수
+        </span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="daily-svg" role="img" aria-label="날짜별 접수 막대 그림(아래 표와 같은 값)" onMouseLeave={() => setHover(null)}>
+        {Array.from({ length: Math.round(top / step) + 1 }, (_, i) => i * step).map((v) => (
+          <g key={v}>
+            <line x1={L} x2={W} y1={y(v)} y2={y(v)} className="daily-grid" />
+            <text x={L - 6} y={y(v) + 4} textAnchor="end" className="daily-axis">
+              {v}
+            </text>
+          </g>
+        ))}
+        {rows.map((r, i) => {
+          const x = L + slot * i + (slot - bw) / 2;
+          const other = Math.max(0, r.received - r.aiThreat);
+          return (
+            <g key={r.date}>
+              {r.aiThreat > 0 && <rect x={x} y={y(r.aiThreat)} width={bw} height={y(0) - y(r.aiThreat)} fill={SERIES_THREAT} rx={1.5} />}
+              {other > 0 && <rect x={x} y={y(r.received)} width={bw} height={Math.max(0, y(r.aiThreat) - y(r.received) - (r.aiThreat > 0 ? 2 : 0))} fill={SERIES_OTHER} rx={1.5} />}
+              {i % every === 0 && (
+                <text x={x + bw / 2} y={H - 6} textAnchor="middle" className="daily-axis">
+                  {r.date.slice(5).replace("-", "/")}
+                </text>
+              )}
+              <rect x={L + slot * i} y={T} width={slot} height={H - T - B} fill="transparent" onMouseEnter={() => setHover(i)} />
+              {hover === i && <rect x={L + slot * i} y={T} width={slot} height={H - T - B} className="daily-hover" />}
+            </g>
+          );
+        })}
+      </svg>
+      <p className="daily-tip small" aria-live="polite">
+        {h ? `${h.date} · 접수 ${h.received} · AI 위협 ${h.aiThreat} · 담당자 위협 확정 ${h.confirmed}` : "막대에 마우스를 올리면 그날 수를 봅니다"}
+      </p>
+      <table className="sr">
+        <caption>날짜별 접수</caption>
+        <thead>
+          <tr>
+            <th>날짜</th>
+            <th>접수</th>
+            <th>AI 위협</th>
+            <th>위협 확정</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.date}>
+              <td>{r.date}</td>
+              <td>{r.received}</td>
+              <td>{r.aiThreat}</td>
+              <td>{r.confirmed}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
