@@ -80,7 +80,8 @@ docker compose exec api python -m safetrace.accounts add <아이디> --role admi
 - 고르기: 형식 검사, 같은 호스트는 7일 안에 다시 넣지 않음(사람 신고 포함), 같은 키트 모양(공용 호스팅 + 첫 경로, 아니면 등록 도메인)은 한 번에 2개, 한 번 받기에 30개.
 - 사람 신고 우선: 끝나지 않은 자동 수집 사건이 1건 아래일 때만 하나씩 접수한다(조사 컨테이너가 하나여도 사람 신고는 길어야 한 건 기다린다). 24시간 120건 상한. 사람 접수 한도에는 세지 않는다.
 - 판정은 그대로 검토관이 한다. 목록에 '자동 수집' 배지, 출처 거르기 '자동 수집'.
-- 설정 `ST_INTAKE_*`(출처·바퀴 간격·한도), 비밀값 `ST_FEED_KEY`(`.env.example`).
+- 대기열은 가장 최근에 받은 것부터 조사하고, 12시간이 지난 주소는 '오래됨'으로 버린다(피싱 사이트는 금방 사라진다).
+- 한도는 `.env` 의 `ST_INTAKE_DAILY_MAX`(24시간 사건)·`ST_INTAKE_MAX_PENDING`·`ST_INTAKE_ROUND_MAX`·`ST_INTAKE_ITEM_MAX_AGE_H` 로 바꾼다(compose 가 api 에 넘긴다). 비밀값 `ST_FEED_KEY`(`.env.example`).
 
 ## 연관 사이트
 

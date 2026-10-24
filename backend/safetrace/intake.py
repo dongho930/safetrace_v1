@@ -8,6 +8,8 @@
   같은 키트 모양(공용 호스팅이면 호스팅 + 첫 경로, 아니면 등록 도메인)은 한 번에 몇 개까지, 한 번에 넣는 수 상한
 - 사건은 끝나지 않은 자동 수집 사건이 한도(기본 1) 아래일 때만 하나씩 만든다: 조사 컨테이너가 하나여도 사람 신고가 길어야
   한 건만 기다린다. 하루(24시간) 상한. 사람 접수 한도(전체 대기)에는 세지 않는다
+- 대기열은 가장 최근에 받은 것부터 꺼내고, 일정 시간(기본 12시간)이 지난 주소는 '오래됨'으로 버린다: 하루에 들어오는
+  주소(최대 6번 × 30)가 조사 상한(120)보다 많아, 오래된 것부터 꺼내면 대기열이 늘며 이미 사라진 사이트만 조사하게 된다
 - 켜기·끄기는 사람 관리자만. 판정은 그대로 사람(검토관)이 한다
 """
 
@@ -228,6 +230,22 @@ def record_fetch(store: Store, fetch_id: object, res: object, *, seen_hosts: set
     return f
 
 
+def expire_items(store: Store, max_age_h: int, at: datetime | None = None) -> int:
+    """대기열에서 max_age_h 시간이 지난 주소를 '오래됨'(stale)으로 버린다. 반환: 버린 수."""
+    cut = _at(at) - timedelta(hours=max_age_h)
+    with store.session() as s, s.begin():
+        rows = list(s.scalars(select(FeedItem).where(FeedItem.state == "queued", FeedItem.created_at < cut)))
+        for it in rows:
+            it.state = "stale"
+    return len(rows)
+
+
+def next_item_query():
+    """다음에 꺼낼 대기열 주소: 가장 최근 받기부터, 한 받기 안에서는 피드 순서(PhishTank 는 최신순)대로."""
+    return (select(FeedItem).where(FeedItem.state == "queued")
+            .order_by(FeedItem.fetch_id.desc(), FeedItem.id).limit(1))
+
+
 def recent_hosts(store: Store, days: int, at: datetime | None = None) -> set[str]:
     """최근 며칠 안에 대기열에 넣었거나 사건으로 접수한 호스트(사람 신고 포함)."""
     since = _at(at) - timedelta(days=days)
@@ -256,10 +274,12 @@ def status(store: Store, sources: list[str], at: datetime | None = None) -> dict
                 "done_at": f.done_at.isoformat() if f.done_at else None, "got": f.got, "picked": f.picked,
                 "skipped": f.skipped or {}, "reason": f.reason}
         queued = len(list(s.scalars(select(FeedItem.id).where(FeedItem.state == "queued"))))
+        stale = len(list(s.scalars(select(FeedItem.id).where(FeedItem.state == "stale",
+                                                            FeedItem.created_at >= t - timedelta(hours=48)))))
         day = len(list(s.scalars(select(Case.id).where(Case.created_by == INTAKE_ACTOR,
                                                        Case.created_at >= t - timedelta(hours=24)))))
         pending = len(list(s.scalars(select(Case.id).where(Case.created_by == INTAKE_ACTOR,
                                                            Case.status.in_(("QUEUED", "RUNNING"))))))
     return {"enabled": bool(st and st.enabled), "updated_by": st.updated_by if st else None,
             "updated_at": st.updated_at.isoformat() if st else None, "sources": last, "queued": queued,
-            "pending": pending, "created_24h": day}
+            "pending": pending, "created_24h": day, "stale_48h": stale}

@@ -455,6 +455,9 @@ def _intake_drip(at=None) -> int:
     바퀴마다, 그리고 자동 수집 사건이 끝날 때마다 부른다(조사 컨테이너가 바퀴를 기다리며 쉬지 않게). 반환: 만든 사건 수."""
     made = 0
     since = (at or now_utc()) - timedelta(hours=24)
+    stale = intake.expire_items(store, settings.intake_item_max_age_h, at)
+    if stale:
+        store.audit(intake.INTAKE_ACTOR, "intake.stale", detail=f"n={stale} max_age_h={settings.intake_item_max_age_h}")
     with _intake_lock, store.session() as s:  # 세기와 넣기 사이에 다른 접수·끄기가 끼지 않게
         if not intake.is_enabled(store):  # 잠금 안에서 다시 본다: 끄기 응답 뒤에 새 사건이 생기지 않게(Codex 1회차 F2)
             return 0
@@ -463,7 +466,7 @@ def _intake_drip(at=None) -> int:
         day = s.scalar(select(func.count()).select_from(Case).where(mine, Case.created_at >= since))
         room = min(settings.intake_max_pending - pending, settings.intake_daily_max - day)
         while room > 0:
-            item = s.scalar(select(FeedItem).where(FeedItem.state == "queued").order_by(FeedItem.id).limit(1))
+            item = s.scalar(intake.next_item_query())  # 가장 최근 받기부터
             if item is None:
                 break
             try:
@@ -1797,7 +1800,8 @@ class IntakeIn(BaseModel):
 def _intake_view() -> dict:
     return {**intake.status(store, settings.intake_sources),
             "limits": {"max_pending": settings.intake_max_pending, "daily_max": settings.intake_daily_max,
-                       "round_max": settings.intake_round_max, "dedup_days": settings.intake_dedup_days}}
+                       "round_max": settings.intake_round_max, "dedup_days": settings.intake_dedup_days,
+                       "item_max_age_h": settings.intake_item_max_age_h}}
 
 
 @app.get("/api/intake")
