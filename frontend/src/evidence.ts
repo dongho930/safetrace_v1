@@ -48,10 +48,20 @@ export type Reason = {
   rule?: boolean; // AI 가 정상으로 본 사건에서 위험 근거가 아니라 안전 규칙이 작동한 기록(회색)
 };
 
-// AI 가 정상으로 보고 보류하지 않은 사건. 이때 안전 규칙 기록(막은 클릭·이동, 건드리지 않은 요소)은 위험 근거처럼 보이지 않게
-// 회색으로 낮추고, 정상 사이트에는 드문 비밀번호 입력 칸·다운로드 요소만 '확인 권장'(주황)으로 남긴다.
-// 로그인·결제 글자 링크는 정상 사이트에도 흔해(로컬 정상 사건 중 금지 요소가 있는 44건의 23·19건) 회색으로 둔다
-export const calmCase = (c: CaseOut | null) => c?.threat?.threat === "benign" && !c.threat.hold;
+// AI 가 정상으로 보고 보류하지 않았고, 서버도 정상으로 끝낸 사건. 이때 안전 규칙 기록(막은 클릭·이동, 건드리지 않은 요소)은
+// 위험 근거처럼 보이지 않게 회색으로 낮추고, 정상 사이트에는 드문 비밀번호 입력 칸·다운로드 요소만 '확인 권장'(주황)으로 남긴다.
+// 로그인·결제 글자 링크는 정상 사이트에도 흔해(로컬 정상 사건 중 금지 요소가 있는 44건의 23·19건) 회색으로 둔다.
+// Safe Browsing 위험 일치면 서버는 AI 의견(정상·보류 아님)을 그대로 두고 사건만 검토 필요로 바꾸므로 사건 상태·평판·담당자 판정도 본다
+// (연관 사이트 조사 중이면 원래 결과 상태 main_status)
+export const calmCase = (c: CaseOut | null) => {
+  if (!c || c.threat?.threat !== "benign" || c.threat.hold) return false;
+  const status = c.phase === "related" ? c.main_status : c.status;
+  return status === "COMPLETED" && c.safebrowsing?.status !== "match" && (!c.verdict || c.verdict.decision === "benign");
+};
+// AI 판단과 따로 확인된 보안 사건(내부 주소로 가려 함, 고른 버튼이 바뀜)은 정상 판단 사건에서도 낮추지 않는다.
+// 낮추는 것은 안전 규칙이 작동한 기록만: 금지 요소 클릭(forbidden:)·사라진 요소·후보 아닌 요소, POST 이동(method:)
+const ruleGate = (reason: string) => reason.startsWith("forbidden:") || reason === "element_gone" || reason === "not_offered";
+const ruleNav = (reason: string) => reason.startsWith("method:");
 // 금지 요소 기록 형식 reason:type:label
 const forbParts = (f: string) => {
   const [reason = "", type = "", ...rest] = f.split(":");
@@ -81,7 +91,7 @@ export function buildReasons(events: EvidenceEvent[], c: CaseOut): Reason[] {
     const shotObs = lastBefore(main, gate.seq, (e) => e.kind === "observe" && !!png(e));
     const base = { key: "gate", ev: `EV-${gate.seq}`, shot: png(shotObs), shotSeq: shotObs?.seq ?? null };
     push(
-      calm
+      calm && ruleGate(str(gate.data.reason))
         ? { ...base, title: "누르지 않은 버튼", text: `${what}을 안전 규칙으로 막음 (${clip(str(gate.data.reason), 40)})`, tone: "idle", rule: true }
         : { ...base, title: "입력·제출 차단", text: `${what}을 안전 게이트가 막음 (${clip(str(gate.data.reason), 40)})`, tone: "threat" },
     );
@@ -93,7 +103,7 @@ export function buildReasons(events: EvidenceEvent[], c: CaseOut): Reason[] {
     const base = { key: "nav", ev: `EV-${nav.seq}`, shot: png(shotObs), shotSeq: shotObs?.seq ?? null };
     const where = clip(hostOrFile(str(nav.data.url)), 40);
     push(
-      calm
+      calm && ruleNav(str(nav.data.reason))
         ? { ...base, title: "막은 이동", text: `${where}(으)로 가려는 이동을 안전 규칙으로 막음 (${clip(str(nav.data.reason), 40)})`, tone: "idle", rule: true }
         : { ...base, title: "이동 차단", text: `${where}(으)로 이동하려 해 검문 프록시가 막음 (${clip(str(nav.data.reason), 40)})`, tone: "threat" },
     );
