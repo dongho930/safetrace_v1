@@ -386,11 +386,16 @@ def render_pdf(rep: dict, evidence_dir: Path) -> bytes:
                               + "".join(f" · {m['type'] or ''} {m['url']}" for m in sb["matches"])) if sb else "조회 기록 없음"))
     if v:
         rows += [("담당자 판정", f"{v['decision_ko']}" + (f" — {v['threat_ko']}" if v.get("threat_ko") else "")),
-                 ("판정 사유", v.get("note")),
+                 ("판정 사유", "표 아래에 적음" if v.get("note") else "-"),
                  ("판정자 · 시각", f"{v['reviewer']} · {_kst(v['at'])} (판 {v['rev']})")]
     else:
         rows.append(("담당자 판정", "아직 없음 — 판정·사유는 콘솔에서 기록"))
     out.append(kv(rows))
+    if v and v.get("note"):
+        # 메모는 표 칸 밖에 한 줄씩 문단으로 둔다: 줄바꿈이 많아도 페이지를 넘겨 이어진다(표 한 칸은 페이지를 넘지 못함)
+        out.append(Spacer(1, 2 * mm))
+        out.append(P("판정 사유", key))
+        out += [P(_t(x) or "&#160;", base) for x in v["note"].splitlines()]
 
     out.append(P("3. 확인 내용 (탐색 경위)", h2))
     lines = []

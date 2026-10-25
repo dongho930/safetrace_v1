@@ -702,18 +702,48 @@ function IntakeBox({ canToggle }: { canToggle: boolean }) {
           </button>
         )}
       </div>
-      <p className="small muted">
-        대기 {st.queued} · 조사 {st.pending} · 24시간 {st.created24h}건
-      </p>
-      {st.sources.map(([k, x]) => {
-        const next = nextFetch(x, st.enabled, Date.now());
-        return (
-          <p key={k} className="small muted" title={x?.intervalH ? `${x.intervalH}시간마다 받음(실패하면 1시간 뒤 다시)` : undefined}>
-            {SOURCE_LABEL[k] ?? k}: {x ? `${FETCH_STATE[x.state] ?? x.state} ${fmtTime(x.doneAt ?? x.requestedAt)}${x.picked != null ? ` · ${x.picked}/${x.got ?? 0}` : ""}` : "아직 안 받음"}
-            {next && <span className="intake-next">다음 {next}</span>}
-          </p>
-        );
-      })}
+      {/* 숫자 세 칸(이름 위·숫자 아래)과 출처 표(이름 칸 · 값 칸)로 줄을 맞춘다 */}
+      <dl className="intake-stats">
+        {(
+          [
+            ["대기", st.queued],
+            ["조사", st.pending],
+            ["24시간", st.created24h],
+          ] as const
+        ).map(([label, n]) => (
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{n}건</dd>
+          </div>
+        ))}
+      </dl>
+      <dl className="intake-sources">
+        {st.sources.map(([k, x]) => {
+          const next = nextFetch(x, st.enabled, Date.now());
+          return (
+            <div key={k} title={x?.intervalH ? `${x.intervalH}시간마다 받음(실패하면 1시간 뒤 다시)` : undefined}>
+              <dt>{SOURCE_LABEL[k] ?? k}</dt>
+              <dd>
+                {x ? (
+                  <>
+                    <span>
+                      {FETCH_STATE[x.state] ?? x.state} {fmtTime(x.doneAt ?? x.requestedAt)}
+                    </span>
+                    {x.picked != null && (
+                      <span title={`피드 ${x.got ?? 0}건 중 ${x.picked}건 접수`}>
+                        접수 {x.picked}/{x.got ?? 0}
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <span>아직 안 받음</span>
+                )}
+                {next && <span>다음 {next}</span>}
+              </dd>
+            </div>
+          );
+        })}
+      </dl>
       {msg && <p className="small err">{msg}</p>}
     </section>
   );
@@ -1261,21 +1291,26 @@ const Workspace = memo(function Workspace({
                 onDecided();
               }}
             />
-            <CaseFooterBar c={c} id={id} running={running || related} related={related} canExport={canExport} verify={verify} onVerify={setVerify} />
           </section>
         )}
       </div>
-      <VerdictBar
-        c={c}
-        id={id}
-        running={running}
-        canDecide={canDecide}
-        onNext={onNext}
-        onDecided={() => {
-          getCase(id).then(setC).catch(() => undefined);
-          onDecided();
-        }}
-      />
+      {/* 상세 칸 아래 고정: 내려받기 줄(끝난 사건) 위, 판정 막대 아래 */}
+      <div className="detail-dock">
+        {st && !running && (
+          <CaseFooterBar c={c} id={id} running={running || related} related={related} canExport={canExport} verify={verify} onVerify={setVerify} />
+        )}
+        <VerdictBar
+          c={c}
+          id={id}
+          running={running}
+          canDecide={canDecide}
+          onNext={onNext}
+          onDecided={() => {
+            getCase(id).then(setC).catch(() => undefined);
+            onDecided();
+          }}
+        />
+      </div>
     </>
   );
 });
@@ -1580,66 +1615,91 @@ function VerdictBar({
       }}
     >
       <div className="vbar-row">
-        <span className="vbar-title">담당자 판정</span>
-        {cur ? (
-          <span className="vnow">
-            <span className={`vnow-name v-${cur.decision}`}>{verdictText(cur)}</span>
-            판 {cur.rev} · {cur.reviewer} · {fmtDateTime(cur.created_at)}
-            {cur.head_seq != null && ` · 증거 EV-${cur.head_seq}까지 확인`}
-          </span>
-        ) : (
-          <span className="vnow">
-            <span className="vnow-name">판정 없음</span>
-          </span>
-        )}
-        {!canDecide ? (
-          <span className="vbar-msg">판정은 검토관 이상의 담당자 계정만 저장할 수 있습니다. AI 는 판정을 확정하지 않습니다.</span>
-        ) : running || !c ? (
-          <span className="vbar-msg">조사가 끝나면 판정할 수 있습니다.</span>
-        ) : (
-          <>
-            <div className="seg" role="radiogroup" aria-label="판정">
-              {DECISIONS.map((d, i) => (
-                <button
-                  key={d}
-                  ref={(el) => {
-                    radios.current[i] = el;
-                  }}
-                  type="button"
-                  role="radio"
-                  aria-checked={checked(d)}
-                  tabIndex={checked(d) || (!pick && i === 0) ? 0 : -1}
-                  className={d === "threat" ? "seg-threat" : ""}
-                  onClick={() => choose(d)}
-                  onKeyDown={(e) => onKey(e, i)}
-                >
-                  {DECISION_LABEL[d]}
-                </button>
-              ))}
-            </div>
-            {pick === "threat" && (
-              <select className="field" aria-label="위협 유형" value={threat} onChange={(e) => setThreat(e.target.value)} required>
-                <option value="" disabled>
-                  위협 유형 선택
-                </option>
-                {THREAT_TYPES.map((t) => (
-                  <option key={t} value={t}>
-                    {THREAT_LABEL[t]}
-                    {t === ai ? " (AI 추천)" : ""}
-                  </option>
-                ))}
-              </select>
+        <div className="vbar-left">
+          <div className="vbar-head">
+            <span className="vbar-title">담당자 판정</span>
+            {cur ? (
+              <span className="vnow">
+                <span className={`vnow-name v-${cur.decision}`}>{verdictText(cur)}</span>
+                판 {cur.rev} · {cur.reviewer} · {fmtDateTime(cur.created_at)}
+                {cur.head_seq != null && ` · 증거 EV-${cur.head_seq}까지 확인`}
+              </span>
+            ) : (
+              <span className="vnow">
+                <span className="vnow-name">판정 없음</span>
+              </span>
             )}
+          </div>
+          {!canDecide ? (
+            <span className="vbar-msg">판정은 검토관 이상의 담당자 계정만 저장할 수 있습니다. AI 는 판정을 확정하지 않습니다.</span>
+          ) : running || !c ? (
+            <span className="vbar-msg">조사가 끝나면 판정할 수 있습니다.</span>
+          ) : (
+            <div className="vbar-pick">
+              <div className="seg" role="radiogroup" aria-label="판정">
+                {DECISIONS.map((d, i) => (
+                  <button
+                    key={d}
+                    ref={(el) => {
+                      radios.current[i] = el;
+                    }}
+                    type="button"
+                    role="radio"
+                    aria-checked={checked(d)}
+                    tabIndex={checked(d) || (!pick && i === 0) ? 0 : -1}
+                    className={d === "threat" ? "seg-threat" : ""}
+                    onClick={() => choose(d)}
+                    onKeyDown={(e) => onKey(e, i)}
+                  >
+                    {DECISION_LABEL[d]}
+                  </button>
+                ))}
+              </div>
+              {pick === "threat" && (
+                <select className="field" aria-label="위협 유형" value={threat} onChange={(e) => setThreat(e.target.value)} required>
+                  <option value="" disabled>
+                    위협 유형 선택
+                  </option>
+                  {THREAT_TYPES.map((t) => (
+                    <option key={t} value={t}>
+                      {THREAT_LABEL[t]}
+                      {t === ai ? " (AI 추천)" : ""}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          )}
+        </div>
+        {canDecide && !running && c && (
+          <>
             <label className="sr" htmlFor="verdict-note">
               판단 근거 메모
             </label>
-            <input id="verdict-note" className="field vbar-note" maxLength={1000} placeholder="판단 근거 메모(선택, 1000자까지)" value={note} onChange={(e) => setNote(e.target.value)} />
-            <button type="submit" className="btn btn-ghost" disabled={!ready}>
-              저장
-            </button>
-            <button type="button" className="btn btn-primary" disabled={!ready || !onNext} onClick={() => submit(true)}>
-              저장하고 다음 사건
-            </button>
+            {/* 여러 줄 메모: Enter 는 줄바꿈, Ctrl+Enter 는 저장. 긴 글은 칸 안에서 줄을 바꿔 앞 내용도 보인다 */}
+            <textarea
+              id="verdict-note"
+              className="field vbar-note"
+              maxLength={1000}
+              rows={4}
+              placeholder="판단 근거 메모(선택, 1000자까지) · Enter 줄바꿈 · Ctrl+Enter 저장"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                  e.preventDefault();
+                  if (ready) submit(false);
+                }
+              }}
+            />
+            <div className="vbar-actions">
+              <button type="submit" className="btn btn-ghost" disabled={!ready}>
+                저장
+              </button>
+              <button type="button" className="btn btn-primary" disabled={!ready || !onNext} onClick={() => submit(true)}>
+                저장하고 다음 사건
+              </button>
+            </div>
           </>
         )}
       </div>
