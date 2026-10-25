@@ -272,3 +272,40 @@ def test_report_header_names_comparison_conditions():
     plain = report([rec], {"started": "2026-10-25T16:00", "repeat": 1, "git": "x", "mode": "agent",
                            "action_min_prob": None, "user_agent": None}).splitlines()[2]
     assert "첫 화면만" not in plain and "문턱" not in plain and "User-Agent" not in plain
+
+
+def test_hidden_column_names_the_target():
+    """단계형 시험 페이지 100종: 평가 목록의 hidden 열(숨긴 화면 경로)로 도달을 잰다(HIDDEN_TARGETS 에 없어도)."""
+    obs = lambda url, step: {"kind": "observe", "data": {"url": url, "step": step}}  # noqa: E731
+    start = "http://testpages:8900/staged/s042/"
+    assert ev.hidden_reached(start, [obs(start, 0)]) is None
+    got = ev.hidden_reached(start, [obs(start, 0), obs("http://testpages-alt:8900/staged/s042/auth.html", 3)],
+                            "/staged/s042/auth.html")
+    assert got == {"reached": True, "step": 3, "observed": 2}
+    assert ev.hidden_reached(start, [obs(start, 0)], "/staged/s042/auth.html")["reached"] is False
+
+
+def test_staged_pages_hide_the_target():
+    """만든 100종이 '숨긴' 화면인지: 시작 화면에는 입력·결제·다운로드 요소가 없고, 누르지 않고 넘어가는 자동 이동만으로는
+    숨긴 화면에 닿지 않으며(적어도 한 번은 눌러야 함), 숨긴 화면에는 입력·결제·다운로드 요소가 있다."""
+    import csv
+    import re
+
+    root = Path(__file__).resolve().parents[2]
+    rows = list(csv.DictReader((root / "data" / "staged_set.csv").open(encoding="utf-8")))
+    assert len(rows) == 100 and len({r["url"] for r in rows}) == 100
+    for r in rows:
+        sdir = root / "testpages" / r["hidden"].lstrip("/").rsplit("/", 1)[0]
+        page = (sdir / "index.html").read_text(encoding="utf-8")
+        seen = set()
+        while "location.replace(" in page:  # 자동 이동 화면은 따라가 본다(누르지 않아도 넘어가므로)
+            nxt = re.search(r"location\.replace\('([^']+)'\)", page).group(1)
+            path = nxt.split(":8900", 1)[-1]
+            assert path != r["hidden"], r["url"]  # 자동 이동만으로 숨긴 화면에 가면 안 된다
+            assert path not in seen
+            seen.add(path)
+            page = (root / "testpages" / path.lstrip("/")).read_text(encoding="utf-8")
+        assert "<input" not in page and "download" not in page, r["url"]
+        body = (root / "testpages" / r["hidden"].lstrip("/")).read_text(encoding="utf-8")
+        assert "<input" in body or "download" in body, r["hidden"]
+        assert r["expected"] in {"phishing", "scam", "illegal_gambling", "malicious"}
