@@ -17,7 +17,6 @@ import {
   createCase,
   createRelated,
   createUser,
-  downloadGroupCsv,
   getLinks,
   getStats,
   getIntake,
@@ -25,9 +24,7 @@ import {
   type Intake,
   type Pair,
   type Stats,
-  listGroups,
   type CaseLinks,
-  type RelatedGroup,
   dict,
   downloadExport,
   downloadIoc,
@@ -164,7 +161,6 @@ export default function App() {
   const [cases, setCases] = useState<CaseOut[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [folder, setFolder] = useState<FolderId>("all");
-  const [groupsView, setGroupsView] = useState(false); // 분류 폴더 '연관 묶음'(사건 대신 묶음 목록)
   const [query, setQuery] = useState("");
   const [source, setSource] = useState("");
   const [error, setError] = useState("");
@@ -275,13 +271,8 @@ export default function App() {
       <div className="workspace">
         <FolderNav
           cases={cases}
-          folder={groupsView ? null : folder}
-          onFolder={(f) => {
-            setGroupsView(false);
-            setFolder(f);
-          }}
-          groupsOn={groupsView}
-          onGroups={() => setGroupsView(true)}
+          folder={folder}
+          onFolder={setFolder}
           canCreate={ROLE_RANK[user.role] >= ROLE_RANK.investigator}
           canToggleIntake={user.kind === "user" && user.role === "admin"}
           onCreated={(c) => {
@@ -289,17 +280,6 @@ export default function App() {
             refresh();
           }}
         />
-        {groupsView ? (
-          <GroupsPane
-            canExport={ROLE_RANK[user.role] >= ROLE_RANK.investigator}
-            onOpenCase={(id) => {
-              setGroupsView(false);
-              setFolder("all");
-              setSelected(id);
-            }}
-          />
-        ) : (
-          <>
         <CaseList
           title={current.label}
           cases={shown}
@@ -330,8 +310,6 @@ export default function App() {
             <EmptyWorkspace />
           )}
         </section>
-          </>
-        )}
       </div>
       )}
     </div>
@@ -729,8 +707,6 @@ function FolderNav({
   cases,
   folder,
   onFolder,
-  groupsOn,
-  onGroups,
   canCreate,
   canToggleIntake,
   onCreated,
@@ -738,8 +714,6 @@ function FolderNav({
   cases: CaseOut[];
   folder: FolderId | null;
   onFolder: (f: FolderId) => void;
-  groupsOn: boolean;
-  onGroups: () => void;
   canCreate: boolean;
   canToggleIntake: boolean;
   onCreated: (c: CaseOut) => void;
@@ -767,11 +741,6 @@ function FolderNav({
           <span className="folder-n">{cases.filter(f.test).length}</span>
         </button>
       ))}
-      <button type="button" className="folder" aria-current={groupsOn} onClick={onGroups}>
-        <span className="folder-mark" style={{ background: "var(--review)" }} />
-        <span className="folder-label">연관 묶음</span>
-        <span className="folder-n" />
-      </button>
       <IntakeBox canToggle={canToggleIntake} />
       <p className="folder-note">
         AI 판단은 참고 의견입니다.
@@ -1894,7 +1863,7 @@ function CaseTabs({
   );
 }
 
-// 사건 요약 한 줄(연결된 사건·연관 묶음 공통)
+// 사건 요약 한 줄(연결된 사건)
 function BriefRow({ b, onOpen, note }: { b: { id: string; url: string; status: string; threat: string | null; verdict: string | null }; onOpen: (id: string) => void; note?: string }) {
   const verdict = b.verdict === "threat" ? "위협 확정" : b.verdict === "benign" ? "정상 확정" : b.verdict === "hold" ? "보류" : "";
   return (
@@ -2288,144 +2257,6 @@ function DailyChart({ rows }: { rows: Stats["daily"] }) {
         </tbody>
       </table>
     </div>
-  );
-}
-
-// 분류 폴더 '연관 묶음': 같은 사이트로 이어지는 사건 묶음. 묶음을 고르면 사이트·사건 표, CSV(조사관 이상),
-// 위협 사이트는 [새 사건으로 접수](그 사이트를 후보로 가진 사건에서, 회선 차단 추정이어도 버튼을 둔다)
-function GroupsPane({ canExport, onOpenCase }: { canExport: boolean; onOpenCase: (id: string) => void }) {
-  const [data, setData] = useState<{ groups: RelatedGroup[]; truncated: boolean; ms: number } | null>(null);
-  const [err, setErr] = useState("");
-  const [pick, setPick] = useState<string | null>(null);
-  const [msg, setMsg] = useState("");
-  const [busy, setBusy] = useState("");
-  const load = useCallback(() => {
-    listGroups()
-      .then(setData)
-      .catch((e) => setErr(e instanceof Error ? e.message : "불러오지 못했습니다"));
-  }, []);
-  useEffect(load, [load]);
-  const g = data?.groups.find((x) => x.key === pick) ?? data?.groups[0] ?? null;
-  return (
-    <>
-      <section className="caselist" aria-label="연관 묶음 목록">
-        <div className="caselist-head">
-          <h2>연관 묶음</h2>
-          <span className="muted small">{data ? `${data.groups.length}묶음${data.truncated ? " · 최근 사건만 계산" : ""}` : ""}</span>
-          <div className="spacer" />
-          <button type="button" className="btn btn-ghost btn-sm" onClick={load}>
-            다시 계산
-          </button>
-        </div>
-        {err && <p className="err" style={{ padding: "8px 16px" }}>{err}</p>}
-        <ul className="rows scroll">
-          {(data?.groups ?? []).map((x) => (
-            <li key={x.key}>
-              <button type="button" className="row" aria-current={g?.key === x.key} onClick={() => setPick(x.key)}>
-                <span className="row-dot" />
-                <span className="row-host">{clip(x.sites[0]?.site ?? x.key, 50)}</span>
-                <span className="row-time">{x.cases.length}건</span>
-                <span className="row-sub">
-                  위협 사이트 {x.threat_sites} · 회선 차단 추정 {x.blocked_estimate_sites} · 사이트 {x.sites.length}
-                </span>
-              </button>
-            </li>
-          ))}
-          {data && data.groups.length === 0 && <li className="muted" style={{ padding: 16 }}>같은 사이트로 이어진 사건이 아직 없습니다</li>}
-        </ul>
-      </section>
-      <section className="detail scroll" aria-label="연관 묶음 상세">
-        {!g ? (
-          <div className="empty">
-            <h2>연관 묶음</h2>
-            <p>같은 사이트로 이어진 사건끼리 묶습니다. 단축 서비스·공식·흔한 대형 사이트·키트가 링크한 진짜 브랜드 사이트로는 잇지 않고, 공용 호스팅은 호스트가 같을 때만, 페이지 링크는 하위 조사로 위험하다고 확인한 것만 씁니다.</p>
-          </div>
-        ) : (
-          <div className="detail-body">
-            <div className="statusline">
-              <span className="chip st-REVIEW_REQUIRED">사건 {g.cases.length}건</span>
-              <span className="muted">위협 사이트 {g.threat_sites} · 회선 차단 추정 {g.blocked_estimate_sites}</span>
-              <div className="spacer" />
-              {canExport ? (
-                <button
-                  type="button"
-                  className="btn btn-ghost btn-sm"
-                  disabled={busy !== ""}
-                  onClick={async () => {
-                    setBusy("csv");
-                    setMsg("");
-                    try {
-                      await downloadGroupCsv(g.key);
-                    } catch (e) {
-                      setMsg(e instanceof Error ? e.message : "내려받기 실패");
-                    } finally {
-                      setBusy("");
-                    }
-                  }}
-                >
-                  CSV 내려받기
-                </button>
-              ) : (
-                <span className="muted small">CSV 는 조사관 이상만</span>
-              )}
-            </div>
-            {msg && <p className="err" role="alert">{msg}</p>}
-            <h3 className="sub-h">사이트</h3>
-            <ul className="rel-list">
-              {g.sites.map((s) => (
-                <li key={s.site} className="rel-row">
-                  <span className="rel-site">
-                    <span className="mono">{clip(s.site, 60)}</span>
-                    <span className="muted small">
-                      사건 {s.cases}건 · {s.hosts.slice(0, 3).map((x) => clip(x, 40)).join(", ")}
-                    </span>
-                  </span>
-                  <span className={`chip ${s.threat ? "st-threat" : ""}`}>
-                    {s.threat ? `위협 의심 · ${THREAT_LABEL[s.threat] ?? s.threat}` : "판단 없음"}
-                    {s.blocked ? " · 회선 차단 추정" : ""}
-                  </span>
-                  {canExport && s.threat && s.candidate ? (
-                    <button
-                      type="button"
-                      className="btn btn-ghost btn-sm"
-                      disabled={busy !== ""}
-                      onClick={async () => {
-                        const cand = s.candidate;
-                        if (!cand) return;
-                        setBusy(s.site);
-                        setMsg("");
-                        try {
-                          const parent = await getCase(cand.case_id);
-                          const url = (parent.candidates ?? []).find((x): x is Candidate => typeof x !== "string" && (x.host ?? "") === cand.host)?.url;
-                          if (!url) throw new Error("이 사이트를 후보로 가진 사건을 찾지 못했습니다");
-                          const child = await createRelated(cand.case_id, url);
-                          onOpenCase(child.id);
-                        } catch (e) {
-                          setMsg(e instanceof Error ? e.message : "접수하지 못했습니다");
-                        } finally {
-                          setBusy("");
-                        }
-                      }}
-                    >
-                      {busy === s.site ? "접수 중" : "새 사건으로 접수"}
-                    </button>
-                  ) : (
-                    <span />
-                  )}
-                </li>
-              ))}
-            </ul>
-            <h3 className="sub-h">사건</h3>
-            <ul className="rel-list">
-              {g.cases.map((b) => (
-                <BriefRow key={b.id} b={b} onOpen={onOpenCase} />
-              ))}
-            </ul>
-            {data && <p className="muted small">묶음 계산 {data.ms}ms</p>}
-          </div>
-        )}
-      </section>
-    </>
   );
 }
 

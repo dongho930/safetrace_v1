@@ -260,8 +260,9 @@ def last_audit(actor: str, action: str) -> str | None:
 
 
 def analyst_checks(ctx: dict, svc: str, admin_svc: str | None) -> None:
-    """4주차 분석가 기능(10/22~10/24): 연관 사건 접수, 처리 요청, 운영 정보, 조치 추적·재확인, IOC, 현황판, 자동 수집,
-    연관 묶음. 권한(열람자·자동화 토큰)과 실제 스택에서 한 번 도는지를 본다. 시험 계정이 켜져 있을 때 돈다."""
+    """4주차 분석가 기능(10/22~10/24): 연관 사건 접수·연결된 사건, 보고서의 처리 요청, IOC, 현황판, 자동 수집. 권한(열람자·
+    자동화 토큰)과 실제 스택에서 한 번 도는지를 본다. 지운 기능(운영 정보·조치 추적·연관 묶음 폴더, 10/25)은 API 가 없는지만
+    본다. 시험 계정이 켜져 있을 때 돈다."""
     cid, c2, rev1, viewer = ctx["cid"], ctx["c2"], ctx["rev1"], ctx["viewer"]
 
     # ── 연관 사건 접수·연결(related-sites PR 4·5) ──
@@ -285,8 +286,9 @@ def analyst_checks(ctx: dict, svc: str, admin_svc: str | None) -> None:
         wait(kid, viewer)
     _, links, _ = call("GET", f"/api/cases/{c2}/links", viewer)
     check("연관 사건", "연결된 사건에 자식이 보임(열람자)", bool(kid) and kid in json.dumps(links), f"자식 {str(kid)[:8]}")
-    check("연관 묶음", "열람자 묶음 목록 200", call("GET", "/api/related-groups", viewer)[0] == 200)
-    check("연관 묶음", "열람자 묶음 CSV 403", call("GET", f"/api/related-groups/{'0' * 16}.csv", viewer, raw=True)[0] == 403)
+    # 분류 폴더 '연관 묶음'(묶음 목록·CSV)은 지웠다(10/25): 같은 내용이 사건마다 '연결된 사건'에 보인다
+    check("지운 기능", "연관 묶음 API 없음(404)", call("GET", "/api/related-groups", svc)[0] == 404
+          and call("GET", f"/api/related-groups/{'0' * 16}.csv", svc, raw=True)[0] == 404)
 
     # ── 처리 요청(#90, 2026-10-25 보고서로 합침): cid 는 검토관이 피싱으로 확정한 사건 ──
     check("처리 요청", "따로 보는 요청서 API 는 없음(404)", call("GET", f"/api/cases/{cid}/referral", svc)[0] == 404)

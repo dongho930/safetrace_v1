@@ -6,9 +6,7 @@
 from __future__ import annotations
 
 import asyncio
-import csv
 import hashlib
-import io
 import hmac
 import ipaddress
 import json
@@ -918,8 +916,7 @@ def create_related(case_id: str, body: RelatedIn, response: Response,
 
 # ── 사건 간 연결(related-sites PR 5) ─────────────────────────
 LINKS_MAX = 50
-GROUP_CASES_MAX, GROUP_SITES_MAX = 500, 5000  # 묶음 계산 범위(최근 종료 사건)·호스트 줄 상한
-_GROUP_KEY = re.compile(r"^[0-9a-f]{16}$")
+GROUP_SITES_MAX = 5000  # 연결된 사건을 찾을 때 읽는 호스트 줄 상한
 
 
 def _briefs(ids: list[str]) -> dict[str, dict]:
@@ -968,93 +965,6 @@ def case_links(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]):
                     "roles": sorted(g["roles"]), "cases": [info[x] for x in g["cases"] if x in info]}
                    for g in shared.values()],
     }
-
-
-def _related_groups(min_cases: int) -> tuple[list[dict], bool]:
-    """최근 종료 사건(최대 500)에서 같은 사이트로 이어지는 사건 묶음. 반환: (묶음, 계산 범위를 잘랐는지)."""
-    with store.session() as s:
-        recent = list(s.scalars(select(Case.id).where(Case.status.in_(TERMINAL))
-                                .order_by(Case.created_at.desc()).limit(GROUP_CASES_MAX + 1)))
-        truncated = len(recent) > GROUP_CASES_MAX
-        recent = recent[:GROUP_CASES_MAX]
-        rows = list(s.scalars(select(CaseSite).where(CaseSite.case_id.in_(recent), CaseSite.role.not_in(LEGACY_ROLES))
-                              .order_by(CaseSite.id)
-                              .limit(GROUP_SITES_MAX + 1))) if recent else []
-    if len(rows) > GROUP_SITES_MAX:
-        truncated, rows = True, rows[:GROUP_SITES_MAX]
-    found = related.groups([(r.case_id, r.site, r.generic) for r in rows], min_cases)
-    by_case: dict[str, list[CaseSite]] = {}
-    for r in rows:
-        by_case.setdefault(r.case_id, []).append(r)
-    info = _briefs([cid for g in found for cid in g])
-    out = []
-    for g in found:
-        sites: dict[str, dict] = {}
-        for cid in g:
-            for r in by_case.get(cid, []):
-                x = sites.setdefault(r.site, {"site": r.site, "hosts": set(), "threat": None, "blocked": False,
-                                              "cases": set(), "candidate": None, "roles": set()})
-                x["hosts"].add(r.host)
-                x["roles"].add(r.role)
-                x["cases"].add(cid)
-                if r.threat and r.threat not in ("benign", "unknown"):
-                    x["threat"] = r.threat
-                x["blocked"] = x["blocked"] or r.blocked
-                if r.role in ("via", "link") and x["candidate"] is None:
-                    x["candidate"] = {"case_id": cid, "host": r.host}
-        key = hashlib.sha256("|".join(sorted(sites)).encode()).hexdigest()[:16]
-        listed = sorted(sites.values(), key=lambda x: (-len(x["cases"]), x["site"]))
-        out.append({
-            "key": key,
-            "cases": [info[c] for c in sorted(g) if c in info],
-            "sites": [{"site": x["site"], "hosts": sorted(x["hosts"])[:10],
-                       "threat": x["threat"], "blocked": x["blocked"], "cases": len(x["cases"]),
-                       "candidate": x["candidate"]} for x in listed],
-            "threat_sites": sum(1 for x in listed if x["threat"]),
-            # 회선 차단은 조사 대상 서버가 흉내 낼 수 있는 추정이라 위협 집계에서 빼지 않고 따로 센다(Codex 지적)
-            "blocked_estimate_sites": sum(1 for x in listed if x["blocked"]),
-        })
-    out.sort(key=lambda g: (-len(g["cases"]), g["key"]))
-    return out, truncated
-
-
-@app.get("/api/related-groups")
-def related_groups(p: Annotated[Principal, Depends(need("viewer"))], min: int = Query(2, ge=2, le=50),  # noqa: A002
-                   limit: int = Query(50, ge=1, le=50)):
-    """연관 묶음: 같은 사이트로 이어지는 사건들(단축 서비스·공식·흔한 대형 사이트로는 잇지 않고, 공용 호스팅은 호스트가
-    같을 때만). 계산 범위(최근 종료 사건 500건·호스트 5,000줄)를 넘으면 잘라서 truncated."""
-    t0 = time.monotonic()
-    groups, truncated = _related_groups(min)
-    return {"groups": groups[:limit], "truncated": truncated, "ms": round((time.monotonic() - t0) * 1000)}
-
-
-def _csv_cell(v: object) -> str:
-    """CSV 칸: 페이지가 정한 글자가 표 계산 프로그램에서 수식으로 읽히지 않게 수식 시작 문자 앞에 ' 를 붙인다(CWE-1236)."""
-    s = "" if v is None else str(v)
-    return "'" + s if s[:1] in ("=", "+", "-", "@", "\t", "\r") else s
-
-
-@app.get("/api/related-groups/{group_key}.csv")
-def related_group_csv(group_key: str, p: Annotated[Principal, Depends(need("investigator"))]):
-    """연관 묶음 하나의 사이트·사건 표(조사관 이상, 감사로그). 묶음이 바뀌었으면 404(목록을 새로 받는다)."""
-    if not _GROUP_KEY.match(group_key):
-        raise HTTPException(404, "not found")
-    groups, _ = _related_groups(2)
-    g = next((x for x in groups if x["key"] == group_key), None)
-    if g is None:
-        raise HTTPException(404, "묶음이 바뀌었습니다. 연관 묶음 목록을 다시 불러오세요")
-    buf = io.StringIO()
-    w = csv.writer(buf)
-    w.writerow(["구분", "사이트", "호스트", "AI 판단", "회선 차단 추정", "사건 수", "사건 id", "신고 URL", "사건 상태", "담당자 판정"])
-    for x in g["sites"]:
-        w.writerow([_csv_cell(v) for v in ("사이트", x["site"], " ".join(x["hosts"]), x["threat"],
-                                           x["blocked"], x["cases"], "", "", "", "")])
-    for c in g["cases"]:
-        w.writerow([_csv_cell(v) for v in ("사건", "", "", c["threat"], "", "", c["id"], c["url"], c["status"], c["verdict"])])
-    store.audit(p.name, "related.export", None, f"group={group_key} cases={len(g['cases'])} sites={len(g['sites'])}")
-    name = f"safetrace-related-{now_utc().strftime('%Y%m%d')}-{group_key[:8]}.csv"
-    return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
-                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 # ── 담당자 판정 ─────────────────────────────────────────

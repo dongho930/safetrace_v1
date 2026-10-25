@@ -81,8 +81,8 @@ def test_backfill_drops_legacy_contact_and_kit_rows():
 
 
 def test_legacy_links_excluded_without_backfill():
-    """Codex 1회차 F1: 다시 쓰기(backfill) 없이 업그레이드해도 예전 연결 줄(contact·kit)이 연관 묶음·연결된 사건에 '사이트'로
-    나오거나 위협 사이트 수에 섞이지 않는다(그 줄의 threat 는 목적지를 조사한 결과가 아니라 원 사건의 판단을 복사한 것이다)."""
+    """Codex 1회차 F1: 다시 쓰기(backfill) 없이 업그레이드해도 예전 연결 줄(contact·kit)이 연결된 사건에 '사이트'로
+    나오지 않는다(그 줄의 threat 는 목적지를 조사한 결과가 아니라 원 사건의 판단을 복사한 것이다)."""
     from fastapi.testclient import TestClient
 
     from safetrace.api.main import app, record_event, store
@@ -102,7 +102,6 @@ def test_legacy_links_excluded_without_backfill():
     with TestClient(app) as client:
         from tests.conftest import VIEWER
 
-        groups = client.get("/api/related-groups?min=2&limit=50", headers={"Authorization": f"Bearer {VIEWER}"}).json()
         links = client.get(f"/api/cases/{ids[0]}/links", headers={"Authorization": f"Bearer {VIEWER}"}).json()
-    assert not [g for g in groups["groups"] if set(ids) <= {x["id"] for x in g["cases"]}]
     assert not [g for g in links["shared"] if g["site"] == key]
+    assert ids[1] not in {y["id"] for g in links["shared"] for y in g["cases"]}
