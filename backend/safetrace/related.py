@@ -140,6 +140,15 @@ SITES_PER_CASE = 30  # 사건 하나에서 남기는 호스트
 # 와일드카드 DNS(이름에 든 IP 로 해석되는 서비스): 하위 도메인마다 가리키는 서버가 달라 공용 호스팅처럼 호스트가 같을 때만
 # 잇는다. 관찰한 것만: 로컬 DB 의 공격 시나리오 사건(127.0.0.1.nip.io·169.254.169.254.nip.io 24건이 nip.io 하나로 묶였다)
 WILDCARD_DNS: tuple[str, ...] = ("nip.io",)
+# 하위 도메인마다 운영자가 다른 호스팅인데 공용 호스팅 목록(판단 규칙에도 쓰인다)에는 없는 곳: 잇기에서만 호스트가 같을 때만.
+# 관찰한 것만: 2026-10-25 로컬 DB 에서 서로 다른 workers.dev 피싱 2곳이 workers.dev 하나로 묶였다
+LINK_HOST_ONLY: tuple[str, ...] = ("workers.dev",)
+# 사건을 잇는 줄로 쓰지 않는 대형 서비스(관찰한 것만): 2026-10-25 로컬 DB 연관 묶음에서 Cloudflare 경고 화면의 cloudflare.com
+# 링크로 피싱 48건(신고 호스트 49개)이, google.com·blogger.com·googleusercontent.com·WhatsApp 링크로 26건(18개)이 한 묶음이
+# 됐다. 피싱 키트·위협 화면이 흔히 링크하는 곳이라 운영자를 가리키지 않는다. 잇기에서만 뺀다(후보 고르기·판단은 그대로)
+LINK_GENERIC_SITES: tuple[str, ...] = ("cloudflare.com", "google.com", "blogger.com", "googleusercontent.com",
+                                       "whatsapp.com", "wa.me", "whatsappbusiness.com")
+_LINK_THREATS = ("phishing", "scam", "illegal_gambling", "malware")
 
 
 def _non_public_ip(host: str) -> bool:
@@ -164,37 +173,66 @@ def link_key(host: str) -> tuple[str, bool] | None:
     h = (host or "").lower().rstrip(".")[:253]
     if not h or on_domain(h, SHORTENER_HOSTS) or _official(h) or _non_public_ip(h):
         return None
-    if on_domain(h, SHARED_HOSTING) or on_domain(h, WILDCARD_DNS):
+    if on_domain(h, SHARED_HOSTING) or on_domain(h, WILDCARD_DNS) or on_domain(h, LINK_HOST_ONLY):
         return h, True
     site = site_of(h)
     # 서비스 홈(단축 서비스·사이트 빌더의 본 도메인)도 잇지 않는다: 같은 서비스를 썼다고 같은 조직이 아니다
     return None if site in GENERIC_SITES or site in SERVICE_HOMES else (site, False)
 
 
+def _host(u: object) -> str | None:
+    try:
+        return urlsplit(u).hostname if isinstance(u, str) and u else None
+    except ValueError:  # 대괄호가 닫히지 않은 IPv6 처럼 풀 수 없는 주소
+        return None
+
+
+def _risky_candidate(c: dict) -> bool:
+    """하위 조사에서 위험하다고 확인된 후보: AI 가 위협으로 봤거나, 외부 평판이 위험이거나, 회선이 이름으로 막는다(추정)."""
+    return bool(c.get("sub")) and (c.get("threat") in _LINK_THREATS or c.get("reputation_match") is True
+                                   or c.get("blocked") is True)
+
+
 def case_sites(url: str, final_url: str | None, threat: dict | None, candidates: list | None) -> list[dict]:
     """끝난 사건 하나에서 이을 호스트 목록 {host, site, role, threat, blocked, generic}. role: start | final | via | link |
-    candidate_final. 값은 조사 대상 페이지에서 온 것이라 길이를 자르고 정해진 모양으로만 만든다."""
+    candidate_final. 값은 조사 대상 페이지에서 온 것이라 길이를 자르고 정해진 모양으로만 만든다.
+
+    남남끼리 묶지 않으려고(2026-10-25 로컬 DB 측정) 아래만 잇는다:
+    - AI 가 정상으로 본 사건은 잇지 않는다(운영 정보 줄과 같은 기준). 쇼핑몰 바닥글의 공정위·SNS 링크로 정상 사이트끼리 묶였다
+    - 최종 주소는 신고 주소와 같은 사이트이거나 신고 주소로 이을 수 없을 때(단축 서비스 등)만: 에이전트가 누른 링크나, 피싱
+      키트가 봇을 보낸 진짜 브랜드 사이트(allegro.pl 등 목록 밖 브랜드)가 최종 주소가 되면 그 브랜드를 사칭한 남남이 묶인다
+    - 페이지 링크는 하위 조사에서 위험하다고 확인된 것만(_risky_candidate). 조사하지 않은 링크는 위협 화면이 흔히 다는
+      대형 서비스·도구 링크가 대부분이다. 경유 도메인(리다이렉트 경로)은 그대로 잇는다
+    - 대형 서비스(LINK_GENERIC_SITES)와 피싱 키트가 링크한 진짜 브랜드 사이트(real_brand_site, 하위 조사가 위협으로 봐도)는
+      역할과 관계없이 잇지 않는다: 서로 다른 Wells Fargo 사칭 키트가 진짜 wellsfargo.com 으로 이어진다"""
     out: list[dict] = []
     seen: set[tuple[str, str]] = set()
     main_threat = threat.get("threat") if isinstance(threat, dict) and isinstance(threat.get("threat"), str) else None
+    if main_threat == "benign":
+        return out
 
     def add(u, role, th=None, blocked=False):
-        host = urlsplit(u).hostname if isinstance(u, str) and u else None
+        host = _host(u)
         key = link_key(host or "")
-        if key is None or (host, role) in seen or len(out) >= SITES_PER_CASE:
+        if (key is None or key[0] in LINK_GENERIC_SITES or real_brand_site(host or "") or (host, role) in seen
+                or len(out) >= SITES_PER_CASE):
             return
         seen.add((host, role))
         out.append({"host": host[:253], "site": key[0][:253], "role": role,
                     "threat": th[:32] if isinstance(th, str) else None, "blocked": blocked is True, "generic": key[1]})
 
     add(url, "start", main_threat)
-    add(final_url, "final", main_threat)
+    start_key, final_key = link_key(_host(url) or ""), link_key(_host(final_url) or "")
+    if start_key is None or start_key[0] in LINK_GENERIC_SITES or (final_key is not None and final_key[0] == start_key[0]):
+        add(final_url, "final", main_threat)
     for c in candidates if isinstance(candidates, list) else []:
         if not isinstance(c, dict):
             continue
-        role = "via" if c.get("source") == "via" else "link"
-        add(c.get("url"), role, c.get("threat") if c.get("sub") else None, c.get("blocked"))
-        if c.get("sub"):
+        if c.get("source") == "via":
+            add(c.get("url"), "via", c.get("threat") if c.get("sub") else None, c.get("blocked"))
+        elif _risky_candidate(c):
+            add(c.get("url"), "link", c.get("threat"), c.get("blocked"))
+        if _risky_candidate(c):
             add(c.get("final_url"), "candidate_final", c.get("threat"), c.get("blocked"))
     return out
 
