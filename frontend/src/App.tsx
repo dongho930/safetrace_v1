@@ -22,6 +22,7 @@ import {
   getIntake,
   setIntake,
   type Intake,
+  type IntakeSource,
   type Pair,
   type Stats,
   type CaseLinks,
@@ -661,6 +662,18 @@ function UsersDialog({ me: current, onClose }: { me: Me; onClose: () => void }) 
 // 자동 수집(공개 피싱 피드 → 조사 접수): 상태는 모두, 켜기·끄기는 사람 관리자만. 30초마다 새로 고침
 const SOURCE_LABEL: Record<string, string> = dict({ openphish: "OpenPhish", phishtank: "PhishTank" });
 const FETCH_STATE: Record<string, string> = dict({ pending: "받는 중", done: "받음", failed: "실패", expired: "응답 없음" });
+// 다음 받기: 서버가 받기 요청과 같은 계산으로 준 시각(마지막 요청 + 주기, 실패면 1시간). 켜져 있을 때만 받고, 지났으면
+// 다음 바퀴(15초 안)에 받는다. 받는 중이거나 시각을 모르면 빈 글
+function nextFetch(x: IntakeSource, enabled: boolean, nowMs: number): string {
+  if (x && (x.state === "pending" || !x.nextAt)) return "";
+  const at = x?.nextAt ? Date.parse(x.nextAt) : NaN;
+  const due = !x || !Number.isFinite(at) || at <= nowMs;
+  if (!enabled) return due ? "켜면 바로" : `${fmtTime(x!.nextAt!)} (켜져 있을 때)`;
+  if (due) return "곧";
+  const min = Math.ceil((at - nowMs) / 60_000);
+  const left = min >= 60 ? `${Math.floor(min / 60)}시간${min % 60 ? ` ${min % 60}분` : ""}` : `${min}분`;
+  return `${fmtTime(x!.nextAt!)} (${left} 뒤)`;
+}
 function IntakeBox({ canToggle }: { canToggle: boolean }) {
   const [st, setSt] = useState<Intake | null>(null);
   const [msg, setMsg] = useState("");
@@ -690,13 +703,17 @@ function IntakeBox({ canToggle }: { canToggle: boolean }) {
         )}
       </div>
       <p className="small muted">
-        대기 {st.queued} · 조사 {st.pending} · 24시간 {st.created24h}건{st.stale48h > 0 && ` · 오래돼 버림 ${st.stale48h}`}
+        대기 {st.queued} · 조사 {st.pending} · 24시간 {st.created24h}건
       </p>
-      {st.sources.map(([k, x]) => (
-        <p key={k} className="small muted">
-          {SOURCE_LABEL[k] ?? k}: {x ? `${FETCH_STATE[x.state] ?? x.state} ${fmtTime(x.doneAt ?? x.requestedAt)}${x.picked != null ? ` · ${x.picked}/${x.got ?? 0}` : ""}` : "아직 안 받음"}
-        </p>
-      ))}
+      {st.sources.map(([k, x]) => {
+        const next = nextFetch(x, st.enabled, Date.now());
+        return (
+          <p key={k} className="small muted" title={x?.intervalH ? `${x.intervalH}시간마다 받음(실패하면 1시간 뒤 다시)` : undefined}>
+            {SOURCE_LABEL[k] ?? k}: {x ? `${FETCH_STATE[x.state] ?? x.state} ${fmtTime(x.doneAt ?? x.requestedAt)}${x.picked != null ? ` · ${x.picked}/${x.got ?? 0}` : ""}` : "아직 안 받음"}
+            {next && <span className="intake-next">다음 {next}</span>}
+          </p>
+        );
+      })}
       {msg && <p className="small err">{msg}</p>}
     </section>
   );

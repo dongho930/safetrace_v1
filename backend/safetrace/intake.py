@@ -169,6 +169,19 @@ def expire_fetches(store: Store, at: datetime | None = None) -> int:
     return len(rows)
 
 
+def next_fetch_at(src: str, last: FeedFetch | None) -> datetime | None:
+    """다음 받기를 요청할 시각: 마지막 받기 요청 + 주기(실패·만료면 1시간). 받은 적이 없거나(바로 받음) 받는 중이면 None.
+    받기 요청(due_sources)과 콘솔 표시(status)가 같은 계산을 쓴다."""
+    if last is None or last.state == "pending" or src not in INTERVAL_H:
+        return None
+    wait = RETRY_FAILED if last.state in ("failed", "expired") else timedelta(hours=INTERVAL_H[src])
+    return last.requested_at + wait
+
+
+def _last_fetch(s, src: str) -> FeedFetch | None:
+    return s.scalar(select(FeedFetch).where(FeedFetch.source == src).order_by(FeedFetch.id.desc()).limit(1))
+
+
 def due_sources(store: Store, sources: list[str], at: datetime | None = None) -> list[str]:
     """받을 때가 된 출처: 대기 중인 받기가 없고, 마지막 받기가 주기(실패면 1시간)보다 오래됐다."""
     out = []
@@ -177,14 +190,12 @@ def due_sources(store: Store, sources: list[str], at: datetime | None = None) ->
         for src in sources:
             if src not in FEEDS or src not in INTERVAL_H:
                 continue
-            last = s.scalar(select(FeedFetch).where(FeedFetch.source == src).order_by(FeedFetch.id.desc()).limit(1))
+            last = _last_fetch(s, src)
             if last is None:
                 out.append(src)
                 continue
-            if last.state == "pending":
-                continue
-            wait = RETRY_FAILED if last.state in ("failed", "expired") else timedelta(hours=INTERVAL_H[src])
-            if _naive(t) - _naive(last.requested_at) >= wait:
+            nxt = next_fetch_at(src, last)
+            if nxt is not None and _naive(t) >= _naive(nxt):
                 out.append(src)
     return out
 
@@ -262,24 +273,25 @@ def recent_hosts(store: Store, days: int, at: datetime | None = None) -> set[str
 
 
 def status(store: Store, sources: list[str], at: datetime | None = None) -> dict:
-    """콘솔 표시용: 켜짐, 출처별 마지막 받기, 대기열 수, 최근 24시간 만든 사건 수(값·주소는 없다)."""
+    """콘솔 표시용: 켜짐, 출처별 마지막 받기·다음 받기 시각·주기, 대기열 수, 최근 24시간 만든 사건 수(값·주소는 없다).
+    다음 받기 시각은 켜져 있을 때의 시각이다(꺼져 있으면 받지 않고, 켜면 그 시각이 지났을 때 바로 받는다)."""
     t = _at(at)
     with store.session() as s:
         st = s.get(IntakeState, 1)
         last = {}
         for src in sources:
-            f = s.scalar(select(FeedFetch).where(FeedFetch.source == src).order_by(FeedFetch.id.desc()).limit(1))
+            f = _last_fetch(s, src)
+            nxt = next_fetch_at(src, f)
             last[src] = None if f is None else {
                 "state": f.state, "requested_at": f.requested_at.isoformat(),
                 "done_at": f.done_at.isoformat() if f.done_at else None, "got": f.got, "picked": f.picked,
-                "skipped": f.skipped or {}, "reason": f.reason}
+                "skipped": f.skipped or {}, "reason": f.reason,
+                "next_at": nxt.isoformat() if nxt is not None else None, "interval_h": INTERVAL_H.get(src)}
         queued = len(list(s.scalars(select(FeedItem.id).where(FeedItem.state == "queued"))))
-        stale = len(list(s.scalars(select(FeedItem.id).where(FeedItem.state == "stale",
-                                                            FeedItem.created_at >= t - timedelta(hours=48)))))
         day = len(list(s.scalars(select(Case.id).where(Case.created_by == INTAKE_ACTOR,
                                                        Case.created_at >= t - timedelta(hours=24)))))
         pending = len(list(s.scalars(select(Case.id).where(Case.created_by == INTAKE_ACTOR,
                                                            Case.status.in_(("QUEUED", "RUNNING"))))))
     return {"enabled": bool(st and st.enabled), "updated_by": st.updated_by if st else None,
             "updated_at": st.updated_at.isoformat() if st else None, "sources": last, "queued": queued,
-            "pending": pending, "created_24h": day, "stale_48h": stale}
+            "pending": pending, "created_24h": day}
