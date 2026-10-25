@@ -169,6 +169,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .row-time { font-size: 12px; color: var(--muted); }
 .row-sub { grid-column: 2; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row .chip { align-self: center; }
+.pager { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 16px; border-top: 1px solid var(--line-soft); }
 .rows-empty { padding: 16px; color: var(--muted); font-size: 13px; }
 
 /* 사건 상세 */

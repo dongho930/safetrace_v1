@@ -162,7 +162,35 @@ export const createUser = (username: string, password: string, role: Role) =>
 export const patchUser = (username: string, patch: Partial<{ role: Role; active: boolean; password: string; unlock: boolean }>) =>
   req<UserOut>(`/api/users/${encodeURIComponent(username)}`, { method: "PATCH", body: JSON.stringify(patch) });
 
-export const listCases = async () => (await req<unknown[]>("/api/cases?limit=50")).flatMap((x) => cleanCase(x) ?? []);
+// 사건 목록 한 쪽: 폴더 건수는 서버가 전체 사건으로 세고, 목록은 폴더·검색·출처로 거른 한 쪽만 받는다
+export const FOLDER_IDS = ["review", "running", "suspect", "decided", "unreachable", "all"] as const;
+export type FolderId = (typeof FOLDER_IDS)[number];
+export type CasePage = {
+  items: CaseOut[];
+  total: number;
+  offset: number;
+  limit: number;
+  counts: Record<FolderId, number>;
+  live: CaseOut | null;
+  queued: CaseOut | null;
+};
+export const PAGE_SIZE = 50;
+const nonNeg = (v: unknown) => (typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? v : 0);
+export const casePage = async (p: { folder: FolderId; q: string; source: string; offset: number }): Promise<CasePage> => {
+  const qs = new URLSearchParams({ folder: p.folder, q: p.q.slice(0, 200), source: p.source, offset: String(p.offset), limit: String(PAGE_SIZE) });
+  const v = await req<unknown>(`/api/cases/page?${qs}`);
+  if (!isObj(v)) throw new ApiError(500, "목록 형식 오류");
+  const counts = Object.fromEntries(FOLDER_IDS.map((f) => [f, nonNeg(isObj(v.counts) ? v.counts[f] : 0)])) as Record<FolderId, number>;
+  return {
+    items: list(v.items).slice(0, 200).flatMap((x) => cleanCase(x) ?? []),
+    total: nonNeg(v.total),
+    offset: nonNeg(v.offset),
+    limit: nonNeg(v.limit) || PAGE_SIZE,
+    counts,
+    live: v.live == null ? null : cleanCase(v.live),
+    queued: v.queued == null ? null : cleanCase(v.queued),
+  };
+};
 export const getCase = async (id: string) => {
   const c = cleanCase(await req<unknown>(`/api/cases/${encodeURIComponent(id)}`));
   if (!c) throw new ApiError(500, "사건 형식 오류");
