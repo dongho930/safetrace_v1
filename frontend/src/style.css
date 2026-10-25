@@ -330,6 +330,18 @@ button.reason:hover { border-color: var(--line-strong); }
   .tab-panel, .detail-scroll { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; }
   .tab-panel::-webkit-scrollbar, .detail-scroll::-webkit-scrollbar { display: none; }
   .progress-panel .log { max-height: none; overflow-y: visible; }  /* 탭 내용이 스크롤하므로 기록 칸 안 스크롤은 없앤다 */
+  /* 회색 바닥이 탭 패널 아래까지 이어진다(내용이 짧아도 흰 빈 칸이 남지 않게) */
+  .tab-panel { display: flex; flex-direction: column; }
+  .tab-panel > .floor { flex: 1 0 auto; }
+  /* 근거 화면: 바닥을 탭 패널 높이에 맞추고 화면 칸이 남는 높이를 쓴다. 화면 목록이 길면 목록 안에서 스크롤 */
+  .tab-panel > .floor.screens { flex: 1 1 0; min-height: 360px; flex-wrap: nowrap; }
+  .tab-panel .shot-box { flex: 1 1 0; height: auto; min-height: 200px; }
+  .tab-panel .thumbs { min-height: 0; overflow-y: auto; scrollbar-width: none; padding: 2px; margin: -2px; }
+  .tab-panel .thumbs::-webkit-scrollbar { display: none; }
+  /* 조사 녹화: 영상 칸이 남는 높이를 쓴다 */
+  .tab-panel > .rec-floor { flex: 1 1 0; min-height: 360px; display: flex; flex-direction: column; }
+  .rec-floor > .rec-player { flex: 1 1 0; min-height: 0; }
+  .rec-floor .rec-box { flex: 1 1 0; height: auto; min-height: 200px; }
 }
 
 /* 경로 지도 */

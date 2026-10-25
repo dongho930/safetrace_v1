@@ -1923,7 +1923,7 @@ function CaseTabs({
         {tab === "links" && <LinksTab id={id} onOpen={onOpen} />}
         {tab === "related" && c && <RelatedTab id={id} c={c} events={events} related={related} canCreate={canCreate} onOpen={onOpen} onChanged={onChanged} />}
         {tab === "rec" && (
-          <div className="floor">
+          <div className="floor rec-floor">
             {recs.length ? (
               <RecordingPlayer key={id} caseId={id} recs={recs} events={events} />
             ) : (
