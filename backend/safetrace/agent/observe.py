@@ -68,6 +68,15 @@ COLLECT_JS = r"""
       if (r.width * r.height > vw * vh * 0.2) { popup = true; break; }
     }
   }
+  // 더 내려 볼 곳이 있는지: 문서, body, 화면 가운데 요소의 스크롤 상자 중 하나라도 아래가 남았으면 true.
+  // 탐색 선택지(스크롤)에만 쓴다(안전 판단에는 쓰지 않는다)
+  const more = (el) => !!el && el.scrollHeight > el.clientHeight + 4 && el.scrollTop + el.clientHeight < el.scrollHeight - 4;
+  const se = document.scrollingElement || document.documentElement;
+  let scrollable = se.scrollTop + window.innerHeight < se.scrollHeight - 4;
+  for (let el = document.elementFromPoint(vw / 2, vh / 2); el && !scrollable && el !== se; el = el.parentElement) {
+    const oy = getComputedStyle(el).overflowY;
+    if ((oy === 'auto' || oy === 'scroll') && more(el)) scrollable = true;
+  }
   const full = document.body ? document.body.innerText : '';
   const text = full.replace(/\s+/g, ' ').trim().slice(0, 6000);
   // 연관 후보용 링크: 클릭 후보와 별개로 화면의 모든 a[href] 의 http·https 절대 주소(보이지 않는 링크 포함, 최대 200개).
@@ -85,7 +94,7 @@ COLLECT_JS = r"""
     links.push({ href, text: textOf(a), visible: shown, hasDownload: a.hasAttribute('download'),
                  inForm: !!a.closest('form'), imgOnly });
   }
-  return { items: out, inputs, popup, text, title: document.title.slice(0, 200), links };
+  return { items: out, inputs, popup, scrollable, text, title: document.title.slice(0, 200), links };
 }
 """
 

@@ -316,6 +316,28 @@ class _Observation:
     links: list[dict] = field(default_factory=list)  # 화면의 모든 링크 {url, text}(판단 모델에는 보내지 않음)
 
 
+_FEW_CONTROLS = 3  # 누를 것이 이만큼 이하인 화면만 늦게 나타나는 버튼을 기다린다
+_CONTROLS_WAIT = 3.0  # 최대로 기다리는 시간(초)
+# 누를 수 있어 보이는 요소 수. 탐색(기다릴지)에만 쓰고 안전 판단에는 쓰지 않는다
+_COUNT_CONTROLS_JS = """() => {
+  let n = 0;
+  for (const el of document.querySelectorAll('a[href],button,[role=button],input[type=button],input[type=submit],[onclick]')) {
+    const r = el.getBoundingClientRect();
+    if (r.width > 2 && r.height > 2) n++;
+    if (n > 500) break;
+  }
+  return n;
+}"""
+
+
+async def _count_controls(page: Page) -> int | None:
+    try:
+        n = await asyncio.wait_for(page.evaluate(_COUNT_CONTROLS_JS), 1.0)
+    except (PWError, PWTimeout, asyncio.TimeoutError):
+        return None
+    return n if isinstance(n, int) and not isinstance(n, bool) else None
+
+
 async def _bounded(aw, what: str):
     """정리 작업이 응답 없는 페이지에 묶이지 않게 제한 시간을 둔다. 실패해도 조사 결과는 그대로 둔다."""
     try:
@@ -356,6 +378,7 @@ class AgentRun:
         self._egress_refused: set[str] = set()  # 검문 프록시가 거부 응답을 돌려준 주소(그 응답 화면은 막다른 곳)
         self._dead_links: set[tuple[str, str]] = set()  # 막다른 곳으로 이어진 (페이지 주소, 버튼 글자)
         self._waited: set[str] = set()  # 자동 이동을 기다려 본 대기 화면 주소(한 번만 기다린다)
+        self._waited_controls: set[str] = set()  # 늦게 나타나는 버튼을 기다려 본 주소(한 번만 기다린다)
         self._nav_checks = 0  # 검사 중인 주 화면 이동 요청 수
 
     def _act(self, code: str, n: int | None = None):
@@ -566,7 +589,8 @@ class AgentRun:
         infos = {c.id: infos[c.id] for c in chosen}
         text = mask_pii(raw.get("text", ""))[:4000]
         state = PageState(step=step, url=page.url[:2048], title=mask_pii(raw.get("title", ""))[:200], text=text,
-                          candidates=chosen, has_popup=bool(raw.get("popup")), history=self.history[-30:])
+                          candidates=chosen, has_popup=bool(raw.get("popup")),
+                          can_scroll=raw.get("scrollable") is not False, history=self.history[-30:])
         # 상자는 캡처 직전에 잰다(OCR 캡처가 스크롤을 되돌린 뒤), 크기는 실제 캡처 파일에서.
         # 스크롤이 잠긴 문서는 펼친 같은 상태에서 재고 찍는다(상자와 사진이 같은 배치)
         cand_ids, forb_ids = [c.id for c in chosen], forbidden_ids[:50]
@@ -747,6 +771,37 @@ class AgentRun:
                                        "result_url": page.url[:2048], "waited_ms": int((time.monotonic() - t0) * 1000),
                                        "destinations": [b["host"] for b in self.result.blocked_destinations[blocked0:]]})
         return moved
+
+    async def _wait_new_controls(self, page: Page, obs: _Observation, step: int) -> bool:
+        """끝내기 전에, 누를 것이 거의 없는 화면이면 잠시 기다려 누를 수 있는 요소가 새로 나타나는지 본다. 나타났으면 True.
+        '잠시만 기다려 주세요' 뒤에 진행 버튼을 늦게 그리는 화면(단계형 시험 페이지 100종에서 도달 19%)을 첫 관찰만 보고 끝내지
+        않게. 한 주소에 한 번, 누를 것이 _FEW_CONTROLS 개 이하이고 금지 요소가 없을 때만(누를 것이 많은 보통 화면, 입력칸이 있는
+        목적지 화면은 기다리지 않는다)."""
+        url = page.url
+        # 입력·결제·다운로드 요소가 이미 보이는 화면은 목적지(위험 화면)라 기다리지 않는다(입력칸은 후보가 아니라 후보가 적다)
+        if url in self._waited_controls or len(obs.state.candidates) > _FEW_CONTROLS or obs.forbidden:
+            return False
+        self._waited_controls.add(url)
+        n0 = await _count_controls(page)
+        if n0 is None:
+            return False
+        self._act("load")
+        t0 = time.monotonic()
+        until = t0 + min(_CONTROLS_WAIT, max(0.0, self.budget.remaining() - 5))
+        appeared = False
+        while time.monotonic() < until:
+            await asyncio.sleep(0.25)
+            if page.url != url:
+                break
+            n = await _count_controls(page)
+            if n is None:
+                break
+            if n > n0:
+                appeared = True
+                break
+        self._record("wait_controls", {"step": step, "url": url[:2048], "appeared": appeared,
+                                       "waited_ms": int((time.monotonic() - t0) * 1000)})
+        return appeared
 
     async def _settle_nav_checks(self, page: Page, step: int) -> None:
         """주 화면 이동 요청을 검사하는 중이면 끝날 때까지 기다린다(검사 상한만큼).
@@ -1050,6 +1105,12 @@ class AgentRun:
             self.summary_evidence.append(obs.evidence_seq)
             self.emit({"type": "step", "step": step, "url": obs.state.url})
             loop = self.budget.observe_state(obs.state_key)
+            if loop and self.history and self.history[-1] == "scroll":
+                # 스크롤해도 고를 것이 그대로다(긴 안내문 아래의 버튼이 이미 후보에 있음): 끝내지 않고 스크롤을 뺀 선택지로
+                # 한 번 더 고른다. 선택지가 줄어 같은 화면 판정 열쇠도 바뀌므로 끝이 있다
+                self.history.append("scroll_no_effect")
+                obs.state = obs.state.model_copy(update={"history": self.history[-30:]})
+                loop = None
             if loop:
                 self.result.status, self.result.finish_reason = "COMPLETED", loop
                 break
@@ -1073,6 +1134,12 @@ class AgentRun:
                 "observe_seq": obs.evidence_seq,
             })
             if prob < self.s.action_min_prob or decision.action == ActionKind.FINISH:
+                if await self._wait_new_controls(page, obs, step):
+                    # 누를 것이 거의 없던 화면에 진행 버튼이 늦게 나타났다: 끝내지 않고 다시 관찰한다
+                    self.history.append("waited")
+                    self.budget.steps += 1
+                    step += 1
+                    continue
                 if await self._wait_auto_redirect(page, obs.state, step, *observed_from):
                     # 대기 화면이 스스로 다음 곳으로 넘어갔다: 끝내지 않고 넘어간 곳(막다른 곳 포함)을 이어서 본다
                     blocked_before = observed_from[1]

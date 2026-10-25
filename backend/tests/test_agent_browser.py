@@ -1111,3 +1111,68 @@ def test_boxes_skip_duplicated_marker(tmp_path):
 
     root, rects = asyncio.run(go())
     assert root is not None and rects[0] is None and rects[1] is not None and rects[2] is None
+
+
+class _Picker:
+    """시험용 판단기: 고를 수 있는 선택지(action_options)만 보고 정해진 순서로 고른다."""
+
+    def __init__(self, prefer):
+        self.prefer, self.seen = prefer, []
+
+    def action(self, state):
+        from safetrace.decision.schema import ActionDecision, action_options, parse_action_key
+
+        opts = action_options(state)
+        self.seen.append((state.url, state.can_scroll, sorted(opts)))
+        choice = next((k for k in self.prefer(state, opts) if k in opts), "finish")
+        kind, _ = parse_action_key(choice, state)
+        return ActionDecision(choice=choice, probabilities={choice: 0.9}, model="t", provider="t", latency_ms=0,
+                              action=kind, element_id=choice.removeprefix("click_") if choice.startswith("click_") else None)
+
+    def threat(self, req):
+        from safetrace.decision.schema import Threat, ThreatDecision
+
+        return ThreatDecision(choice="phishing", probabilities={"phishing": 0.9}, model="t", provider="t",
+                              latency_ms=0, threat=Threat.PHISHING, hold=False)
+
+
+def _click_text(state, text):
+    return [f"click_{c.id}" for c in state.candidates if text in c.text]
+
+
+def test_waits_for_late_button_before_finishing(settings, testpages):
+    """진행 버튼을 늦게 그리는 화면: 누를 것이 거의 없을 때 끝내려 하면 잠시 기다려 다시 보고 버튼을 누른다."""
+    d = _Picker(lambda st, o: _click_text(st, "재배송 신청") or ["finish"])
+    cid = str(uuid.uuid4())
+    investigate(cid, f"{BASE}/phish/late-button.html", settings, lambda e: None, decider=d)
+    chain = [json.loads(x) for x in (settings.evidence_dir / cid / "chain.jsonl").read_text(encoding="utf-8").splitlines()]
+    waits = [r["data"] for r in chain if r["kind"] == "wait_controls"]
+    assert len(waits) == 1 and waits[0]["appeared"] and waits[0]["waited_ms"] < 3500, waits
+    assert any(urlsplit(r["data"]["url"]).path == "/phish/track.html" for r in chain if r["kind"] == "observe")
+
+
+def test_no_late_button_wait_when_page_has_controls(settings, testpages):
+    """누를 것이 많은 보통 화면에서는 끝낼 때 기다리지 않는다(조사가 길어지지 않게)."""
+    d = _Picker(lambda st, o: ["finish"])
+    cid = str(uuid.uuid4())
+    investigate(cid, f"{BASE}/attack/links.html", settings, lambda e: None, decider=d)
+    chain = [json.loads(x) for x in (settings.evidence_dir / cid / "chain.jsonl").read_text(encoding="utf-8").splitlines()]
+    obs = next(r["data"] for r in chain if r["kind"] == "observe")
+    assert len(obs["candidates"]) > 3
+    assert not any(r["kind"] == "wait_controls" for r in chain)
+
+
+def test_scroll_offered_only_when_page_scrolls(settings, testpages):
+    """더 내려 볼 곳이 없으면 스크롤을 선택지에 넣지 않고, 스크롤을 거듭해도 고를 것이 그대로면 같은 화면 반복으로 끝내지 않고
+    스크롤을 뺀 선택지로 다시 고른다(긴 안내문 아래 버튼)."""
+    d = _Picker(lambda st, o: ["scroll"] + _click_text(st, "신청 계속"))
+    cid = str(uuid.uuid4())
+    final = investigate(cid, f"{BASE}/phish/long-scroll.html", settings, lambda e: None, decider=d)
+    assert final["reason"] != "loop_detected", final
+    chain = [json.loads(x) for x in (settings.evidence_dir / cid / "chain.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert any(urlsplit(r["data"]["url"]).path == "/phish/track.html" for r in chain if r["kind"] == "observe")
+    long_obs = [s for s in d.seen if s[0].endswith("/long-scroll.html")]
+    assert long_obs[0][1] is True and "scroll" in long_obs[0][2]  # 처음에는 내려 볼 곳이 있다
+    assert any("scroll" not in s[2] for s in long_obs)  # 스크롤을 다 했거나 소용없으면 뺀다
+    short = [s for s in d.seen if s[0].endswith("/phish/track.html")]
+    assert short and all("scroll" not in s[2] for s in short if s[1] is False)

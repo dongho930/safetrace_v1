@@ -73,6 +73,9 @@ class PageState(BaseModel):
     text: str = Field(max_length=4000)  # 마스킹된 가시 텍스트 요약
     candidates: list[Candidate] = Field(max_length=50)
     has_popup: bool = False
+    # 더 내려 볼 곳이 있는지(에이전트가 관찰할 때 잼). 없으면 스크롤을 선택지에 넣지 않는다: 바뀌지 않을 화면에서 스크롤을 골라
+    # 진행 버튼 확률이 나뉘거나(문턱 아래로 떨어져 멈춤) 같은 화면 반복으로 끝나던 것(단계형 시험 페이지 100종, 2026-10-26)
+    can_scroll: bool = True
     history: list[str] = Field(default_factory=list, max_length=30)  # 지난 행동 요약
 
 
@@ -163,7 +166,7 @@ def action_options(state: PageState) -> dict[str, str]:
             label += " (다른 레이어에 가려져 지금은 누를 수 없음)"
         opts[f"click_{c.id}"] = f"클릭: [{c.tag}] {label}"
     # 마지막 화면 변화 뒤에 효과가 없었던 스크롤·뒤로 가기는 다시 내놓지 않는다: 같은 행동 반복 방지
-    if "scroll" not in dead:
+    if state.can_scroll and "scroll" not in dead:
         opts["scroll"] = "화면을 아래로 스크롤해 더 본다"
     if state.has_popup:
         opts["close_popup"] = "떠 있는 팝업·레이어를 닫는다"

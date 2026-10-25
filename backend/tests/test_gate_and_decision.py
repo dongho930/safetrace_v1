@@ -1147,3 +1147,11 @@ def test_boxes_from_maps_viewport_rects_to_capture(tmp_path):
     assert png_size(tmp_path / "a.png") == (1280, 2600)
     assert png_size(tmp_path / "b.png") is None
     assert png_size(tmp_path / "missing.png") is None
+
+
+def test_scroll_not_offered_when_page_cannot_scroll():
+    from safetrace.decision.schema import PageState, action_options
+
+    st = PageState(step=1, url="http://x/", title="", text="", candidates=[], can_scroll=False)
+    assert "scroll" not in action_options(st) and "finish" in action_options(st)
+    assert "scroll" in action_options(st.model_copy(update={"can_scroll": True}))
