@@ -1,5 +1,6 @@
-"""실제 스택 점검(1·2·3주차 범위): 신고 URL 이 접수 → 탐색 → 판단 → 담당자 판정 → 보고서·패키지 → 검증까지 이어지는지,
-계정·권한·판정·증거·서명 분리·연관 후보·보고서 규칙이 운영 구성에서 지켜지는지 API 로 확인한다.
+"""실제 스택 점검(1~4주차 범위): 신고 URL 이 접수 → 탐색 → 판단 → 담당자 판정 → 보고서·패키지 → 검증까지 이어지는지,
+계정·권한·판정·증거·서명 분리·연관 후보·보고서 규칙과 4주차 분석가 기능(연관 사건 접수, 처리 요청, 운영 정보, 조치 추적·
+재확인, IOC, 현황판, 자동 수집)의 권한·동작이 운영 구성에서 지켜지는지 API 로 확인한다.
 
     docker compose --profile demo up -d
     python tools/live_check.py [--attacks]      # --attacks: 공격 시나리오 일부(AT-01·04·07·15)도 함께
@@ -138,7 +139,7 @@ def attack_checks(returncode: int, stdout: str, want: list[str]) -> None:
     check("공격", "공격 시험 도구 정상 종료", returncode == 0, f"종료 코드 {returncode}")
 
 
-def run(pw: str, svc: str, admin_svc: str | None) -> str:
+def run(pw: str, svc: str, admin_svc: str | None) -> dict:
     # ── 1주차 ① 계정·권한 ──
     _, rev1 = login("qa.rev1", pw)
     _, rev2 = login("qa.rev2", pw)
@@ -243,7 +244,130 @@ def run(pw: str, svc: str, admin_svc: str | None) -> str:
           f"{len(pdf) // 1024}KB {(time.time() - t1) * 1000:.0f}ms")
     _, p3, _ = call("GET", f"/api/cases/{cid}/package", viewer)
     check("보고서", "내보내기 감사 기록(report.export)", "report.export" in [a["action"] for a in p3["review"]["audit"]])
-    return cid
+    return {"cid": cid, "c2": c2["id"], "rev1": rev1, "viewer": viewer}
+
+
+def last_audit(actor: str, action: str) -> str | None:
+    """그 주체의 가장 최근 감사 기록 시각(사건 없는 내보내기 확인용). 없으면 None."""
+    out = api_py(
+        "import json,sys\nfrom sqlalchemy import select\nfrom safetrace.api.main import store\n"
+        "from safetrace.store import AuditLog\nactor,action=sys.stdin.readline().split()\n"
+        "with store.session() as s:\n"
+        "    r=s.scalars(select(AuditLog).where(AuditLog.actor==actor,AuditLog.action==action)"
+        ".order_by(AuditLog.id.desc()).limit(1)).first()\n"
+        "print(json.dumps({'at':r.created_at.isoformat() if r else None}))\n", f"{actor} {action}\n")
+    return json.loads(out.strip())["at"]
+
+
+def analyst_checks(ctx: dict, svc: str, admin_svc: str | None) -> None:
+    """4주차 분석가 기능(10/22~10/24): 연관 사건 접수, 처리 요청, 운영 정보, 조치 추적·재확인, IOC, 현황판, 자동 수집,
+    연관 묶음. 권한(열람자·자동화 토큰)과 실제 스택에서 한 번 도는지를 본다. 시험 계정이 켜져 있을 때 돈다."""
+    cid, c2, rev1, viewer = ctx["cid"], ctx["c2"], ctx["rev1"], ctx["viewer"]
+
+    # ── 연관 사건 접수·연결(related-sites PR 4·5) ──
+    _, d2, _ = call("GET", f"/api/cases/{c2}", viewer)
+    cands = [x["url"] for x in (d2.get("candidates") or []) if isinstance(x, dict) and isinstance(x.get("url"), str)]
+    check("연관 사건", "열람자 연관 접수 403",
+          call("POST", f"/api/cases/{c2}/related", viewer, {"url": cands[0] if cands else f"{TP}/"})[0] == 403)
+    check("연관 사건", "후보 목록에 없는 주소 422",
+          call("POST", f"/api/cases/{c2}/related", svc, {"url": f"{TP}/not-a-candidate-{secrets.token_hex(3)}"})[0] == 422)
+    kid = None
+    if cands:
+        s1, k1, _ = call("POST", f"/api/cases/{c2}/related", svc, {"url": cands[0]})
+        s2, k2, _ = call("POST", f"/api/cases/{c2}/related", svc, {"url": cands[0]})
+        kid = k1.get("id") if s1 in (200, 201) else None
+        check("연관 사건", "후보를 새 사건으로 접수, 다시 누르면 같은 사건(200)",
+              s1 in (200, 201) and s2 == 200 and kid == k2.get("id") and k1.get("source") == "related",
+              f"{s1}/{s2} {cands[0]}")
+    else:
+        check("연관 사건", "후보를 새 사건으로 접수, 다시 누르면 같은 사건(200)", False, "후보 없음")
+    if kid:
+        wait(kid, viewer)
+    _, links, _ = call("GET", f"/api/cases/{c2}/links", viewer)
+    check("연관 사건", "연결된 사건에 자식이 보임(열람자)", bool(kid) and kid in json.dumps(links), f"자식 {str(kid)[:8]}")
+    check("연관 묶음", "열람자 묶음 목록 200", call("GET", "/api/related-groups", viewer)[0] == 200)
+    check("연관 묶음", "열람자 묶음 CSV 403", call("GET", f"/api/related-groups/{'0' * 16}.csv", viewer, raw=True)[0] == 403)
+
+    # ── 처리 기관 안내·요청서(#90): cid 는 검토관이 피싱으로 확정한 사건 ──
+    check("처리 요청", "열람자 요청서 403", call("GET", f"/api/cases/{cid}/referral", viewer)[0] == 403)
+    s, ref, _ = call("GET", f"/api/cases/{cid}/referral", svc)
+    ref = ref if s == 200 and isinstance(ref, dict) else {}
+    check("처리 요청", "확정 판정(피싱) → KISA 118 요청서, 담당자 판정 기준·초안 아님",
+          ref.get("applicable") is True and (ref.get("agency") or {}).get("id") == "kisa" and ref.get("basis") == "confirmed"
+          and ref.get("draft") is False and cid in ref.get("text", ""),
+          f"{s} {(ref.get('agency') or {}).get('phone')} {ref.get('basis')}")
+    _, pk, _ = call("GET", f"/api/cases/{cid}/package", viewer)
+    check("처리 요청", "열람 감사 기록(referral.view)", "referral.view" in [a["action"] for a in pk["review"]["audit"]])
+
+    # ── 운영 정보·키트 지문(#91): 가짜 연락처가 적힌 시험 페이지 ──
+    _, c3, _ = call("POST", "/api/cases", svc, {"url": f"{TP}/gamble/contact.html", "source": "test"})
+    c3 = wait(c3["id"], viewer)
+    check("운영 정보", "열람자 운영 정보 403", call("GET", f"/api/cases/{c3['id']}/intel", viewer)[0] == 403)
+    s, intel, _ = call("GET", f"/api/cases/{c3['id']}/intel", svc)
+    intel = intel if s == 200 and isinstance(intel, dict) else {}
+    kinds = {x.get("kind") for x in intel.get("items", [])}
+    check("운영 정보", "연락 링크·화면 글자·보내는 곳·키트 지문을 원래 값으로(조사관 이상)",
+          {"telegram", "kakao", "phone", "account", "form"} <= kinds and bool(intel.get("kits")),
+          f"{s} {sorted(k for k in kinds if k)} 키트 {len(intel.get('kits', []))}")
+    _, p4, _ = call("GET", f"/api/cases/{c3['id']}/package", viewer)
+    shown = json.dumps([st.get("intel") for st in p4["exploration"]["steps"] if st.get("intel")], ensure_ascii=False)
+    check("운영 정보", "검토 패키지(열람자)의 운영 정보는 전화·계좌를 가린 값",
+          '"phone"' in shown and "010-0000-1234" not in shown and "000000-00-000000" not in shown, f"요약 {len(shown)}자")
+
+    # ── 조치 추적·재확인(#92) ──
+    act = {"rev": 0, "state": "requested", "agency": "kisa", "ref": "LIVE-" + secrets.token_hex(3)}
+    check("조치 추적", "열람자 조치 기록 403", call("POST", f"/api/cases/{cid}/actions", viewer, act)[0] == 403)
+    check("조치 추적", "자동화 토큰 조치 기록 403(사람 계정만)", call("POST", f"/api/cases/{cid}/actions", svc, act)[0] == 403)
+    check("조치 추적", "위협 확정이 없는 사건 422", call("POST", f"/api/cases/{c3['id']}/actions", rev1, act)[0] == 422)
+    s, a1, _ = call("POST", f"/api/cases/{cid}/actions", rev1, act)
+    check("조치 추적", "검토관 '요청함(KISA)' 저장(판 1)", s == 201 and a1.get("rev") == 1 and a1.get("agency") == "kisa", str(s))
+    check("조치 추적", "옛 판을 보고 저장하면 409", call("POST", f"/api/cases/{cid}/actions", rev1, act)[0] == 409)
+    row = next((x for x in call("GET", "/api/cases?limit=50", viewer)[1] if x["id"] == cid), {})
+    check("조치 추적", "사건 목록에 현재 조치(열람자)", (row.get("action") or {}).get("state") == "requested")
+    check("조치 추적", "열람자 재확인 요청 403", call("POST", f"/api/cases/{cid}/recheck", viewer)[0] == 403)
+    t0 = time.time()
+    s, ck, _ = call("POST", f"/api/cases/{cid}/recheck", svc)
+    again = call("POST", f"/api/cases/{cid}/recheck", svc)[0]
+    done = None
+    while s == 202 and time.time() - t0 < 120:
+        chk = next((x for x in call("GET", f"/api/cases/{cid}/actions", viewer)[1]["checks"] if x["id"] == ck["id"]), {})
+        if chk.get("state") != "pending":
+            done = chk
+            break
+        time.sleep(0.5)
+    check("조치 추적", "재확인 요청 202 → 격리 컨테이너가 결과를 채움, 바로 다시 요청하면 409",
+          s == 202 and again == 409 and bool(done)
+          and done.get("result") in ("alive", "gone", "filtered", "refused", "unreachable", "error"),
+          f"{(done or {}).get('result')} HTTP {(done or {}).get('http_status')} {time.time() - t0:.1f}초")
+
+    # ── IOC 내보내기(#93): 검토관 이상 ──
+    check("IOC", "열람자 IOC 403", call("GET", "/api/ioc?days=1", viewer)[0] == 403)
+    s, sm, _ = call("GET", "/api/ioc?days=1", rev1)
+    sm = sm if s == 200 and isinstance(sm, dict) else {}
+    check("IOC", "검토관 미리 보기(수만, 값 없음)", sm.get("cases", 0) >= 1 and isinstance(sm.get("indicators"), int),
+          f"{s} 사건 {sm.get('cases')} 지표 {sm.get('indicators')} {sm.get('ms')}ms")
+    s, csv_b, h = call("GET", "/api/ioc.csv?days=1", rev1, raw=True)
+    s2, stix_b, _ = call("GET", "/api/ioc.stix?days=1", rev1, raw=True)
+    head = csv_b.decode("utf-8-sig", errors="replace").splitlines()[:1] if s == 200 else []
+    stix = json.loads(stix_b) if s2 == 200 else {}
+    check("IOC", "CSV·STIX 2.1 내려받기", bool(head) and head[0].startswith("유형,값") and stix.get("type") == "bundle",
+          f"CSV {len(csv_b)}B 사건 {h.get('X-SafeTrace-Cases')} · STIX 개체 {len(stix.get('objects', []))}")
+    check("IOC", "내보내기 감사 기록(ioc.export)", last_audit("qa.rev1", "ioc.export") is not None)
+
+    # ── 현황판(#94)·자동 수집(#95·#96) ──
+    s, st, _ = call("GET", "/api/stats?days=7", viewer)
+    st = st if s == 200 and isinstance(st, dict) else {}
+    check("현황판", "열람자 현황판 200(사건 주소·id 없이 수)",
+          st.get("kpi", {}).get("received", 0) >= 1 and cid not in json.dumps(st) and TP not in json.dumps(st),
+          f"{s} 접수 {st.get('kpi', {}).get('received')} {st.get('ms')}ms")
+    s, ik, _ = call("GET", "/api/intake", viewer)
+    check("자동 수집", "열람자 상태 200", s == 200 and isinstance(ik.get("enabled"), bool), f"켜짐 {ik.get('enabled')}")
+    check("자동 수집", "열람자·검토관 켜기·끄기 403",
+          call("POST", "/api/intake", viewer, {"enabled": False})[0] == 403
+          and call("POST", "/api/intake", rev1, {"enabled": False})[0] == 403)
+    check("자동 수집", "자동화 토큰(관리자 역할)도 켜기·끄기 403(사람 관리자만)",
+          bool(admin_svc) and call("POST", "/api/intake", admin_svc, {"enabled": bool(ik.get("enabled"))})[0] == 403,
+          "" if admin_svc else "관리자 역할 자동화 토큰이 없어 미검증")
 
 
 def limit_checks(svc: str) -> None:
@@ -320,7 +444,9 @@ def main() -> None:
         sys.exit("조사관 이상 자동화 토큰이 없음(.env ST_API_TOKENS)")
     set_accounts(True, pw)
     try:
-        cid = run(pw, svc, toks.get("admin"))
+        ctx = run(pw, svc, toks.get("admin"))
+        cid = ctx["cid"]
+        analyst_checks(ctx, svc, toks.get("admin"))
     finally:
         set_accounts(False)
     print("시험 계정을 다시 껐다", flush=True)
