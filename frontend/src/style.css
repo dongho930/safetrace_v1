@@ -54,7 +54,7 @@ a { color: var(--primary); }
 .warn { color: var(--review); }
 .bad { color: var(--threat); }
 .err { color: var(--threat); font-size: 13px; margin: 0; }
-.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.sr { position: absolute; top: 0; left: 0; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .icon { width: 15px; height: 15px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .spacer { flex: 1; }
 
@@ -99,7 +99,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .field::placeholder { color: var(--muted); }
 
 /* ── 전체 틀: 상단바 + 분류 폴더 · 목록 · 사건 상세 ─────────── */
-.app { display: flex; flex-direction: column; min-height: 640px; overflow: hidden; }
+.app { position: relative; display: flex; flex-direction: column; min-height: 640px; overflow: hidden; }  /* 화면 밖 글자(.sr, position: absolute)가 문서 기준으로 놓여 페이지를 늘리지 않게 이 틀 안에 가둔다 */
+/* 넓은 화면은 한 화면에 맞춘 틀이라 페이지 자체는 스크롤하지 않는다(칸 안 스크롤은 그대로). 좁은 화면은 세로로 쌓아 페이지를 스크롤 */
+@media (min-width: 900px) and (min-height: 460px) { html, body { overflow: hidden; } }  /* 틀 최소 높이 640 × 최소 배율 0.7 보다 낮은 창은 예전처럼 페이지 스크롤 */
 .topbar { flex: none; display: flex; flex-wrap: wrap; align-items: stretch; gap: 0 24px; padding: 0 24px; background: var(--header); color: var(--header-ink); }
 .brand { display: flex; align-items: center; gap: 10px; padding: 12px 0; }
 .brand .icon { width: 22px; height: 22px; stroke-width: 1.8; }
@@ -171,7 +173,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 /* 사건 상세 */
 .detail { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-.detail-body { padding: 16px 24px 0; display: flex; flex-direction: column; gap: 14px; flex: 1 0 auto; }
+.detail-body { padding: 16px 24px 16px; display: flex; flex-direction: column; gap: 14px; flex: 1 0 auto; }
 .statusline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; font-size: 13px; }
 .statusline .chip { font-size: 12px; }
 .empty { margin: auto; padding: 48px; max-width: 640px; display: flex; flex-direction: column; gap: 10px; }
@@ -252,7 +254,7 @@ button.reason:hover { border-color: var(--line-strong); }
 .reason-foot { display: flex; gap: 8px; font-size: 12px; color: var(--primary); font-weight: 600; }
 
 /* 조사 경과 탭 */
-.progress-panel { flex: 1 0 auto; display: flex; flex-direction: column; overflow: hidden; border-bottom: 0; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }  /* 아래 고정 묶음까지 채워 빈 바탕이 보이지 않게 */
+.progress-panel { display: flex; flex-direction: column; overflow: hidden; }
 /* 탭은 성격별 묶음(증거·연관·조치). 묶음 이름은 탭 위 작은 글씨, 묶음 사이는 세로선. 폭이 모자라면 묶음째로 다음 줄로 */
 .tabs { display: flex; flex-wrap: wrap; align-items: flex-end; border-bottom: 1px solid var(--line-soft); padding: 0 12px; }
 .tabs > .legend { align-self: center; }
@@ -318,6 +320,29 @@ button.reason:hover { border-color: var(--line-strong); }
 .rec-player:fullscreen .rec-time { color: var(--header-muted); }
 .rec-player:fullscreen .rec-seg + .rec-seg::after { background: var(--screen-bg); }
 .progress-panel .log { border-top: 0; max-height: 520px; overflow-y: auto; }
+/* 넓은 화면: 상태 줄·AI 요약과 탭 바는 고정, 탭 내용(조사 중이면 조사 화면)만 스크롤. 아래 내려받기 줄·판정 막대도 고정 */
+@media (min-width: 900px) {
+  .detail-body { flex: 1 1 0; min-height: 0; }
+  .detail-body > * { flex: none; }
+  .detail-body > .progress-panel, .detail-body > .detail-scroll { flex: 1 1 0; min-height: 0; }
+  .tabs { flex: none; }
+  .tab-panel { flex: 1 1 0; min-height: 0; }
+  .tab-panel, .detail-scroll { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; }
+  .tab-panel::-webkit-scrollbar, .detail-scroll::-webkit-scrollbar { display: none; }
+  .progress-panel .log { max-height: none; overflow-y: visible; }  /* 탭 내용이 스크롤하므로 기록 칸 안 스크롤은 없앤다 */
+  /* 회색 바닥이 탭 패널 아래까지 이어진다(내용이 짧아도 흰 빈 칸이 남지 않게) */
+  .tab-panel { display: flex; flex-direction: column; }
+  .tab-panel > .floor { flex: 1 0 auto; }
+  /* 근거 화면: 바닥을 탭 패널 높이에 맞추고 화면 칸이 남는 높이를 쓴다. 화면 목록이 길면 목록 안에서 스크롤 */
+  .tab-panel > .floor.screens { flex: 1 1 0; min-height: 360px; flex-wrap: nowrap; }
+  .tab-panel .shot-box { flex: 1 1 0; height: auto; min-height: 200px; }
+  .tab-panel .thumbs { min-height: 0; overflow-y: auto; scrollbar-width: none; padding: 2px; margin: -2px; }
+  .tab-panel .thumbs::-webkit-scrollbar { display: none; }
+  /* 조사 녹화: 영상 칸이 남는 높이를 쓴다 */
+  .tab-panel > .rec-floor { flex: 1 1 0; min-height: 360px; display: flex; flex-direction: column; }
+  .rec-floor > .rec-player { flex: 1 1 0; min-height: 0; }
+  .rec-floor .rec-box { flex: 1 1 0; height: auto; min-height: 200px; }
+}
 
 /* 경로 지도 */
 .pathfloor { overflow-x: auto; background-color: var(--sunken); background-image: radial-gradient(#D8DEE8 1px, transparent 1px); background-size: 16px 16px; padding: 18px 16px 20px; display: flex; flex-direction: column; gap: 10px; }

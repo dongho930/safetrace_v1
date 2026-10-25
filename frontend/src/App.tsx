@@ -1271,7 +1271,9 @@ const Workspace = memo(function Workspace({
         {!st ? (
           <p className="muted">{live ? "사건을 불러오는 중…" : "사건을 불러오지 못했습니다"}</p>
         ) : running ? (
-          <Investigation c={c} events={sorted} status={st} running={running} id={id} />
+          <div className="detail-scroll">
+            <Investigation c={c} events={sorted} status={st} running={running} id={id} />
+          </div>
         ) : (
           <section className="panel progress-panel" aria-label="조사 경과">
             <CaseTabs
@@ -1914,13 +1916,14 @@ function CaseTabs({
           </span>
         )}
       </div>
-      <div className="tab-panel" role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
+      {/* 넓은 화면은 탭 내용만 스크롤한다(위 요약·탭 바·아래 판정은 고정). 탭을 바꾸면 맨 위부터 */}
+      <div key={tab} className="tab-panel" role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
         {tab === "screens" && <ScreensTab id={id} c={c} events={events} screens={screens} pick={pick} onPick={onPick} />}
         {tab === "path" && c && <PathTab c={c} events={events} />}
         {tab === "links" && <LinksTab id={id} onOpen={onOpen} />}
         {tab === "related" && c && <RelatedTab id={id} c={c} events={events} related={related} canCreate={canCreate} onOpen={onOpen} onChanged={onChanged} />}
         {tab === "rec" && (
-          <div className="floor">
+          <div className="floor rec-floor">
             {recs.length ? (
               <RecordingPlayer key={id} caseId={id} recs={recs} events={events} />
             ) : (
