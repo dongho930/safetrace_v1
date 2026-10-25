@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy import (JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint,
+from sqlalchemy import (JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint,
                         create_engine, delete, select, text)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -83,7 +83,7 @@ class CaseLink(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
-INTEL_ROLES = ("contact", "kit")  # related.INTEL_ROLES 와 같다(store 는 related 를 위에서 가져오지 않는다)
+LEGACY_ROLES = ("contact", "kit")  # 지운 운영 정보·키트 지문(2026-10-25)이 남긴 연결 줄의 역할. 다시 쓸 때 지운다
 
 
 class CaseSite(Base):
@@ -95,7 +95,7 @@ class CaseSite(Base):
     case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), index=True)
     host: Mapped[str] = mapped_column(String(253), index=True)
     site: Mapped[str] = mapped_column(String(253), index=True)
-    role: Mapped[str] = mapped_column(String(16))  # start | final | via | link | candidate_final | contact | kit
+    role: Mapped[str] = mapped_column(String(16))  # start | final | via | link | candidate_final
     threat: Mapped[str | None] = mapped_column(String(32))
     blocked: Mapped[bool] = mapped_column(Boolean, default=False)
     generic: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -130,46 +130,6 @@ class Verdict(Base):
     head_seq: Mapped[int | None] = mapped_column(Integer)  # 판정 당시 증거 체인 끝
     head_hash: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-
-
-class CaseAction(Base):
-    """조치 추적(모니터링 담당자 업무): 위협 확정 뒤 기관에 요청함 → 차단·삭제 확인 → (재확인에서) 다시 나타남 → 종결.
-    판정처럼 덮어쓰지 않고 판(rev)을 쌓는다. (case_id, rev) 유일 제약이 낙관적 잠금이다(actions.py)."""
-
-    __tablename__ = "case_actions"
-    __table_args__ = (UniqueConstraint("case_id", "rev"),)
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), index=True)
-    rev: Mapped[int] = mapped_column(Integer)
-    state: Mapped[str] = mapped_column(String(16))  # requested | blocked | removed | reappeared | closed
-    agency: Mapped[str | None] = mapped_column(String(16))  # 요청한 기관(requested 일 때)
-    ref: Mapped[str | None] = mapped_column(String(100))  # 기관 접수 번호 등
-    note: Mapped[str | None] = mapped_column(Text)
-    actor: Mapped[str] = mapped_column(String(64))  # 담당자 이름 또는 system:recheck
-    check_id: Mapped[int | None] = mapped_column(Integer)  # 재확인 결과로 기록한 경우 그 재확인
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-
-
-class CaseCheck(Base):
-    """재확인: 조치를 추적 중인 사건의 신고 주소에 다시 접속해 본 결과(살아 있음·사라짐·회선 차단 등). API 가 대기(pending)
-    줄을 먼저 만들고, 조사 컨테이너는 그 번호의 결과만 채울 수 있다. 증거 체인(서명)에는 넣지 않는다(접속 결과만)."""
-
-    __tablename__ = "case_checks"
-    # 한 사건에 대기 중인 재확인은 하나만(동시 요청 경쟁을 DB 가 막는다)
-    __table_args__ = (Index("uq_case_checks_pending", "case_id", unique=True, sqlite_where=text("state = 'pending'"),
-                            postgresql_where=text("state = 'pending'")),)
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    case_id: Mapped[str] = mapped_column(ForeignKey("cases.id"), index=True)
-    state: Mapped[str] = mapped_column(String(12), default="pending", index=True)  # pending | done | expired
-    requested_by: Mapped[str] = mapped_column(String(64))
-    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
-    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    result: Mapped[str | None] = mapped_column(String(16))  # alive | gone | filtered | refused | unreachable | error
-    reason: Mapped[str | None] = mapped_column(String(64))
-    http_status: Mapped[int | None] = mapped_column(Integer)
-    final_host: Mapped[str | None] = mapped_column(String(253))
-    title: Mapped[str | None] = mapped_column(String(200))
-    seconds: Mapped[float | None] = mapped_column(Float)
 
 
 class IntakeState(Base):
@@ -326,15 +286,7 @@ class Store:
             if c is None or c.status not in TERMINAL:
                 return 0
             rows = case_sites(c.url, c.final_url, c.threat, c.candidates)
-            # 운영 정보·키트 지문 줄(검증한 체인에서 쓴 것, write_intel_sites)은 그대로 둔다
-            s.execute(delete(CaseSite).where(CaseSite.case_id == case_id, CaseSite.role.not_in(INTEL_ROLES)))
-            s.add_all(CaseSite(case_id=case_id, **r) for r in rows)
-        return len(rows)
-
-    def write_intel_sites(self, case_id: str, rows: list[dict]) -> int:
-        """운영 정보·키트 지문으로 이을 줄을 다시 쓴다(related.intel_rows, 검증한 체인에서 만든 것). 반환: 쓴 줄 수."""
-        with self.session() as s, s.begin():
-            s.execute(delete(CaseSite).where(CaseSite.case_id == case_id, CaseSite.role.in_(INTEL_ROLES)))
+            s.execute(delete(CaseSite).where(CaseSite.case_id == case_id))
             s.add_all(CaseSite(case_id=case_id, **r) for r in rows)
         return len(rows)
 

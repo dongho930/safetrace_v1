@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from .. import accounts, actions, intake, ioc, package, related, report, stats, verdicts
+from .. import accounts, intake, ioc, package, related, report, stats, verdicts
 from ..accounts import ROLES, AccountError
 from ..config import get_settings
 from ..evidence import Head, Signer, VerifyResult, iter_evidence, open_evidence, verify_case
@@ -45,7 +45,7 @@ from ..netguard import BlockedURL, parse_url
 from ..preview import preview_image
 from ..ratelimit import FailureLimiter
 from ..signer.client import ChainAdmin, SignerError
-from ..store import TERMINAL, AuditLog, Case, CaseAction, CaseCheck, CaseLink, CasePhase, CaseSite, FeedItem, Store, Verdict
+from ..store import LEGACY_ROLES, TERMINAL, AuditLog, Case, CaseLink, CasePhase, CaseSite, FeedItem, Store, Verdict
 from ..store import now as now_utc
 
 log = logging.getLogger("safetrace.api")
@@ -174,8 +174,7 @@ def record_event(case_id: str, payload: dict) -> None:
     닫기에 실패하면 head 를 비워 두고, 검증·패키지에서 다시 닫아 받기 전까지 무결성을 성공으로 표시하지 않는다.
     """
     if payload.get("type") == "check":
-        _record_check(case_id, payload)
-        return
+        return  # 지운 재확인(조치 추적, 2026-10-25)의 결과: 예전 조사 컨테이너가 보내도 받지 않는다
     if payload.get("type") == "status" and "candidates" in payload:
         payload = {**payload, "candidates": _clean_candidates(payload["candidates"])}
     if payload.get("type") == "status" and "phase" in payload:
@@ -211,9 +210,7 @@ def record_event(case_id: str, payload: dict) -> None:
         except Exception as e:
             log.exception("write sites failed")
             store.audit("system", "case.sites_failed", case_id, type(e).__name__)
-        recs = _verified_records(case_id)  # 닫고 검증한 체인(한 번만 읽고 검증해 아래 둘이 함께 쓴다)
-        _write_intel(case_id, recs)
-        _auto_related(case_id, recs)
+        _auto_related(case_id, _verified_records(case_id))  # 닫고 검증한 체인
         _intake_next(case_id)
 
 
@@ -232,27 +229,6 @@ def _verified_records(case_id: str) -> list[dict] | None:
         log.exception("verify chain after finish failed")
         store.audit("system", "evidence.verify_failed", case_id, type(e).__name__)
         return None
-
-
-def _intel_secret() -> bytes:
-    """개인정보(전화·계좌) 연결 열쇠의 비밀키: 증거 서명 키에서 용도를 붙여 따로 뽑는다(서명 키 자체를 쓰지 않는다)."""
-    return hmac.new(settings.evidence_hmac_key.get_secret_value().encode(), b"safetrace.intel-link-key/1",
-                    hashlib.sha256).digest()
-
-
-def _write_intel(case_id: str, recs: list[dict] | None) -> None:
-    """운영 정보·키트 지문으로 이을 줄(related.intel_rows)을 검증한 체인에서 쓴다. 워커가 보낸 이벤트 값은 쓰지 않는다."""
-    if recs is None:
-        store.audit("system", "case.intel_skipped", case_id, "chain_unverified")
-        return
-    try:
-        with store.session() as s:
-            c = s.get(Case, case_id)
-        th = c.threat.get("threat") if c is not None and isinstance(c.threat, dict) else None
-        store.write_intel_sites(case_id, related.intel_rows(recs, th if isinstance(th, str) else None, _intel_secret()))
-    except Exception as e:  # 실패해도 원 사건 처리는 계속
-        log.exception("write intel sites failed")
-        store.audit("system", "case.intel_failed", case_id, type(e).__name__)
 
 
 def _auto_limit(s, parent_id: str, host: str) -> str | None:
@@ -342,60 +318,6 @@ def _auto_related(case_id: str, recs: list[dict] | None | object = _UNREAD) -> N
     except Exception as e:  # 자동 생성 실패가 이벤트 소비를 멈추지 않게(원 사건 상태·체인 닫기는 이미 끝났다)
         log.exception("auto related case failed")
         store.audit(related.AUTO_ACTOR, "case.create_related_auto_failed", case_id, type(e).__name__)
-
-
-def _record_check(case_id: str, payload: dict) -> None:
-    """재확인 결과(조사 컨테이너가 보낸 값). API 가 만든 그 사건의 대기 번호일 때만 받는다(actions.record_check)."""
-    got = actions.record_check(store, case_id, payload.get("check_id"), payload.get("result"))
-    if got is None:
-        store.audit("system", "check.rejected", case_id, f"check_id={str(payload.get('check_id'))[:12]}")
-        return
-    ck, added = got
-    store.audit(actions.SYSTEM_ACTOR, "check.done", case_id, f"id={ck.id} result={ck.result} reason={ck.reason or '-'}")
-    if added is not None:
-        store.audit(actions.SYSTEM_ACTOR, "action.reappeared", case_id, f"rev={added.rev} check={ck.id}")
-
-
-def enqueue_check(case_id: str, check_id: int, url: str) -> None:
-    """재확인 한 건을 조사 컨테이너에 맡긴다(운영: Redis st:checks, 개발: 같은 프로세스 스레드)."""
-    if _redis is not None:
-        _redis.xadd("st:checks", {"case_id": case_id, "check_id": str(check_id), "url": url[:2048]})
-        return
-    from ..agent.recheck import check  # 개발 모드에서만
-
-    def job():
-        try:
-            res = check(url, settings.egress_proxy, set(settings.test_allowlist))
-        except Exception as e:  # noqa: BLE001
-            res = {"result": "error", "reason": type(e).__name__}
-        record_event(case_id, {"type": "check", "check_id": check_id, "result": res})
-
-    _executor.submit(job)
-
-
-def recheck_due(at=None) -> int:
-    """정기 재확인 한 바퀴: 오래된 대기 줄을 만료하고, 조치를 추적 중인데 재확인한 지 오래된 사건을 맡긴다. 반환: 맡긴 수."""
-    actions.expire_pending(store, at)
-    n = 0
-    for cid, url in actions.due(store, interval=timedelta(hours=settings.recheck_interval_hours),
-                                limit=settings.recheck_batch, at=at):
-        try:
-            ck = actions.request_check(store, cid, actions.SYSTEM_ACTOR, at=at)
-        except actions.ActionError:
-            continue
-        store.audit(actions.SYSTEM_ACTOR, "check.request", cid, f"id={ck.id} scheduled")
-        enqueue_check(cid, ck.id, url)
-        n += 1
-    return n
-
-
-def _recheck_forever():
-    while True:
-        time.sleep(settings.recheck_tick_s)
-        try:
-            recheck_due()
-        except Exception:
-            log.exception("recheck scheduler error")
 
 
 # ── 자동 수집(intake.py) ─────────────────────────────────────────
@@ -557,8 +479,6 @@ def _consume_events_forever():
 async def lifespan(_app: FastAPI):
     if _redis is not None:
         threading.Thread(target=_consume_events_forever, daemon=True).start()
-    if settings.recheck_enabled:
-        threading.Thread(target=_recheck_forever, daemon=True).start()
     threading.Thread(target=_intake_forever, daemon=True).start()  # 켜고 끄기는 콘솔(관리자)이 DB 에 둔다
     yield
 
@@ -613,50 +533,6 @@ class VerdictIn(BaseModel):
     note: str | None = Field(default=None, max_length=verdicts.NOTE_MAX * 2)
 
 
-class ActionOut(BaseModel):
-    rev: int
-    state: str
-    agency: str | None
-    ref: str | None
-    note: str | None
-    actor: str
-    check_id: int | None
-    created_at: str
-
-    @classmethod
-    def of(cls, a: CaseAction) -> ActionOut:
-        return cls(rev=a.rev, state=a.state, agency=a.agency, ref=a.ref, note=a.note, actor=a.actor, check_id=a.check_id,
-                   created_at=a.created_at.isoformat())
-
-
-class CheckOut(BaseModel):
-    id: int
-    state: str
-    requested_by: str
-    requested_at: str
-    done_at: str | None
-    result: str | None
-    reason: str | None
-    http_status: int | None
-    final_host: str | None
-    title: str | None
-    seconds: float | None
-
-    @classmethod
-    def of(cls, c: CaseCheck) -> CheckOut:
-        return cls(id=c.id, state=c.state, requested_by=c.requested_by, requested_at=c.requested_at.isoformat(),
-                   done_at=c.done_at.isoformat() if c.done_at else None, result=c.result, reason=c.reason,
-                   http_status=c.http_status, final_host=c.final_host, title=c.title, seconds=c.seconds)
-
-
-class ActionIn(BaseModel):
-    rev: int = Field(ge=0, description="보고 있던 조치 판 번호(없었으면 0)")
-    state: str = Field(pattern=r"^(requested|blocked|removed|closed)$")
-    agency: str | None = Field(default=None, pattern=r"^(kisa|kcsc|ngcc|police|fss|other)$")
-    ref: str | None = Field(default=None, max_length=actions.REF_MAX * 2)
-    note: str | None = Field(default=None, max_length=verdicts.NOTE_MAX * 2)
-
-
 class ChildOut(BaseModel):
     """연관 후보로 만든 사건(부모 사건 상세에 붙는 요약)."""
     id: str
@@ -692,7 +568,6 @@ class CaseOut(BaseModel):
     children: list[ChildOut] | None = None
     # 하위 조사했지만 자동 사건이 없는 후보와 이유(disabled|depth|not_threat|blocked|shortener|limit_or_duplicate, 상세에만)
     auto_skipped: list[dict] | None = None
-    action: ActionOut | None = None  # 현재 조치(요청함·차단 확인·삭제 확인·다시 나타남·종결)
 
     @classmethod
     def of(cls, c: Case, v: Verdict | None = None, ph: CasePhase | None = None,
@@ -704,10 +579,6 @@ class CaseOut(BaseModel):
                    main_status=ph.main_status if ph else None, main_head_seq=ph.main_head_seq if ph else None,
                    parent_id=parent[0].parent_id if parent else None, parent_url=parent[1] if parent else None,
                    auto=parent[0].auto if parent else None, children=children)
-
-    def with_action(self, a: CaseAction | None) -> CaseOut:
-        self.action = ActionOut.of(a) if a else None
-        return self
 
 
 class LoginIn(BaseModel):
@@ -954,8 +825,7 @@ def list_cases(p: Annotated[Principal, Depends(need("viewer"))], limit: int = Qu
         rows = s.scalars(select(Case).order_by(Case.created_at.desc()).limit(limit)).all()
     ids = [c.id for c in rows]
     latest, phases, parents = verdicts.latest_for(store, ids), store.phases_for(ids), store.parents_for(ids)
-    acts = actions.latest_for(store, ids)
-    return [CaseOut.of(c, latest.get(c.id), phases.get(c.id), parents.get(c.id)).with_action(acts.get(c.id)) for c in rows]
+    return [CaseOut.of(c, latest.get(c.id), phases.get(c.id), parents.get(c.id)) for c in rows]
 
 
 @app.get("/api/cases/{case_id}", response_model=CaseOut)
@@ -971,7 +841,7 @@ def _case_detail(c: Case) -> CaseOut:
                          threat=(k.threat or {}).get("threat") if isinstance(k.threat, dict) else None,
                          verdict=kv[k.id].decision if k.id in kv else None, auto=link.auto) for link, k in kids]
     out = CaseOut.of(c, verdicts.latest_for(store, [c.id]).get(c.id), store.phases_for([c.id]).get(c.id),
-                     store.parents_for([c.id]).get(c.id), children).with_action(actions.latest_for(store, [c.id]).get(c.id))
+                     store.parents_for([c.id]).get(c.id), children)
     if c.status in TERMINAL:  # 자동 생성은 원 사건이 끝난 뒤에 한다
         made = {k.candidate_url for k in children}
         out.auto_skipped = [
@@ -1070,10 +940,13 @@ def case_links(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]):
     c = _get_case(case_id)
     parent = store.parents_for([c.id]).get(c.id)
     kids = store.children_of(c.id, limit=LINKS_MAX)
+    # 지운 운영 정보·키트 지문의 예전 연결 줄(contact·kit)은 다시 쓰기 전이라도 읽지 않는다: 그 줄의 threat 는 목적지를
+    # 조사한 결과가 아니라 원 사건의 판단을 복사한 것이다(Codex 1회차 F1)
+    current = CaseSite.role.not_in(LEGACY_ROLES)
     with store.session() as s:
-        keys = set(s.scalars(select(CaseSite.site).where(CaseSite.case_id == c.id)))
+        keys = set(s.scalars(select(CaseSite.site).where(CaseSite.case_id == c.id, current)))
         rows = s.execute(select(CaseSite).join(Case, Case.id == CaseSite.case_id)
-                         .where(CaseSite.site.in_(keys), CaseSite.case_id != c.id)
+                         .where(CaseSite.site.in_(keys), CaseSite.case_id != c.id, current)
                          .order_by(Case.created_at.desc()).limit(GROUP_SITES_MAX)).scalars().all() if keys else []
     shared: dict[str, dict] = {}
     others: list[str] = []
@@ -1091,74 +964,10 @@ def case_links(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]):
     return {
         "parent": info.get(parent[0].parent_id) if parent else None,
         "children": [{**info[k.id], "auto": link.auto} for link, k in kids if k.id in info],
-        "shared": [{"site": g["site"], "kind": _site_kind(g["roles"]), "hosts": sorted(g["hosts"])[:10],
+        "shared": [{"site": g["site"], "hosts": sorted(g["hosts"])[:10],
                     "roles": sorted(g["roles"]), "cases": [info[x] for x in g["cases"] if x in info]}
                    for g in shared.values()],
     }
-
-
-def _intel_of(recs: list[dict]) -> tuple[list[dict], list[dict]]:
-    """검증한 체인의 원래 조사 intel 기록을 값마다 하나로: (운영 정보, 키트 지문). 각 항목의 key 는 이을 열쇠."""
-    steps = {r["seq"]: r["data"].get("step") for r in recs if r.get("kind") == "observe"}
-    items: dict[tuple[str, str], dict] = {}
-    kits: dict[str, dict] = {}
-    for r in recs:
-        d = r.get("data")
-        if r.get("kind") != "intel" or not isinstance(d, dict) or isinstance(d.get("sub"), int):
-            continue
-        step = steps.get(d.get("obs")) if type(d.get("obs")) is int else None
-        step = step if type(step) is int else None
-        for x in d.get("items") if isinstance(d.get("items"), list) else []:
-            if not isinstance(x, dict) or not isinstance(x.get("kind"), str) or not isinstance(x.get("value"), str):
-                continue
-            k = (x["kind"][:16], x["value"][:200])
-            if k not in items and len(items) < 50:
-                key = related.intel_key(*k, _intel_secret())
-                items[k] = {"kind": k[0], "value": k[1], "src": x.get("src") if isinstance(x.get("src"), str) else None,
-                            "step": step, "key": key[0] if key else None}
-        kit, url = d.get("kit"), d.get("url")
-        host = (urlsplit(url).hostname or "")[:253] if isinstance(url, str) else ""
-        for part in ("dom", "res"):
-            h = kit.get(part) if isinstance(kit, dict) else None
-            if isinstance(h, str) and related.HASH32.fullmatch(h) and f"kit:{part}:{h}" not in kits and len(kits) < 20:
-                kits[f"kit:{part}:{h}"] = {"kind": part, "hash": h, "host": host, "step": step, "key": f"kit:{part}:{h}"}
-    return list(items.values()), list(kits.values())
-
-
-@app.get("/api/cases/{case_id}/intel")
-def case_intel(case_id: str, p: Annotated[Principal, Depends(need("investigator"))]):
-    """운영 정보(페이지에 적힌 연락처·계좌·수집 서버)와 키트 지문, 같은 열쇠가 나온 다른 사건. 원래 값이라 조사관 이상,
-    감사로그. 값은 검증한 체인의 원래 조사 기록에서만 꺼낸다(DB 의 연결 줄은 '다른 사건' 찾기에만)."""
-    c = _get_case(case_id)
-    if c.status not in TERMINAL:
-        raise HTTPException(409, "조사가 끝난 뒤에 볼 수 있습니다")
-    recs = _verified_records(c.id)
-    if recs is None:
-        raise HTTPException(422, "증거 체인을 검증하지 못해 보여 줄 수 없습니다(검토 패키지로 원본 확인)")
-    store.audit(p.name, "intel.view", case_id)
-    items, kits = _intel_of(recs)
-    keys = {x["key"] for x in [*items, *kits] if x["key"]}
-    with store.session() as s:
-        rows = s.execute(select(CaseSite.site, CaseSite.case_id).join(Case, Case.id == CaseSite.case_id)
-                         .where(CaseSite.site.in_(keys), CaseSite.role.in_(related.INTEL_ROLES), CaseSite.case_id != c.id)
-                         .order_by(Case.created_at.desc()).limit(GROUP_SITES_MAX)).all() if keys else []
-    others: dict[str, list[str]] = {}
-    for site, cid in rows:
-        lst = others.setdefault(site, [])
-        if cid not in lst and len(lst) < LINKS_MAX:
-            lst.append(cid)
-    info = _briefs(list({cid for lst in others.values() for cid in lst}))
-
-    def out(x: dict) -> dict:
-        return {**{k: v for k, v in x.items() if k != "key"},
-                "others": [info[i] for i in others.get(x["key"] or "", []) if i in info]}
-
-    return {"items": [out(x) for x in items], "kits": [out(x) for x in kits]}
-
-
-def _site_kind(roles: set[str]) -> str:
-    """이은 열쇠의 종류: contact(운영 정보) | kit(키트 지문) | site(사이트)."""
-    return "contact" if "contact" in roles else "kit" if "kit" in roles else "site"
 
 
 def _related_groups(min_cases: int) -> tuple[list[dict], bool]:
@@ -1168,7 +977,8 @@ def _related_groups(min_cases: int) -> tuple[list[dict], bool]:
                                 .order_by(Case.created_at.desc()).limit(GROUP_CASES_MAX + 1)))
         truncated = len(recent) > GROUP_CASES_MAX
         recent = recent[:GROUP_CASES_MAX]
-        rows = list(s.scalars(select(CaseSite).where(CaseSite.case_id.in_(recent)).order_by(CaseSite.id)
+        rows = list(s.scalars(select(CaseSite).where(CaseSite.case_id.in_(recent), CaseSite.role.not_in(LEGACY_ROLES))
+                              .order_by(CaseSite.id)
                               .limit(GROUP_SITES_MAX + 1))) if recent else []
     if len(rows) > GROUP_SITES_MAX:
         truncated, rows = True, rows[:GROUP_SITES_MAX]
@@ -1197,11 +1007,10 @@ def _related_groups(min_cases: int) -> tuple[list[dict], bool]:
         out.append({
             "key": key,
             "cases": [info[c] for c in sorted(g) if c in info],
-            "sites": [{"site": x["site"], "kind": _site_kind(x["roles"]), "hosts": sorted(x["hosts"])[:10],
+            "sites": [{"site": x["site"], "hosts": sorted(x["hosts"])[:10],
                        "threat": x["threat"], "blocked": x["blocked"], "cases": len(x["cases"]),
                        "candidate": x["candidate"]} for x in listed],
-            # 운영 정보·키트 지문 열쇠는 사이트가 아니라 위협 사이트 수에 넣지 않는다
-            "threat_sites": sum(1 for x in listed if x["threat"] and _site_kind(x["roles"]) == "site"),
+            "threat_sites": sum(1 for x in listed if x["threat"]),
             # 회선 차단은 조사 대상 서버가 흉내 낼 수 있는 추정이라 위협 집계에서 빼지 않고 따로 센다(Codex 지적)
             "blocked_estimate_sites": sum(1 for x in listed if x["blocked"]),
         })
@@ -1237,9 +1046,8 @@ def related_group_csv(group_key: str, p: Annotated[Principal, Depends(need("inve
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["구분", "사이트", "호스트", "AI 판단", "회선 차단 추정", "사건 수", "사건 id", "신고 URL", "사건 상태", "담당자 판정"])
-    kind_ko = {"site": "사이트", "contact": "운영 정보", "kit": "키트 지문"}
     for x in g["sites"]:
-        w.writerow([_csv_cell(v) for v in (kind_ko.get(x["kind"], "사이트"), x["site"], " ".join(x["hosts"]), x["threat"],
+        w.writerow([_csv_cell(v) for v in ("사이트", x["site"], " ".join(x["hosts"]), x["threat"],
                                            x["blocked"], x["cases"], "", "", "", "")])
     for c in g["cases"]:
         w.writerow([_csv_cell(v) for v in ("사건", "", "", c["threat"], "", "", c["id"], c["url"], c["status"], c["verdict"])])
@@ -1247,47 +1055,6 @@ def related_group_csv(group_key: str, p: Annotated[Principal, Depends(need("inve
     name = f"safetrace-related-{now_utc().strftime('%Y%m%d')}-{group_key[:8]}.csv"
     return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})
-
-
-# ── 조치 추적·재확인 ─────────────────────────────────────────
-@app.get("/api/cases/{case_id}/actions")
-def list_actions(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]):
-    """조치 기록(새 판부터)과 최근 재확인 결과."""
-    _get_case(case_id)
-    return {"actions": [ActionOut.of(a) for a in actions.history(store, case_id)],
-            "checks": [CheckOut.of(c) for c in actions.checks(store, case_id)],
-            "recheck_interval_hours": settings.recheck_interval_hours}
-
-
-@app.post("/api/cases/{case_id}/actions", response_model=ActionOut, status_code=201)
-def save_action(case_id: str, body: ActionIn, p: Annotated[Principal, Depends(need("investigator", human=True))]):
-    """조치 기록(조사관 이상 담당자 계정). 위협으로 확정한 끝난 사건만, 보고 있던 판 번호로 동시 저장을 막는다."""
-    _get_case(case_id)
-    try:
-        a = actions.save(store, case_id, expected_rev=body.rev, state=body.state, agency=body.agency, ref=body.ref,
-                         note=body.note, actor=p.name)
-    except actions.ActionError as e:
-        raise HTTPException(422, str(e)) from None
-    except actions.ActionConflict as e:
-        cur = e.current
-        store.audit(p.name, "action.conflict", case_id, f"seen={body.rev} current={cur.rev if cur else 0}")
-        raise HTTPException(409, {"message": "다른 담당자가 먼저 조치를 기록했습니다",
-                                  "current": ActionOut.of(cur).model_dump() if cur else None}) from None
-    store.audit(p.name, "action.save", case_id, f"rev={a.rev} state={a.state} agency={a.agency or '-'}")
-    return ActionOut.of(a)
-
-
-@app.post("/api/cases/{case_id}/recheck", response_model=CheckOut, status_code=202)
-def request_recheck(case_id: str, p: Annotated[Principal, Depends(need("investigator"))]):
-    """지금 재확인(조사관 이상). 신고 주소에 다시 접속해 보는 일은 격리된 조사 컨테이너가 한다."""
-    c = _get_case(case_id)
-    try:
-        ck = actions.request_check(store, case_id, p.name)
-    except actions.ActionError as e:
-        raise HTTPException(409, str(e)) from None
-    store.audit(p.name, "check.request", case_id, f"id={ck.id}")
-    enqueue_check(case_id, ck.id, c.url)
-    return CheckOut.of(ck)
 
 
 # ── 담당자 판정 ─────────────────────────────────────────
@@ -1318,13 +1085,6 @@ def save_verdict(case_id: str, body: VerdictIn, p: Annotated[Principal, Depends(
     return VerdictOut.of(v)
 
 
-def _masked_event(payload: dict) -> dict:
-    """열람자에게 보내는 이벤트: 운영 정보 기록(페이지에 적힌 전화·계좌)은 끝 4자리만 남긴다."""
-    if payload.get("type") != "evidence" or payload.get("kind") != "intel" or not isinstance(payload.get("data"), dict):
-        return payload
-    return {**payload, "data": {**payload["data"], "items": package.masked_intel(payload["data"].get("items"))}}
-
-
 @app.get("/api/cases/{case_id}/events")
 async def case_events(case_id: str, p: Annotated[Principal, Depends(need("viewer"))],
                       after: int = Query(0, ge=0), authorization: Annotated[str, Header()] = ""):
@@ -1343,21 +1103,14 @@ async def case_events(case_id: str, p: Annotated[Principal, Depends(need("viewer
         while True:
             evs = await asyncio.to_thread(store.events_after, case_id, last)
             if evs or (idle and idle % 20 == 0):
-                who = await asyncio.to_thread(current)
-                if who is None:
+                if await asyncio.to_thread(current) is None:
                     return
-                # 열람자에게는 운영 정보의 전화·계좌를 가려 보낸다
-                raw_intel = ROLES[who.role] >= ROLES["investigator"]
             for e in evs:
                 last = e.id
-                if raw_intel and e.payload.get("kind") == "intel":
-                    # 원래 값을 보내기 직전마다 다시 확인한다(묶음 중간에 역할이 바뀔 수 있다, Codex 2회차)
-                    who = await asyncio.to_thread(current)
-                    if who is None:
-                        return
-                    raw_intel = ROLES[who.role] >= ROLES["investigator"]
-                payload = e.payload if raw_intel else _masked_event(e.payload)
-                yield f"id: {e.id}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                if e.payload.get("kind") == "intel":
+                    # 지운 기능(운영 정보, 2026-10-25)의 예전 기록: 페이지에 적힌 전화·계좌 원래 값이라 아무에게도 보내지 않는다
+                    continue
+                yield f"id: {e.id}\ndata: {json.dumps(e.payload, ensure_ascii=False)}\n\n"
                 if e.payload.get("type") == "status" and e.payload.get("status") in TERMINAL:
                     return
             idle = 0 if evs else idle + 1
@@ -1662,17 +1415,6 @@ def export_report(case_id: str, fmt: str, p: Annotated[Principal, Depends(need("
     return Response(_report_pdf(rep), media_type="application/pdf", headers=headers)
 
 
-@app.get("/api/cases/{case_id}/referral")
-def get_referral(case_id: str, p: Annotated[Principal, Depends(need("investigator"))]):
-    """처리 기관 안내와 요청서 초안(보고서 요약에서 만든다). 기관에 옮겨 쓰는 글이라 조사관 이상, 감사로그."""
-    c = _get_case(case_id)
-    if c.status not in TERMINAL:
-        raise HTTPException(409, "조사가 끝난 뒤에 요청서를 만들 수 있습니다")
-    store.audit(p.name, "referral.view", case_id)
-    pkg, records, _ = _package_snapshot(c, p.name)
-    return _report_of(pkg, records)["referral"]
-
-
 # ── IOC 내보내기(분석가 업무) ─────────────────────────────────────────
 def _verdict_records(case_id: str, v: Verdict) -> list[dict] | None:
     """검증한 체인 가운데 판정이 본 범위(판정에 묶인 증거 끝 seq·hash 까지). 연관 사이트를 조사하는 동안 저장한 판정은
@@ -1687,10 +1429,9 @@ def _verdict_records(case_id: str, v: Verdict) -> list[dict] | None:
     return [r for r in recs if type(r.get("seq")) is int and r["seq"] <= v.head_seq]
 
 
-def _ioc_export(days: int, contacts: bool) -> dict:
+def _ioc_export(days: int) -> dict:
     """담당자의 현재 판정이 위협이고 그 확정이 최근 days 일 안인 사건(확정 시각 최신순, 상한 ioc.CASES_MAX)의 지표.
-    운영 정보(contacts 일 때만)와 단축 URL 의 목적지는 앞쪽 ioc.CHAIN_CASES_MAX 건의 검증한 체인에서, **판정이 본 증거
-    끝까지만** 꺼낸다(_verdict_records, DB 의 연결 줄은 가린 값·열쇠뿐)."""
+    단축 URL 의 목적지는 앞쪽 ioc.CHAIN_CASES_MAX 건의 검증한 체인에서, **판정이 본 증거 끝까지만** 꺼낸다(_verdict_records)."""
     since = now_utc() - timedelta(days=days)
     top = select(Verdict.case_id, func.max(Verdict.rev).label("rev")).group_by(Verdict.case_id).subquery()
     with store.session() as s:
@@ -1700,57 +1441,49 @@ def _ioc_export(days: int, contacts: bool) -> dict:
                          .order_by(Verdict.created_at.desc(), Verdict.case_id).limit(ioc.CASES_MAX + 1)).all()
     truncated = len(rows) > ioc.CASES_MAX
     rows = rows[: ioc.CASES_MAX]
-    cases, chk, reads = [], {"verified": 0, "unverified": 0, "over_limit": 0}, 0
+    cases, reads = [], 0
     for v, c in rows:
-        recs, read = None, False
-        if (contacts or ioc.needs_landing(c.url, c.final_url)) and reads < ioc.CHAIN_CASES_MAX:
-            reads, read = reads + 1, True
+        recs = None
+        if ioc.needs_landing(c.url, c.final_url) and reads < ioc.CHAIN_CASES_MAX:
+            reads += 1
             recs = _verdict_records(c.id, v)
-        if contacts:
-            chk["over_limit" if not read else "unverified" if recs is None else "verified"] += 1
         cases.append({"id": c.id, "url": c.url, "final_url": c.final_url, "threat": v.threat, "at": v.created_at,
-                      "landing": ioc.landing(recs) if recs is not None else None,
-                      "contacts": _intel_of(recs)[0] if contacts and recs is not None else None})
+                      "landing": ioc.landing(recs) if recs is not None else None})
     inds, excluded, cut = ioc.collect(cases)
     case_group = ioc.indicator_groups(inds)  # 연관 묶음은 내보내는 지표를 함께 가진 사건끼리(판정이 본 범위의 값만)
     return {"days": days, "since": since.isoformat(), "cases": len(cases), "truncated": truncated or cut,
-            "indicators": inds, "excluded": excluded, "case_group": case_group, "groups": len(set(case_group.values())),
-            "contacts": {"included": contacts, **chk} if contacts else {"included": False}}
+            "indicators": inds, "excluded": excluded, "case_group": case_group, "groups": len(set(case_group.values()))}
 
 
 @app.get("/api/ioc")
-def ioc_summary(p: Annotated[Principal, Depends(need("reviewer"))], days: int = Query(30, ge=1, le=ioc.DAYS_MAX),
-                contacts: bool = False):
+def ioc_summary(p: Annotated[Principal, Depends(need("reviewer"))], days: int = Query(30, ge=1, le=ioc.DAYS_MAX)):
     """내보내기 미리 보기: 사건·지표 수, 유형별·위협 유형별 수, 뺀 이유별 수(값은 보이지 않는다). 검토관 이상."""
     t0 = time.monotonic()
-    ex = _ioc_export(days, contacts)
+    ex = _ioc_export(days)
     skipped = sum(1 for x in ex["indicators"] if ioc.stix_pattern(x["type"], x["value"]) is None)
     return {"days": days, "since": ex["since"], "cases": ex["cases"], "truncated": ex["truncated"], "groups": ex["groups"],
-            "contacts": ex["contacts"], **ioc.summary(ex["indicators"], ex["excluded"], skipped),
+            **ioc.summary(ex["indicators"], ex["excluded"], skipped),
             "limits": {"cases": ioc.CASES_MAX, "chain_cases": ioc.CHAIN_CASES_MAX, "indicators": ioc.INDICATORS_MAX},
             "ms": round((time.monotonic() - t0) * 1000)}
 
 
 @app.get("/api/ioc.{fmt}")
 def ioc_download(fmt: str, p: Annotated[Principal, Depends(need("reviewer"))],
-                 days: int = Query(30, ge=1, le=ioc.DAYS_MAX), contacts: bool = False):
-    """IOC 내려받기(CSV·STIX 2.1). 밖으로 나가는 자료라 검토관 이상, 감사로그(기간·운영 정보 포함 여부·수)."""
+                 days: int = Query(30, ge=1, le=ioc.DAYS_MAX)):
+    """IOC 내려받기(CSV·STIX 2.1). 밖으로 나가는 자료라 검토관 이상, 감사로그(기간·수)."""
     if fmt not in ("csv", "stix"):
         raise HTTPException(404, "not found")
-    ex = _ioc_export(days, contacts)
+    ex = _ioc_export(days)
     inds = ex["indicators"]
-    tag = f"{now_utc().strftime('%Y%m%d')}-{days}d" + ("-contacts" if contacts else "")
+    tag = f"{now_utc().strftime('%Y%m%d')}-{days}d"
     if fmt == "csv":
         body, media, name, skipped = ioc.to_csv(inds, ex["case_group"]), "text/csv; charset=utf-8", f"safetrace-ioc-{tag}.csv", 0
     else:
         bundle, skipped = ioc.to_stix(inds, ex["case_group"])
         body = json.dumps(bundle, ensure_ascii=False, indent=1)
         media, name = "application/stix+json;version=2.1", f"safetrace-ioc-{tag}.stix.json"
-    c = ex["contacts"]
-    store.audit(p.name, "ioc.export", None,
-                f"fmt={fmt} days={days} contacts={int(contacts)} cases={ex['cases']} indicators={len(inds)}"
-                f" skipped={skipped} truncated={int(ex['truncated'])}"
-                + (f" verified={c['verified']} unverified={c['unverified']} over_limit={c['over_limit']}" if contacts else ""))
+    store.audit(p.name, "ioc.export", None, f"fmt={fmt} days={days} cases={ex['cases']} indicators={len(inds)}"
+                                            f" skipped={skipped} truncated={int(ex['truncated'])}")
     return Response(body, media_type=media, headers={"Content-Disposition": f'attachment; filename="{name}"',
                                                      "X-SafeTrace-Cases": str(ex["cases"]),
                                                      "X-SafeTrace-Truncated": str(int(ex["truncated"]))})
@@ -1759,7 +1492,7 @@ def ioc_download(fmt: str, p: Annotated[Principal, Depends(need("reviewer"))],
 # ── 현황판(분석가·모니터링 담당자) ─────────────────────────────────────────
 @app.get("/api/stats")
 def stats_view(p: Annotated[Principal, Depends(need("viewer"))], days: int = Query(30, ge=1, le=stats.DAYS_MAX)):
-    """기간(접수 시각, 1~90일) 안 사건의 접수·처리·판정·조치 집계. 값(주소·연락처)은 없고 수·이름표만이라 열람자도 본다.
+    """기간(접수 시각, 1~90일) 안 사건의 접수·처리·판정 집계. 값(주소)은 없고 수·이름표만이라 열람자도 본다.
     최신 stats.CASES_MAX 건까지 센다(넘으면 truncated)."""
     t0 = time.monotonic()
     now = now_utc()
@@ -1770,7 +1503,6 @@ def stats_view(p: Annotated[Principal, Depends(need("viewer"))], days: int = Que
     rows = rows[: stats.CASES_MAX]
     ids = [c.id for c in rows]
     latest, phases, parents = verdicts.latest_for(store, ids), store.phases_for(ids), store.parents_for(ids)
-    acts = actions.latest_for(store, ids)
     with store.session() as s:
         first = dict(s.execute(select(Verdict.case_id, func.min(Verdict.created_at)).where(Verdict.case_id.in_(ids))
                                .group_by(Verdict.case_id)).all()) if ids else {}
@@ -1785,7 +1517,6 @@ def stats_view(p: Annotated[Principal, Depends(need("viewer"))], days: int = Que
             "main_at": ph.at if ph is not None else (c.updated_at if c.status in TERMINAL else None),
             "verdict": {"decision": v.decision, "threat": v.threat, "ai_threat": v.ai_threat} if v else None,
             "first_verdict_at": first.get(c.id), "auto": parents[c.id][0].auto if c.id in parents else None,
-            "action": acts[c.id].state if c.id in acts else None,
         })
     out = stats.build(cases, now, days, truncated)
     out["ms"] = round((time.monotonic() - t0) * 1000)

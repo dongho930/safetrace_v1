@@ -97,6 +97,7 @@ def test_report_carries_referral_and_pdf_section(tmp_path):
     rep["integrity"].update({"errors": 0, "key_id": "k", "method": "m"})
     rep.update({"related": None, "key_screens": []})
     rep["referral"] = referral.build(rep)
+    assert rep["referral"]["ask"] == "위 사이트의 접속 차단과 유포 경로 확인을 요청합니다."  # 피싱 → KISA
     assert report.render_pdf(rep, tmp_path).startswith(b"%PDF")
 
 
@@ -112,29 +113,28 @@ def h(tok):
     return {"Authorization": f"Bearer {tok}"}
 
 
-def test_referral_api(client, testpages):
+def test_referral_is_in_report_not_separate_api(client, testpages):
+    """처리 요청은 보고서로 합쳤다(2026-10-25): 요청서는 report.json·PDF 로만 나가고 따로 보는 API 는 없다."""
     r = client.post("/api/cases", json={"url": "http://127.0.0.1:8900/smish/"},
                     headers={**h(INVESTIGATOR), "Idempotency-Key": "ref-" + secrets.token_hex(8)})
     cid = r.json()["id"]
     with client.stream("GET", f"/api/cases/{cid}/events", headers=h(VIEWER)) as s:
         for _ in s.iter_lines():
             pass
-    assert client.get(f"/api/cases/{cid}/referral", headers=h(VIEWER)).status_code == 403
-    r = client.get(f"/api/cases/{cid}/referral", headers=h(INVESTIGATOR))
-    assert r.status_code == 200
-    ref = r.json()
-    rep = client.get(f"/api/cases/{cid}/report.json", headers=h(INVESTIGATOR)).json()
-    assert ref["format"] == referral.FORMAT and rep["referral"]["applicable"] == ref["applicable"]
+    assert client.get(f"/api/cases/{cid}/referral", headers=h(INVESTIGATOR)).status_code == 404
+    assert client.get(f"/api/cases/{cid}/report.json", headers=h(VIEWER)).status_code == 403
+    ref = client.get(f"/api/cases/{cid}/report.json", headers=h(INVESTIGATOR)).json()["referral"]
+    assert ref["format"] == referral.FORMAT
     if ref["applicable"]:  # 시험 페이지는 택배 사칭 스미싱: AI 가 위협으로 보면 요청서가 나온다
-        assert ref["basis"] == "ai" and cid in ref["text"] and "http://127.0.0.1:8900/smish/" in ref["text"]
-    pkg = client.get(f"/api/cases/{cid}/package", headers=h(VIEWER)).json()
-    assert "referral.view" in [x["action"] for x in pkg["review"]["audit"]]
+        assert ref["basis"] == "ai" and cid in ref["text"] and "http://127.0.0.1:8900/smish/" in ref["text"] and ref["ask"]
+    pdf = client.get(f"/api/cases/{cid}/report.pdf", headers=h(INVESTIGATOR))
+    assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF")
 
     from safetrace.api.main import store
 
     with store.session() as s, s.begin():
         running = Case(url="http://127.0.0.1:8900/smish/", source="test", status="RUNNING", created_by="t")
         s.add(running)
-    assert client.get(f"/api/cases/{running.id}/referral", headers=h(INVESTIGATOR)).status_code == 409
+    assert client.get(f"/api/cases/{running.id}/report.json", headers=h(INVESTIGATOR)).status_code == 409
     with store.session() as s, s.begin():  # 끝나지 않은 사건을 남기지 않는다(접수 한도)
         s.get(Case, running.id).status = "FAILED"

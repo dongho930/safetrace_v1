@@ -84,24 +84,6 @@ def test_shortener_destination_comes_from_landing_not_final():
     assert {(t, v) for t, v, _ in got} >= {("url", "https://phish.example/x"), ("url", "https://www.phish.example/y")}
 
 
-def test_form_contact_with_nested_encoded_pii_is_dropped():
-    got, ex = ioc.contact_indicators([{"kind": "form", "value": "https://collect.example.net/u/alice%2540example.com"}])
-    assert got == [] and {r for r, _, _ in ex} == {"pii"}
-
-
-def test_contact_indicators_and_stix_urls():
-    got, ex = ioc.contact_indicators([
-        {"kind": "telegram", "value": "abc_d"}, {"kind": "kakao", "value": "o/sTestOnly1"}, {"kind": "kakao", "value": "id:x1"},
-        {"kind": "form", "value": "https://www.facebook.com/x"}, {"kind": "form", "value": "https://collect.example.net/p"},
-        {"kind": "phone", "value": "01000005678"}, {"kind": "nope", "value": "x"}, {"kind": "telegram", "value": "a b"},
-        {"kind": "form", "value": "https://translate.googleapis.com/translate_voting"}])  # 번역 위젯(Meta 키트에서 관찰)
-    assert [(t, v) for t, v, _ in got] == [("telegram", "abc_d"), ("kakao", "o/sTestOnly1"), ("kakao", "id:x1"),
-                                           ("form", "https://collect.example.net/p"), ("phone", "01000005678")]
-    assert ex == {("official", "form", "www.facebook.com"), ("widget", "form", "translate.googleapis.com")}
-    assert [ioc.contact_url(t, v) for t, v, _ in got] == ["https://t.me/abc_d", "https://open.kakao.com/o/sTestOnly1", None,
-                                                          "https://collect.example.net/p", None]
-
-
 def _literal(pattern: str) -> tuple[str, str]:
     """STIX 패턴을 읽어 (따옴표 밖 글자, 따옴표 안 값)으로 나눈다(역슬래시 이스케이프를 푼다)."""
     outside, inside, q, i = [], [], False, 0
@@ -132,12 +114,12 @@ def test_stix_pattern_value_cannot_add_conditions(value):
 
 def test_csv_cells_are_not_formulas():
     at = now()
-    inds, _, _ = ioc.collect([{"id": "c1", "url": "https://evil.example/", "final_url": None, "threat": "phishing", "at": at,
-                               "contacts": [{"kind": "telegram", "value": "+AbCdEfGh12"}, {"kind": "kakao", "value": "@x=1"}]}])
+    inds, _, _ = ioc.collect([{"id": "c1", "url": "https://evil.example/", "final_url": None, "threat": "phishing", "at": at}])
     rows = list(csv.reader(io.StringIO(ioc.to_csv(inds, {}).lstrip(chr(0xFEFF)))))
     assert rows[0] == ioc.CSV_HEADER
     vals = {r[0]: r[1] for r in rows[1:]}
-    assert vals["telegram"] == "'+AbCdEfGh12" and vals["kakao"] == "'@x=1" and vals["url"] == "https://evil.example/"
+    assert vals["url"] == "https://evil.example/" and vals["domain"] == "evil.example"
+    assert [ioc._cell(v) for v in ("+1", "@x=1", "=A1", "-2", "ok")] == ["'+1", "'@x=1", "'=A1", "'-2", "ok"]
 
 
 # ── API ─────────────────────────
@@ -207,7 +189,7 @@ def test_only_current_threat_verdicts_in_period(client, reviewer):
     assert host["old"] in client.get("/api/ioc.csv?days=90", headers=h(tok)).text
     audit = _store().session().scalars(select(AuditLog).where(AuditLog.action == "ioc.export")
                                        .order_by(AuditLog.id.desc()).limit(2)).all()
-    assert audit[0].actor == u.username and "fmt=csv days=90 contacts=0" in audit[0].detail
+    assert audit[0].actor == u.username and "fmt=csv days=90 cases=" in audit[0].detail
 
 
 def test_roles_and_limits(client, reviewer):
@@ -284,51 +266,9 @@ def test_stix_bundle_is_consistent(client, reviewer):
     assert again == {p: o["id"] for p, o in mine.items()}
 
 
-def test_contacts_only_when_asked_from_verified_chain(client, reviewer):
-    """운영 정보(전화·계좌 원래 값)는 contacts=true 일 때만, 검증한 체인의 원래 조사 기록에서. 체인이 어긋난 사건은 빼고 센다."""
-    from safetrace.agent.runner import make_sealer
-    from safetrace.api.main import settings
-    from safetrace.evidence import EvidenceWriter
-
-    u, tok = reviewer
-    tag = secrets.token_hex(4)
-    ids = []
-    for bad in (False, True):
-        cid = _case(u, f"https://{'bad' if bad else 'ok'}-{tag}.example/")
-        w = EvidenceWriter(settings.evidence_dir, cid, make_sealer(settings))
-        w.append("start", {"url": f"https://x-{tag}.example/"})
-        w.append("observe", {"step": 0})
-        w.append("intel", {"obs": 1, "url": f"https://x-{tag}.example/", "items": [
-            {"kind": "phone", "value": "01077776666" if not bad else "01055554444", "src": "text"},
-            {"kind": "telegram", "value": f"tg_{tag}", "src": "link"}]})
-        w.append("intel", {"sub": 1, "obs": 1, "url": "https://sub.example/", "items": [  # 하위 조사 기록은 넣지 않는다
-            {"kind": "phone", "value": "01099998888", "src": "text"}]})
-        store = _store()
-        with store.session() as s, s.begin():
-            c = s.get(Case, cid)
-            c.head_seq, c.head_hash = w.head.seq, w.head.hash if not bad else "0" * 64
-            v = s.scalar(select(Verdict).where(Verdict.case_id == cid))
-            v.head_seq, v.head_hash = c.head_seq, c.head_hash  # 판정이 본 증거 끝(판정 저장과 같게)
-        ids.append(cid)
-    plain = client.get("/api/ioc.csv?days=1", headers=h(tok)).text
-    assert "01077776666" not in plain and f"tg_{tag}" not in plain
-    got = client.get("/api/ioc.csv?days=1&contacts=true", headers=h(tok))
-    assert "01077776666" in got.text and f"tg_{tag}" in got.text and "01099998888" not in got.text
-    assert "01055554444" not in got.text  # 체인 끝이 맞지 않는 사건의 운영 정보는 넣지 않는다
-    assert re.search(r'filename="safetrace-ioc-\d{8}-1d-contacts\.csv"', got.headers["content-disposition"])
-    s = client.get("/api/ioc?days=1&contacts=true", headers=h(tok)).json()
-    assert s["contacts"]["included"] and s["contacts"]["unverified"] >= 1 and s["by_type"]["phone"] >= 1
-    stix = client.get("/api/ioc.stix?days=1&contacts=true", headers=h(tok)).json()
-    pats = [o["pattern"] for o in stix["objects"] if o["type"] == "indicator"]
-    assert f"[url:value = 'https://t.me/tg_{tag}']" in pats and not any("01077776666" in p for p in pats)  # 전화는 CSV 에만
-    detail = _store().session().scalars(select(AuditLog.detail).where(AuditLog.action == "ioc.export")
-                                        .order_by(AuditLog.id.desc()).limit(1)).one()
-    assert "fmt=stix days=1 contacts=1" in detail and "unverified=" in detail
-
-
 def test_chain_values_are_bounded_by_verdict_head(client, reviewer):
     """Codex 1회차 F1: 연관 사이트를 조사하는 동안 저장한 판정은 원래 조사의 끝에 묶인다. 그 뒤에 체인에 붙은 기록(침해된
-    워커가 sub 없이 넣은 운영 정보·화면)은 담당자가 본 범위가 아니라 지표로 내지 않는다. 단축 URL 의 목적지도 같은 범위의
+    워커가 sub 없이 넣은 화면)은 담당자가 본 범위가 아니라 지표로 내지 않는다. 단축 URL 의 목적지도 같은 범위의
     첫 화면에서만 꺼낸다(F2)."""
     from safetrace.agent.runner import make_sealer
     from safetrace.api.main import settings
@@ -344,18 +284,13 @@ def test_chain_values_are_bounded_by_verdict_head(client, reviewer):
     w = EvidenceWriter(settings.evidence_dir, c.id, make_sealer(settings))
     w.append("start", {"url": c.url})
     w.append("observe", {"step": 0, "url": f"https://dest-{tag}.example/login?u=1"})
-    w.append("intel", {"obs": 1, "url": f"https://dest-{tag}.example/login", "items": [
-        {"kind": "telegram", "value": f"before_{tag}", "src": "link"}]})
     seen = w.head  # 담당자가 판정할 때 본 끝
     w.append("observe", {"step": 1, "url": f"https://innocent-{tag}.example/help"})
-    w.append("intel", {"obs": 3, "url": f"https://innocent-{tag}.example/help", "items": [
-        {"kind": "telegram", "value": f"after_{tag}", "src": "link"}]})
     with store.session() as s, s.begin():
         x = s.get(Case, c.id)
         x.head_seq, x.head_hash = w.head.seq, w.head.hash
         s.add(Verdict(case_id=c.id, rev=1, decision="threat", threat="phishing", reviewer=u.username, user_id=u.id,
                       ai_threat="phishing", head_seq=seen.seq, head_hash=seen.hash))
-    text = client.get("/api/ioc.csv?days=1&contacts=true", headers=h(tok)).text
+    text = client.get("/api/ioc.csv?days=1", headers=h(tok)).text
     assert f"https://bit.ly/{tag}" in text and f"https://dest-{tag}.example/login" in text and f"dest-{tag}.example," in text
-    assert f"before_{tag}" in text
-    assert f"after_{tag}" not in text and f"innocent-{tag}" not in text
+    assert f"innocent-{tag}" not in text

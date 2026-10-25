@@ -1,5 +1,6 @@
 """처리 기관 안내와 요청서 초안(모니터링 담당자 업무): 판정 유형에 맞는 기관·참고 조문과, 기관 신고 양식에 옮겨
-붙일 요청서 글을 보고서 요약(report.build 결과)에서 만든다.
+붙일 요청서 글을 보고서 요약(report.build 결과)에서 만든다. 보고서 PDF 의 맨 위(받는 기관·요청 사항)와 '처리 요청 안내'
+절, report.json 의 referral 로 나간다(따로 보는 화면·API 는 없다, 2026-10-25 보고서로 합침).
 
 - 확정 판정(담당자 '위협')이 있으면 그 유형, 없거나 보류면 AI 판단(초안 표시), 담당자가 정상으로 확정했거나 위협
   유형이 아니면 요청 대상이 아니다
@@ -182,5 +183,5 @@ def build(rep: dict) -> dict:
               f"작성: {clean(v.get('reviewer') if why == 'confirmed' else rep.get('generated_by'), 40)} · "
               f"{_kst(rep.get('generated_at'))}" + (" · 초안(담당자 판정 전)" if draft else "")]
     return {"format": FORMAT, "applicable": True, "threat": threat, "threat_ko": spec["label"], "basis": why,
-            "draft": draft, "agency": agency, "also": also, "laws": laws, "subject": subject,
+            "draft": draft, "agency": agency, "also": also, "laws": laws, "subject": subject, "ask": spec["ask"],
             "text": "\n".join(lines), "notice": NOTICE}

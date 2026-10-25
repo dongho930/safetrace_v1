@@ -22,8 +22,7 @@ def _c(i, url="https://evil.example/", status="COMPLETED", threat="phishing", ve
             "threat": {"threat": threat, "probability": 0.9, **({"override": kw["override"]} if "override" in kw else {})}
             if threat else None,
             "created_at": created, "main_at": kw.get("main_at", created + timedelta(seconds=20)),
-            "verdict": verdict, "first_verdict_at": kw.get("first_verdict_at"), "auto": kw.get("auto"),
-            "action": kw.get("action")}
+            "verdict": verdict, "first_verdict_at": kw.get("first_verdict_at"), "auto": kw.get("auto")}
 
 
 def test_daily_buckets_use_korean_date():
@@ -40,7 +39,7 @@ def test_kpi_waiting_and_threat_basis():
         _c(1),                                                      # AI 위협, 판정 전 → 판정 대기
         _c(2, status="REVIEW_REQUIRED", threat="benign"),           # 검토 필요 → 판정 대기
         _c(3, status="REVIEW_REQUIRED", verdict={"decision": "hold", "threat": None, "ai_threat": "phishing"}),  # 보류도 대기
-        _c(4, verdict=th, first_verdict_at=NOW - timedelta(minutes=30), action="reappeared"),
+        _c(4, verdict=th, first_verdict_at=NOW - timedelta(minutes=30)),
         _c(5, threat="benign"),                                     # 정상
         _c(6, status="RUNNING", threat=None, main_at=None),          # 조사 중
         _c(7, status="RUNNING", main_status="COMPLETED"),           # 원래 결과 나옴(연관 조사 중) → 끝난 것으로
@@ -49,9 +48,8 @@ def test_kpi_waiting_and_threat_basis():
     out = stats.build(cases, NOW, 7, False)
     k = out["kpi"]
     assert (k["received"], k["pending"], k["finished"], k["other"]) == (8, 1, 6, 1)
-    assert k["waiting"] == 4 and k["confirmed"] == 1 and k["reappeared"] == 1
+    assert k["waiting"] == 4 and k["confirmed"] == 1 and "reappeared" not in k and "actions" not in out
     assert k["ai_threat"] == 4  # 1·3·4·7
-    assert out["actions"]["reappeared"] == 1 and sum(out["actions"].values()) == 1  # 조치는 위협 확정 사건만
     assert out["timing"]["to_verdict_h"]["median"] == 0.5 and out["timing"]["to_main_s"]["median"] == 20.0
 
 

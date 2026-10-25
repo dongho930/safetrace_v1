@@ -91,11 +91,6 @@ class Settings(BaseSettings):
     related_auto_per_case: int = Field(3, ge=0, le=3)
     related_auto_max_pending: int = Field(10, ge=0, le=50)
     related_auto_dedup_days: int = Field(7, ge=1, le=30)
-    # 조치 추적 재확인(actions.py): 켜기, 같은 사건을 다시 볼 간격, 한 바퀴에 맡기는 수, 바퀴 간격(초)
-    recheck_enabled: bool = True
-    recheck_interval_hours: int = Field(24, ge=1, le=24 * 30)
-    recheck_batch: int = Field(10, ge=1, le=100)
-    recheck_tick_s: int = Field(300, ge=10, le=86400)
     # 자동 수집(intake.py): 켜기·끄기는 콘솔(관리자)이 DB 에 둔다. 출처, 바퀴 간격(초), 끝나지 않은 자동 수집 사건 한도
     # (조사 컨테이너가 하나여도 사람 신고가 길어야 이만큼만 기다린다), 24시간 사건 상한, 한 번 받기에서 대기열에 넣는 수,
     # 같은 키트 모양 수, 같은 호스트를 다시 넣지 않는 기간

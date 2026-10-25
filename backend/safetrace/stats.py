@@ -1,4 +1,4 @@
-"""현황판(분석가·모니터링 담당자 업무): 기간 안에 접수한 사건의 접수·처리·판정·조치를 센다.
+"""현황판(분석가·모니터링 담당자 업무): 기간 안에 접수한 사건의 접수·처리·판정을 센다.
 
 - 값(주소·연락처)은 내지 않고 수만 낸다(사칭 브랜드·호스팅·최상위 도메인은 이름표). 그래서 열람자도 본다
 - 기간은 접수 시각 기준(1~90일), 사건은 최신 5,000건까지 세고 넘으면 잘렸다고 알린다
@@ -21,7 +21,6 @@ TOP = 10
 KST = timezone(timedelta(hours=9))
 THREATS = ("phishing", "scam", "illegal_gambling", "malware")
 TERMINAL = ("COMPLETED", "REVIEW_REQUIRED", "FAILED", "UNREACHABLE", "BLOCKED")
-ACTION_STATES = ("none", "requested", "blocked", "removed", "reappeared", "closed")
 
 
 def _utc(dt: datetime | None) -> datetime | None:
@@ -97,7 +96,7 @@ def build(cases: list[dict], now: datetime, days: int, truncated: bool) -> dict:
     daily = {(day0 + timedelta(days=i)).isoformat(): {"received": 0, "ai_threat": 0, "confirmed": 0}
              for i in range((now.astimezone(KST).date() - day0).days + 1)}
     status, ai, decisions, confirmed, rules, rules_confirmed = (Counter() for _ in range(6))
-    brands, hosting, tlds, actions = Counter(), Counter(), Counter(), Counter()
+    brands, hosting, tlds = Counter(), Counter(), Counter()
     to_main, to_verdict, waiting_age = [], [], []
     agree = {"pairs": 0, "same_class": 0, "both_threat": 0, "same_type": 0, "ai_threat_reviewer_benign": 0,
              "ai_benign_reviewer_threat": 0}
@@ -158,8 +157,6 @@ def build(cases: list[dict], now: datetime, days: int, truncated: bool) -> dict:
             if c["auto"]:
                 related["auto_ai_threat"] += a in THREATS
                 related["auto_confirmed"] += bool(v and v["decision"] == "threat")
-        if v and v["decision"] == "threat":
-            actions[c.get("action") or "none"] += 1
     return {
         "days": days, "since": since.isoformat(), "generated_at": now.isoformat(), "truncated": truncated,
         "cases": len(cases),
@@ -168,8 +165,7 @@ def build(cases: list[dict], now: datetime, days: int, truncated: bool) -> dict:
                 # 끝남·조사 중이 아닌 상태(예전 판의 상태값 등). 접수 = 끝남 + 조사 중 + 기타
                 "other": sum(v for k, v in status.items() if k not in TERMINAL and k != "pending"),
                 "ai_threat": sum(ai[t] for t in THREATS),
-                "confirmed": sum(confirmed.values()), "waiting": len(waiting_age),
-                "reappeared": actions["reappeared"]},
+                "confirmed": sum(confirmed.values()), "waiting": len(waiting_age)},
         "daily": [{"date": d, **x} for d, x in daily.items()],
         "status": dict(status), "ai": dict(ai), "decisions": dict(decisions), "confirmed": dict(confirmed),
         "rules": _top(rules), "rules_confirmed": dict(rules_confirmed),
@@ -180,5 +176,4 @@ def build(cases: list[dict], now: datetime, days: int, truncated: bool) -> dict:
                    "waiting_h": {"n": len(waiting_age), "median": _pct(waiting_age, 0.5),
                                  "max": round(max(waiting_age), 1) if waiting_age else None}},
         "agreement": agree, "related": related,
-        "actions": {s: actions[s] for s in ACTION_STATES},
     }
