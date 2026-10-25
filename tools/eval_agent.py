@@ -72,6 +72,20 @@ def hidden_reached(url: str, records: list[dict]) -> dict | None:
     return {"reached": False, "step": None, "observed": len(obs)}
 
 
+DANGER_REASONS = ("input", "payment", "download")  # 위험 화면: 입력칸·결제·다운로드 요소(agent/gate.classify_forbidden)
+
+
+def danger_screens(records: list[dict]) -> dict:
+    """원래 조사가 관찰한 화면 가운데 위험 화면(입력·결제·다운로드 요소가 있는 화면)이 있었는지와 처음 나온 단계.
+    실사이트에는 숨긴 화면의 정답이 없어서, 피해가 일어나는 화면을 관찰했는지를 이것으로 본다."""
+    obs = [r.get("data") or {} for r in records if r.get("kind") == "observe" and "sub" not in (r.get("data") or {})]
+    for i, d in enumerate(obs):
+        kinds = {str(x).split(":", 1)[0] for x in d.get("forbidden") or []}
+        if kinds & set(DANGER_REASONS):
+            return {"seen": True, "index": i, "kinds": sorted(kinds & set(DANGER_REASONS))}
+    return {"seen": False, "index": None, "kinds": []}
+
+
 # ── 채점(순수 함수) ─────────────────────────────────────────
 def outcome(expected: str, rec: dict) -> str:
     """한 번의 조사 결과를 채점한다.
@@ -353,6 +367,19 @@ def report(recs: list[dict], meta: dict | None = None) -> str:
             ok = [r for r in rs if r["hidden"].get("reached")]
             steps = sorted({r["hidden"].get("step") for r in ok if r["hidden"].get("step") is not None})
             lines.append(f"| {urlsplit(url).path} | {len(ok)}/{len(rs)} | {', '.join(map(str, steps)) or '-'} |")
+    dg = [r for r in recs if isinstance(r.get("danger"), dict) and r.get("expected") != "benign"
+          and outcome(r["expected"], r) != "skipped"]
+    if dg:
+        lines += ["", "## 위험 화면 관찰 (입력·결제·다운로드 요소가 있는 화면, 위협 정답 회차)", "",
+                  "실사이트에는 숨긴 화면의 정답이 없어서, 피해가 일어나는 화면을 원래 조사가 관찰했는지로 본다. 첫 화면 = 관찰한 "
+                  "첫 화면에 이미 있었음, 누른 뒤 = 첫 화면에는 없고 누른 뒤에 나옴.", "",
+                  "| 그룹 | 회차 | 위험 화면 관찰 | 첫 화면 | 누른 뒤 | 없음 |", "|---|---|---|---|---|---|"]
+        for g in sorted({r["group"] for r in dg}):
+            rs = [r for r in dg if r["group"] == g]
+            seen = [r for r in rs if r["danger"].get("seen")]
+            first = sum(1 for r in seen if r["danger"].get("index") == 0)
+            lines.append(f"| {g} | {len(rs)} | {len(seen)} ({_pct(len(seen), len(rs))}) | {first} | {len(seen) - first} | "
+                         f"{len(rs) - len(seen)} |")
     sbs = sb_summary(recs)
     lines += ["", "## 외부 평판 비교 (Safe Browsing, 조사 당시)", "",
               "같은 회차에서 Safe Browsing 만 썼다면(신고 주소 또는 브라우저가 연 경유·최종 주소가 일치)과 SafeTrace 의 위협 판단을 "
@@ -511,6 +538,7 @@ def run_inside(args) -> None:
                     fin = next((k["data"] for k in kinds if k["kind"] == "finish"), {})
                     rec["steps"] = sum(1 for k in kinds if k["kind"] == "action")
                     rec["observed"] = sum(1 for k in kinds if k["kind"] == "observe" and "sub" not in k["data"])
+                    rec["danger"] = danger_screens(kinds)
                     hid = hidden_reached(row["url"], kinds)
                     if hid is not None:
                         rec["hidden"] = hid

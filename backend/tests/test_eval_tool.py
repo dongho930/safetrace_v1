@@ -248,3 +248,13 @@ def test_hidden_reached_counts_only_main_observations():
         "reached"] is False  # 하위 조사의 관찰은 세지 않는다
     assert ev.hidden_reached("http://testpages:8900/scam/", [obs("http://testpages:8900/scam/", 0),
                                                              obs("http://testpages:8900/scam/", 1, "입금 계좌: 가상은행")])["reached"]
+
+
+def test_danger_screens_first_or_after_click():
+    """실사이트의 위험 화면(입력·결제·다운로드): 처음 나온 관찰 순서. 로그인 링크만 있는 화면은 위험 화면이 아니다."""
+    obs = lambda step, forb, sub=None: {"kind": "observe", "data": {"step": step, "forbidden": forb,  # noqa: E731
+                                                                   **({"sub": sub} if sub else {})}}
+    assert ev.danger_screens([obs(0, ["login:a:Log in"]), obs(1, ["input:password:비밀번호"])]) == {
+        "seen": True, "index": 1, "kinds": ["input"]}
+    assert ev.danger_screens([obs(0, ["payment:a:결제"])])["index"] == 0
+    assert ev.danger_screens([obs(0, []), obs(0, ["input:text:x"], sub=1)])["seen"] is False  # 하위 조사는 세지 않는다
