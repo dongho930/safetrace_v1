@@ -320,6 +320,17 @@ button.reason:hover { border-color: var(--line-strong); }
 .rec-player:fullscreen .rec-time { color: var(--header-muted); }
 .rec-player:fullscreen .rec-seg + .rec-seg::after { background: var(--screen-bg); }
 .progress-panel .log { border-top: 0; max-height: 520px; overflow-y: auto; }
+/* 넓은 화면: 상태 줄·AI 요약과 탭 바는 고정, 탭 내용(조사 중이면 조사 화면)만 스크롤. 아래 내려받기 줄·판정 막대도 고정 */
+@media (min-width: 900px) {
+  .detail-body { flex: 1 1 0; min-height: 0; }
+  .detail-body > * { flex: none; }
+  .detail-body > .progress-panel, .detail-body > .detail-scroll { flex: 1 1 0; min-height: 0; }
+  .tabs { flex: none; }
+  .tab-panel { flex: 1 1 0; min-height: 0; }
+  .tab-panel, .detail-scroll { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; }
+  .tab-panel::-webkit-scrollbar, .detail-scroll::-webkit-scrollbar { display: none; }
+  .progress-panel .log { max-height: none; overflow-y: visible; }  /* 탭 내용이 스크롤하므로 기록 칸 안 스크롤은 없앤다 */
+}
 
 /* 경로 지도 */
 .pathfloor { overflow-x: auto; background-color: var(--sunken); background-image: radial-gradient(#D8DEE8 1px, transparent 1px); background-size: 16px 16px; padding: 18px 16px 20px; display: flex; flex-direction: column; gap: 10px; }
