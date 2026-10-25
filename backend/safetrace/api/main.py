@@ -456,8 +456,8 @@ def _consume_events_forever():
     group = "api"
     try:
         _redis.xgroup_create("st:events", group, id="0", mkstream=True)
-    except Exception:
-        pass
+    except Exception as e:  # 이미 있는 묶음(BUSYGROUP)이거나 Redis 가 아직 안 떴다: 아래 반복이 다시 시도한다
+        log.debug("events group create skipped: %s", type(e).__name__)
     while True:
         try:
             resp = _redis.xreadgroup(group, "api-1", {"st:events": ">"}, count=50, block=5000)

@@ -20,7 +20,7 @@ x-common: &common
 services:
   db:
     <<: *common
-    image: postgres:18-alpine
+    image: postgres:18-alpine@sha256:77f585114c32fbca283dc835b0596f4e52b51b4c6662d7810b2f4084f60a1873
     environment:
       POSTGRES_DB: safetrace
       POSTGRES_USER: safetrace
@@ -30,7 +30,7 @@ services:
 
   redis:
     <<: *common
-    image: redis:8-alpine
+    image: redis:8-alpine@sha256:ba6e394f6acc2a695ef1b6944f161b9ca813711739be68319fa0db3470673f1d
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}", "--appendonly", "yes"]
     networks: [core, sandbox]
 
@@ -168,7 +168,7 @@ services:
 
   # 시연용 시험 페이지(선택): docker compose --profile demo up
   testpages:
-    image: python:3.13-slim
+    image: python:3.13-slim@sha256:7c61056e61ac89e852de05f3dc6fa51a6dd2181797bceed46aa725dd7cb2cd3b
     profiles: [demo]
     working_dir: /site
     command: ["python", "server.py", "--host", "0.0.0.0", "--port", "8900"]

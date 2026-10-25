@@ -13,7 +13,7 @@ dependencies = [
   "psycopg[binary]==3.3.5",
   "redis==8.1.0",
   "playwright==1.63.0",
-  "argon2-cffi>=25.1",
+  "argon2-cffi==25.1.0",
   "pillow==13.0.0",  # 증거 스크린샷 표시용 미리보기
   "websockets==17.1",  # uvicorn WebSocket(콘솔 실시간 화면)
   "reportlab==5.0.1",  # 보고서 초안 PDF(HTML 을 해석하지 않는 방식)

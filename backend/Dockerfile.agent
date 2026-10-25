@@ -1,5 +1,6 @@
 # 에이전트 워커: Playwright 공식 이미지(Chromium 포함) + 로컬 OCR. 비 root 로 실행.
-FROM mcr.microsoft.com/playwright/python:v1.63.0-noble
+# 기본 이미지는 다이제스트로 고정한다(공급망)
+FROM mcr.microsoft.com/playwright/python:v1.63.0-noble@sha256:72bd171a9ffc2b4b59532aaa6210e21014d07093120dc25528870c0b840da1f0
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 # 빌드 중 PyPI 응답이 느릴 때 pip 가 15초 만에 포기하지 않게(빌드 때만 쓰는 ARG)
@@ -10,9 +11,11 @@ ARG PIP_RETRIES=8
 COPY --from=tools fetch_ocr_model.py /tmp/
 RUN python /tmp/fetch_ocr_model.py --dest /models && rm /tmp/fetch_ocr_model.py
 ENV ST_OCR_REC_MODEL=/models/korean_PP-OCRv5_rec_mobile.onnx
-COPY pyproject.toml ./
+# 의존성은 해시를 고정한 잠금 파일(requirements-agent.lock, 이 이미지의 Python 3.12 기준)로만 설치한다
+COPY pyproject.toml requirements-agent.lock ./
+RUN pip install --no-cache-dir --require-hashes -r requirements-agent.lock && rm -rf /root/.cache
 COPY safetrace ./safetrace
-RUN pip install --no-cache-dir ".[ocr]" && rm -rf /root/.cache
+RUN pip install --no-cache-dir --no-deps --no-build-isolation ".[ocr]" && rm -rf /root/.cache
 # 증거 볼륨 마운트 지점: 새 named volume 이 이 소유권을 물려받는다
 RUN mkdir -p /evidence && chown pwuser:pwuser /evidence
 USER pwuser
