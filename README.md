@@ -57,6 +57,16 @@ docker compose --profile demo up -d testpages   # 시연용 시험 페이지(선
 docker compose exec api python -m safetrace.accounts add <아이디> --role admin   # 첫 관리자
 ```
 
+공급망: 기본 이미지는 다이제스트로, CI 의 Actions 는 커밋 SHA 로 고정한다. 파이썬 의존성은 해시를 고정한 잠금 파일
+(`backend/requirements.lock` API 계열 Python 3.13, `requirements-agent.lock` 조사 컨테이너 Python 3.12,
+`requirements-ci.lock` CI)로만 설치하고(`pip install --require-hashes`), 콘솔은 `package-lock.json` 으로 `npm ci` 한다.
+의존성을 바꾸면 잠금 파일을 다시 만들고(`uv pip compile backend/pyproject.toml <빌드용 setuptools> --generate-hashes
+--python-version 3.13|3.12 --python-platform x86_64-manylinux_2_28`, `--extra ocr`·`--extra dev`) SBOM 을 다시 낸다
+(`tools/make_sbom.sh` → `sbom/*.cdx.json`, CycloneDX). SBOM 도구도 하위 의존성까지 해시로 잠근 파일
+(`tools/sbom/requirements.lock`·`package-lock.json`)로만 받고, 컨테이너에는 잠금 파일만 읽기 전용으로·결과 폴더만 쓰기로
+넣는다. 도구를 올리면 `tools/sbom/requirements.in`·`package.json` 을 고치고 같은 `uv pip compile`(`--python-version 3.13`)과
+`npm install --package-lock-only --ignore-scripts` 로 다시 잠근다.
+
 ## 계정과 권한
 
 - 담당자는 아이디·비밀번호로 로그인한다. 비밀번호는 Argon2id(m=64MiB, t=3, p=4)로만 저장하고, 세션 토큰은 DB에 SHA-256만 남긴다.

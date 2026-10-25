@@ -55,8 +55,8 @@ async def _pipe(r: asyncio.StreamReader, w: asyncio.StreamWriter):
     finally:
         try:
             w.close()
-        except Exception:
-            pass
+        except Exception as e:  # 이미 끊긴 연결: 닫기 실패는 중계 결과와 상관없다
+            log.debug("close failed: %s", type(e).__name__)
 
 
 def _split_hostport(s: str, default_port: int) -> tuple[str, int]:

@@ -12,11 +12,14 @@ from __future__ import annotations
 import asyncio
 import collections
 import json
+import logging
 import threading
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Protocol
+
+log = logging.getLogger("safetrace.live")
 
 CHANNEL = "st:live:{}"
 WATCH_KEY = "st:live:watch:{}"
@@ -154,8 +157,8 @@ class RedisLivePublisher:
     def publish(self, case_id: str, jpeg: bytes) -> None:
         try:
             self._r.publish(CHANNEL.format(case_id), jpeg)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001  실시간 화면은 증거가 아니다: 못 보내도 조사는 계속한다(녹화는 따로 남는다)
+            log.debug("live publish failed: %s", type(e).__name__)
 
     def end(self, case_id: str) -> None:
         self.publish(case_id, END)
