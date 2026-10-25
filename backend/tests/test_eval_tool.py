@@ -233,3 +233,18 @@ def test_load_set_reads_normal_sites_list(tmp_path):
     real = Path(__file__).resolve().parents[2] / "data" / "normal_sites.csv"
     assert len(load_set(real, None)) == 168
 
+
+
+def test_hidden_reached_counts_only_main_observations():
+    """기획서 3.3 숨겨진 화면 도달: 단계형 시험 페이지의 숨긴 화면을 원래 조사가 관찰했는지(하위 조사·다른 경로는 세지 않는다)."""
+    obs = lambda url, step, text="", sub=None: {"kind": "observe", "data": {"url": url, "step": step, "text_excerpt": text,  # noqa: E731
+                                                                            **({"sub": sub} if sub else {})}}
+    assert ev.hidden_reached("http://testpages:8900/benign/", [obs("http://testpages:8900/benign/", 0)]) is None
+    got = ev.hidden_reached("http://testpages:8900/smish/", [obs("http://testpages:8900/smish/", 0),
+                                                             obs("http://testpages-alt:8900/smish/fee.html", 4)])
+    assert got == {"reached": True, "step": 4, "observed": 2}  # 다른 호스트로 넘어가도 경로로 본다
+    assert ev.hidden_reached("http://testpages:8900/gamble/", [obs("http://testpages:8900/gamble/", 0),
+                                                               obs("http://testpages:8900/gamble/deposit.html", 1, sub=1)])[
+        "reached"] is False  # 하위 조사의 관찰은 세지 않는다
+    assert ev.hidden_reached("http://testpages:8900/scam/", [obs("http://testpages:8900/scam/", 0),
+                                                             obs("http://testpages:8900/scam/", 1, "입금 계좌: 가상은행")])["reached"]
