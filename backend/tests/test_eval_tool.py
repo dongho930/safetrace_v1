@@ -258,3 +258,17 @@ def test_danger_screens_first_or_after_click():
         "seen": True, "index": 1, "kinds": ["input"]}
     assert ev.danger_screens([obs(0, ["payment:a:결제"])])["index"] == 0
     assert ev.danger_screens([obs(0, []), obs(0, ["input:text:x"], sub=1)])["seen"] is False  # 하위 조사는 세지 않는다
+
+
+def test_report_header_names_comparison_conditions():
+    """비교 실험 결과는 머리에 조건(첫 화면만·행동 확신 문턱·User-Agent)을 적어 기본 조사 결과와 헷갈리지 않게 한다."""
+    rec = {"group": "kisa", "expected": "malicious", "url": "http://a.example/", "threat": "phishing", "repeat": 0,
+           "seconds": 3.0}
+    md = report([rec], {"started": "2026-10-25T16:00", "repeat": 1, "git": "x", "mode": "first_screen",
+                        "action_min_prob": 0.25, "user_agent": "Mozilla/5.0 (Linux; Android 10; K) `x`"})
+    head = md.splitlines()[2]
+    assert "첫 화면만" in head and "행동 확신 문턱 0.25" in head and "Android 10" in head
+    assert head.count("`") == 2  # 값 속 역따옴표는 지워 표 글꼴이 깨지지 않게
+    plain = report([rec], {"started": "2026-10-25T16:00", "repeat": 1, "git": "x", "mode": "agent",
+                           "action_min_prob": None, "user_agent": None}).splitlines()[2]
+    assert "첫 화면만" not in plain and "문턱" not in plain and "User-Agent" not in plain

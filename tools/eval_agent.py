@@ -331,6 +331,8 @@ def report(recs: list[dict], meta: dict | None = None) -> str:
                      f"{' · 첫 화면만(비교 실험)' if meta.get('mode') == 'first_screen' else ''}")
         if meta.get("action_min_prob") is not None:
             lines[-1] += f" · 행동 확신 문턱 {meta.get('action_min_prob')}"
+        if meta.get("user_agent"):
+            lines[-1] += f" · User-Agent `{str(meta['user_agent'])[:120].replace('`', '')}`"
     summ = summarize(recs)
     groups = [g for g in summ if g != "전체"] + ["전체"]
     lines += ["", "| 지표 | " + " | ".join(groups) + " |", "|---|" + "---|" * len(groups)]
@@ -497,6 +499,9 @@ def run_inside(args) -> None:
         # 비교 실험: 다음 행동 확신 문턱(기본 settings.action_min_prob)을 바꿔 더 누르게 했을 때. 판단 서비스가 아니라 이 프로세스의
         # 조사기가 문턱을 본다(loop.py). 안전 게이트·금지 요소는 그대로다
         s = s.model_copy(update={"action_min_prob": float(args.action_min_prob)})
+    if args.user_agent:
+        # 비교 실험: 휴대폰에만 내용을 보여 주는 스미싱 키트가 있는지 보려고 User-Agent 만 바꾼다(화면 크기는 그대로)
+        s = s.model_copy(update={"browser_user_agent": args.user_agent[:300]})
     if args.first_screen:
         # 비교 실험(기획서 3.3 '첫 화면만 보는 방식'): 같은 조사기가 첫 화면(자동 이동·대기 화면 포함)을 본 뒤 누르지 않고
         # 바로 끝내고 위협 판단은 그대로 판단 모델이 한다. 하위 조사도 하지 않는다. 평가 도구에서만 바꿔 끼운다
@@ -587,7 +592,8 @@ def run_host(args) -> None:
     local = out_dir / f"{name}.jsonl"
     meta = {"meta": True, "started": started.isoformat(timespec="minutes"), "repeat": args.repeat,
             "group": args.group, "label": args.label, "git": _git(),
-            "mode": "first_screen" if args.first_screen else "agent", "action_min_prob": args.action_min_prob}
+            "mode": "first_screen" if args.first_screen else "agent", "action_min_prob": args.action_min_prob,
+            "user_agent": args.user_agent}
     subprocess.run(dc + ["exec", "-T", "agent", "sh", "-c", f"rm -rf {IN_BOX} && mkdir -p {IN_BOX}/bin"],
                    cwd=ROOT, check=True)
     # 도구와 평가 목록을 다른 자리·고정 이름에 둔다(목록 파일 이름이 도구와 같아도 도구를 덮어써 실행되지 않게)
@@ -602,6 +608,8 @@ def run_host(args) -> None:
         cmd += ["--first-screen"]
     if args.action_min_prob is not None:
         cmd += ["--action-min-prob", str(args.action_min_prob)]
+    if args.user_agent:
+        cmd += ["--user-agent", args.user_agent]
     try:
         # 조사 로그(INFO)는 줄이고 진행 줄만 보여 준다
         proc = subprocess.Popen(dc + ["exec", "-T", "-w", "/app", "agent", *cmd], cwd=ROOT,
@@ -651,6 +659,8 @@ def main() -> None:
                    help="비교 실험: 첫 화면만 보고 판단(누르지 않음, 하위 조사 없음). 기획서 3.3 '첫 화면만 보는 방식'")
     r.add_argument("--action-min-prob", type=float, default=None,
                    help="비교 실험: 다음 행동 확신 문턱(기본은 설정값 0.45). 낮추면 확신이 낮은 클릭도 한다")
+    r.add_argument("--user-agent", default=None,
+                   help="비교 실험: 브라우저 User-Agent 를 이 값으로(예: 안드로이드 Chrome). 화면 크기는 그대로")
     r.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
     r.add_argument("--out", help=argparse.SUPPRESS)
     p = sub.add_parser("report")
