@@ -547,8 +547,9 @@ export const getStats = async (days: number): Promise<Stats> => {
 };
 
 // 자동 수집(공개 피싱 피드 → 조사 접수). 상태는 열람자 이상, 켜기·끄기는 사람 관리자만. 주소 값은 오지 않는다
-export type IntakeSource = { state: string; requestedAt: string; doneAt: string | null; got: number | null; picked: number | null; reason: string | null } | null;
-export type Intake = { enabled: boolean; updatedBy: string | null; updatedAt: string | null; sources: [string, IntakeSource][]; queued: number; pending: number; created24h: number; stale48h: number };
+// nextAt: 다음 받기 시각(켜져 있을 때 기준, 받는 중이면 null), intervalH: 받는 주기(시간)
+export type IntakeSource = { state: string; requestedAt: string; doneAt: string | null; got: number | null; picked: number | null; reason: string | null; nextAt: string | null; intervalH: number | null } | null;
+export type Intake = { enabled: boolean; updatedBy: string | null; updatedAt: string | null; sources: [string, IntakeSource][]; queued: number; pending: number; created24h: number };
 const cleanIntake = (v: unknown): Intake => {
   const o = isObj(v) ? v : {};
   const n = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : 0);
@@ -562,13 +563,21 @@ const cleanIntake = (v: unknown): Intake => {
       .map(([k, x]): [string, IntakeSource] => [
         k.slice(0, 16),
         isObj(x) && typeof x.state === "string" && typeof x.requested_at === "string"
-          ? { state: x.state.slice(0, 12), requestedAt: x.requested_at.slice(0, 40), doneAt: strOr(x.done_at)?.slice(0, 40) ?? null, got: typeof x.got === "number" ? x.got : null, picked: typeof x.picked === "number" ? x.picked : null, reason: strOr(x.reason)?.slice(0, 64) ?? null }
+          ? {
+              state: x.state.slice(0, 12),
+              requestedAt: x.requested_at.slice(0, 40),
+              doneAt: strOr(x.done_at)?.slice(0, 40) ?? null,
+              got: typeof x.got === "number" ? x.got : null,
+              picked: typeof x.picked === "number" ? x.picked : null,
+              reason: strOr(x.reason)?.slice(0, 64) ?? null,
+              nextAt: strOr(x.next_at)?.slice(0, 40) ?? null,
+              intervalH: typeof x.interval_h === "number" && Number.isFinite(x.interval_h) && x.interval_h > 0 ? x.interval_h : null,
+            }
           : null,
       ]),
     queued: n(o.queued),
     pending: n(o.pending),
     created24h: n(o.created_24h),
-    stale48h: n(o.stale_48h),
   };
 };
 export const getIntake = async () => cleanIntake(await req<unknown>("/api/intake"));

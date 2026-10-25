@@ -3,7 +3,7 @@
 
 import json
 import secrets
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -116,6 +116,29 @@ def test_due_sources_intervals(clean_intake):
     assert intake.expire_fetches(store, at=t0 + timedelta(hours=9, minutes=11)) >= 1
     with store.session() as s:
         assert s.get(FeedFetch, h.id).state == "expired"
+
+
+def test_status_shows_next_fetch_time(clean_intake):
+    """콘솔의 '다음 받기': 받기 요청(due_sources)과 같은 계산 — 마지막 요청 + 주기(실패·만료면 1시간), 받는 중이면 없음.
+    대기열에서 오래돼 버린 수는 상태에 싣지 않는다(콘솔에 보이지 않게, 2026-10-25 사용자 요청)."""
+    store = clean_intake
+    t0 = now() + timedelta(days=40)  # 다른 시험·실행이 남긴 받기보다 늦게
+    f = intake.request_fetch(store, "openphish", at=t0)
+    st = intake.status(store, ["openphish"], at=t0)
+    assert st["sources"]["openphish"]["next_at"] is None  # 받는 중
+    assert "stale_48h" not in st
+    intake.record_fetch(store, f.id, {"ok": True, "text": ""}, seen_hosts=set(), allowed_ports=PORTS, cap=1, kit_max=1, key=None)
+    src = intake.status(store, ["openphish"], at=t0)["sources"]["openphish"]
+    nxt = intake._naive(datetime.fromisoformat(src["next_at"]))
+    assert nxt == intake._naive(t0 + timedelta(hours=12)) and src["interval_h"] == 12
+    # 표시한 시각 바로 전에는 받지 않고, 그 시각이 되면 받는다
+    assert "openphish" not in intake.due_sources(store, ["openphish"], at=t0 + timedelta(hours=11, minutes=59))
+    assert "openphish" in intake.due_sources(store, ["openphish"], at=t0 + timedelta(hours=12))
+    g = intake.request_fetch(store, "openphish", at=t0 + timedelta(hours=12))
+    intake.record_fetch(store, g.id, {"ok": False, "reason": "http_503"}, seen_hosts=set(), allowed_ports=PORTS, cap=1,
+                        kit_max=1, key=None)
+    src = intake.status(store, ["openphish"], at=t0 + timedelta(hours=12))["sources"]["openphish"]
+    assert intake._naive(datetime.fromisoformat(src["next_at"])) == intake._naive(t0 + timedelta(hours=13))  # 실패는 1시간 뒤
 
 
 # ── API ─────────────────────────
