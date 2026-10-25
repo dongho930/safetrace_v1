@@ -230,7 +230,7 @@ def test_report_pdf_does_not_interpret_page_markup(tmp_path):
                                                   "reputation_match": False, "reputation_unchecked": True,
                                                   "status": "COMPLETED", "error": False}]},
         "verdict": {"rev": 1, "decision": "hold", "decision_ko": evil, "threat": None, "threat_ko": None,
-                    "note": evil + "<b> 닫히지 않은 태그", "reviewer": evil, "at": "2026-10-12T00:00:00+00:00"},
+                    "note": evil + chr(10) + evil + "<b> 닫히지 않은 태그", "reviewer": evil, "at": "2026-10-12T00:00:00+00:00"},
         "key_screens": [],
         "integrity": {"verified": True, "records": 1, "errors": 0, "head_seq": 0, "head_hash": evil, "key_id": evil,
                       "method": evil},

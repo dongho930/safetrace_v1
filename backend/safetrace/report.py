@@ -386,7 +386,8 @@ def render_pdf(rep: dict, evidence_dir: Path) -> bytes:
                               + "".join(f" · {m['type'] or ''} {m['url']}" for m in sb["matches"])) if sb else "조회 기록 없음"))
     if v:
         rows += [("담당자 판정", f"{v['decision_ko']}" + (f" — {v['threat_ko']}" if v.get("threat_ko") else "")),
-                 ("판정 사유", v.get("note")),
+                 # 메모의 줄바꿈은 줄로 남긴다(글자는 이스케이프한 뒤 줄 사이에만 마크업)
+                 ("판정 사유", P("<br/>".join(_t(x) for x in (v.get("note") or "-").splitlines()), base)),
                  ("판정자 · 시각", f"{v['reviewer']} · {_kst(v['at'])} (판 {v['rev']})")]
     else:
         rows.append(("담당자 판정", "아직 없음 — 판정·사유는 콘솔에서 기록"))
