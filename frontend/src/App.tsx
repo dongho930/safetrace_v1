@@ -52,7 +52,7 @@ import {
   verifyCase,
 } from "./api";
 import {
-  buildOverlay, buildPath, buildReasons, buildScreens, clip, CURSOR_IN, cursorTravel, hostOrFile, hostPath, jpegSize, liveActivity, liveClick, locateSeg, MAX_RECORDINGS, recCursor, recordingClicks, recordings, SCREEN_H,
+  buildOverlay, buildPath, buildReasons, buildScreens, calmCase, clip, CURSOR_IN, cursorTravel, hostOrFile, hostPath, jpegSize, liveActivity, liveClick, locateSeg, MAX_RECORDINGS, recCursor, recordingClicks, recordings, SCREEN_H,
   SCREEN_W, segStarts, type Activity, type ClickPoint, type Overlay, type Reason, type RecItem, type Screen, type Tone,
 } from "./evidence";
 import { ACTION_LABEL, NET_CATEGORY_LABEL, overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
@@ -1774,6 +1774,12 @@ function Summary({ c, running, reasons, picked, onPick }: { c: CaseOut | null; r
           {overrideLabel(t.override)} · 모델 원래 판단 {THREAT_LABEL[t.override.original.threat] ?? t.override.original.threat} {pct(t.override.original.probability)}
         </span>
       )}
+      {calmCase(c) && reasons.some((r) => r.rule) && (
+        <p className="small muted reasons-note">
+          정상으로 판단했습니다. 회색 카드는 위험 근거가 아니라 조사 중 안전 규칙이 작동한 기록입니다.
+          {reasons.some((r) => r.tone === "review") && " 주황 카드는 AI 판단과 별개로 확인을 권하는 화면입니다."}
+        </p>
+      )}
       {reasons.length > 0 && (
         <div className="reasons">
           {reasons.map((r, i) => {
@@ -2517,7 +2523,7 @@ function ScreensTab({
           {text(events.find((e) => e.seq === cur.seq)?.data.capture) === "expanded" && <span className="muted small">{EXPANDED_NOTE}</span>}
           {overlay && (
             <span className="mark-legend">
-              {nForbidden > 0 && <span className="lg lg-forbidden">금지 요소 {nForbidden}</span>}
+              {nForbidden > 0 && <span className="lg lg-forbidden">{calmCase(c) ? "건드리지 않은 요소" : "금지 요소"} {nForbidden}</span>}
               {act && <span className={`lg lg-${act.kind}`}>{act.label}</span>}
               <button type="button" className="btn btn-ghost btn-sm" aria-pressed={marksOn} onClick={() => setMarksOn(!marksOn)}>
                 {marksOn ? "화면 표시 끄기" : "화면 표시 켜기"}

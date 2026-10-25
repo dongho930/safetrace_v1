@@ -45,16 +45,32 @@ export type Reason = {
   tone: Tone;
   shot: string | null; // 연결 화면(증거 파일 이름)
   shotSeq: number | null; // 그 화면을 남긴 관찰 기록
+  rule?: boolean; // AI 가 정상으로 본 사건에서 위험 근거가 아니라 안전 규칙이 작동한 기록(회색)
 };
+
+// AI 가 정상으로 보고 보류하지 않은 사건. 이때 안전 규칙 기록(막은 클릭·이동, 건드리지 않은 요소)은 위험 근거처럼 보이지 않게
+// 회색으로 낮추고, 정상 사이트에는 드문 비밀번호 입력 칸·다운로드 요소만 '확인 권장'(주황)으로 남긴다.
+// 로그인·결제 글자 링크는 정상 사이트에도 흔해(로컬 정상 사건 중 금지 요소가 있는 44건의 23·19건) 회색으로 둔다
+export const calmCase = (c: CaseOut | null) => c?.threat?.threat === "benign" && !c.threat.hold;
+// 금지 요소 기록 형식 reason:type:label
+const forbParts = (f: string) => {
+  const [reason = "", type = "", ...rest] = f.split(":");
+  return { reason, type, label: rest.join(":") };
+};
+const SENSITIVE: { test: (x: ReturnType<typeof forbParts>) => boolean; title: string }[] = [
+  { test: (x) => x.reason === "input" && x.type === "password", title: "비밀번호 입력 칸이 있는 화면" },
+  { test: (x) => x.reason === "download", title: "다운로드 요소가 있는 화면" },
+];
 
 export function buildReasons(events: EvidenceEvent[], c: CaseOut): Reason[] {
   const main = events.filter((e) => !isSub(e));
   const observes = main.filter((e) => e.kind === "observe" && png(e));
   const out: Reason[] = [];
   const push = (r: Reason) => {
-    if (out.length < 3) out.push(r);
+    out.push(r);
   };
   const last = (f: (e: EvidenceEvent) => boolean) => [...main].reverse().find(f);
+  const calm = calmCase(c);
 
   // ① 안전 게이트가 막은 클릭
   const gate = last((e) => e.kind === "gate" && e.data.allowed === false);
@@ -63,20 +79,53 @@ export function buildReasons(events: EvidenceEvent[], c: CaseOut): Reason[] {
     const action = str(gate.data.action);
     const what = action === "click" ? `“${clip(candidateText(obs, str(gate.data.element)), 40)}” 클릭` : (ACTION_LABEL[action] ?? action);
     const shotObs = lastBefore(main, gate.seq, (e) => e.kind === "observe" && !!png(e));
-    push({ key: "gate", title: "입력·제출 차단", text: `${what}을 안전 게이트가 막음 (${clip(str(gate.data.reason), 40)})`, ev: `EV-${gate.seq}`, tone: "threat", shot: png(shotObs), shotSeq: shotObs?.seq ?? null });
+    const base = { key: "gate", ev: `EV-${gate.seq}`, shot: png(shotObs), shotSeq: shotObs?.seq ?? null };
+    push(
+      calm
+        ? { ...base, title: "누르지 않은 버튼", text: `${what}을 안전 규칙으로 막음 (${clip(str(gate.data.reason), 40)})`, tone: "idle", rule: true }
+        : { ...base, title: "입력·제출 차단", text: `${what}을 안전 게이트가 막음 (${clip(str(gate.data.reason), 40)})`, tone: "threat" },
+    );
   }
   // ② 검문 프록시가 막은 페이지 이동
   const nav = last((e) => e.kind === "blocked_request" && e.data.navigation === true);
   if (nav) {
     const shotObs = lastBefore(main, nav.seq, (e) => e.kind === "observe" && !!png(e));
-    push({ key: "nav", title: "이동 차단", text: `${clip(hostOrFile(str(nav.data.url)), 40)}(으)로 이동하려 해 검문 프록시가 막음 (${clip(str(nav.data.reason), 40)})`, ev: `EV-${nav.seq}`, tone: "threat", shot: png(shotObs), shotSeq: shotObs?.seq ?? null });
+    const base = { key: "nav", ev: `EV-${nav.seq}`, shot: png(shotObs), shotSeq: shotObs?.seq ?? null };
+    const where = clip(hostOrFile(str(nav.data.url)), 40);
+    push(
+      calm
+        ? { ...base, title: "막은 이동", text: `${where}(으)로 가려는 이동을 안전 규칙으로 막음 (${clip(str(nav.data.reason), 40)})`, tone: "idle", rule: true }
+        : { ...base, title: "이동 차단", text: `${where}(으)로 이동하려 해 검문 프록시가 막음 (${clip(str(nav.data.reason), 40)})`, tone: "threat" },
+    );
   }
   // ③ 입력 칸 등 금지 요소가 있는 화면(형식 reason:type:label, label 만 보여 준다)
+  // 정상 판단이면: 비밀번호 칸·다운로드 요소가 있는 마지막 화면은 확인 권장(주황), 없으면 건드리지 않은 요소 기록(회색)
+  const sensitive = calm
+    ? [...observes].reverse().flatMap((e) => {
+        for (const k of SENSITIVE) {
+          const hit = strs(e.data.forbidden).map(forbParts).find(k.test);
+          if (hit) return [{ e, title: k.title, label: hit.label || hit.reason }];
+        }
+        return [];
+      })[0]
+    : undefined;
   const forb = [...observes].reverse().find((e) => strs(e.data.forbidden).length > 0);
-  if (forb) {
+  if (sensitive) {
+    const { e } = sensitive;
+    push({ key: "forbidden", title: sensitive.title, text: `AI 는 정상으로 봤습니다. 화면을 확인하세요 (${clip(sensitive.label, 40)})`, ev: `EV-${e.seq}`, tone: "review", shot: png(e), shotSeq: e.seq });
+  } else if (forb) {
     const list = strs(forb.data.forbidden);
     const label = list[0].split(":").slice(2).join(":") || list[0];
-    push({ key: "forbidden", title: "입력 요구 화면", text: `입력 칸 등 금지 요소 ${list.length}개가 있는 화면 (${clip(label, 40)})`, ev: `EV-${forb.seq}`, tone: "threat", shot: png(forb), shotSeq: forb.seq });
+    if (calm) {
+      const typing = list.some((f) => ["input", "submit"].includes(forbParts(f).reason));
+      push({
+        key: "forbidden", title: typing ? "입력 칸이 있던 화면" : "건드리지 않은 요소가 있던 화면",
+        text: `${clip(label, 40)} 등 ${list.length}개 · 안전 규칙으로 입력·클릭하지 않음(위험 근거 아님)`,
+        ev: `EV-${forb.seq}`, tone: "idle", shot: png(forb), shotSeq: forb.seq, rule: true,
+      });
+    } else {
+      push({ key: "forbidden", title: "입력 요구 화면", text: `입력 칸 등 금지 요소 ${list.length}개가 있는 화면 (${clip(label, 40)})`, ev: `EV-${forb.seq}`, tone: "threat", shot: png(forb), shotSeq: forb.seq });
+    }
   }
   // ④ 담당자 검토 전환(행동 기록과 같은 문구)
   const esc = last((e) => e.kind === "escalation");
@@ -121,6 +170,12 @@ export function buildReasons(events: EvidenceEvent[], c: CaseOut): Reason[] {
     const th = last((e) => e.kind === "threat");
     push({ key: "override", title: "코드 규칙 판단", text: overrideLabel(c.threat.override), ev: th ? `EV-${th.seq}` : "판단", tone: "review", shot: null, shotSeq: null });
   }
+  // 카드는 3장까지. 정상 판단이면 확인이 필요한 카드(주황·빨강)를 안전 규칙 기록(회색)보다 앞에 둔다
+  if (calm) {
+    const rank = (r: Reason) => (r.rule ? 1 : 0);
+    out.sort((a, b) => rank(a) - rank(b));
+  }
+  out.splice(3);
   if (out.length === 0) {
     const lastObs = observes[observes.length - 1];
     out.push(
