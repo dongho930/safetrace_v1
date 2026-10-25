@@ -329,6 +329,8 @@ def report(recs: list[dict], meta: dict | None = None) -> str:
         lines.append(f"\n{meta.get('started', '')} · 반복 {meta.get('repeat')} · 코드 {meta.get('git', '')}"
                      f"{' · ' + meta['label'] if meta.get('label') else ''}"
                      f"{' · 첫 화면만(비교 실험)' if meta.get('mode') == 'first_screen' else ''}")
+        if meta.get("action_min_prob") is not None:
+            lines[-1] += f" · 행동 확신 문턱 {meta.get('action_min_prob')}"
     summ = summarize(recs)
     groups = [g for g in summ if g != "전체"] + ["전체"]
     lines += ["", "| 지표 | " + " | ".join(groups) + " |", "|---|" + "---|" * len(groups)]
@@ -491,6 +493,10 @@ def run_inside(args) -> None:
     # 이 프로세스 안에서 일회용 키로 서명한다(실제 증거 서명 키는 여전히 에이전트에 없다)
     s = Settings(evidence_dir=Path(IN_BOX) / "evidence", signer_url=None, evidence_hmac_key=secrets.token_hex(32))
     decider = None
+    if args.action_min_prob is not None:
+        # 비교 실험: 다음 행동 확신 문턱(기본 settings.action_min_prob)을 바꿔 더 누르게 했을 때. 판단 서비스가 아니라 이 프로세스의
+        # 조사기가 문턱을 본다(loop.py). 안전 게이트·금지 요소는 그대로다
+        s = s.model_copy(update={"action_min_prob": float(args.action_min_prob)})
     if args.first_screen:
         # 비교 실험(기획서 3.3 '첫 화면만 보는 방식'): 같은 조사기가 첫 화면(자동 이동·대기 화면 포함)을 본 뒤 누르지 않고
         # 바로 끝내고 위협 판단은 그대로 판단 모델이 한다. 하위 조사도 하지 않는다. 평가 도구에서만 바꿔 끼운다
@@ -581,7 +587,7 @@ def run_host(args) -> None:
     local = out_dir / f"{name}.jsonl"
     meta = {"meta": True, "started": started.isoformat(timespec="minutes"), "repeat": args.repeat,
             "group": args.group, "label": args.label, "git": _git(),
-            "mode": "first_screen" if args.first_screen else "agent"}
+            "mode": "first_screen" if args.first_screen else "agent", "action_min_prob": args.action_min_prob}
     subprocess.run(dc + ["exec", "-T", "agent", "sh", "-c", f"rm -rf {IN_BOX} && mkdir -p {IN_BOX}/bin"],
                    cwd=ROOT, check=True)
     # 도구와 평가 목록을 다른 자리·고정 이름에 둔다(목록 파일 이름이 도구와 같아도 도구를 덮어써 실행되지 않게)
@@ -594,6 +600,8 @@ def run_host(args) -> None:
         cmd += ["--group", args.group]
     if args.first_screen:
         cmd += ["--first-screen"]
+    if args.action_min_prob is not None:
+        cmd += ["--action-min-prob", str(args.action_min_prob)]
     try:
         # 조사 로그(INFO)는 줄이고 진행 줄만 보여 준다
         proc = subprocess.Popen(dc + ["exec", "-T", "-w", "/app", "agent", *cmd], cwd=ROOT,
@@ -641,6 +649,8 @@ def main() -> None:
     r.add_argument("--set", default="data/eval_set.csv")
     r.add_argument("--first-screen", action="store_true",
                    help="비교 실험: 첫 화면만 보고 판단(누르지 않음, 하위 조사 없음). 기획서 3.3 '첫 화면만 보는 방식'")
+    r.add_argument("--action-min-prob", type=float, default=None,
+                   help="비교 실험: 다음 행동 확신 문턱(기본은 설정값 0.45). 낮추면 확신이 낮은 클릭도 한다")
     r.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
     r.add_argument("--out", help=argparse.SUPPRESS)
     p = sub.add_parser("report")
