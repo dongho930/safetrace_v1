@@ -45,7 +45,7 @@ from ..netguard import BlockedURL, parse_url
 from ..preview import preview_image
 from ..ratelimit import FailureLimiter
 from ..signer.client import ChainAdmin, SignerError
-from ..store import TERMINAL, AuditLog, Case, CaseLink, CasePhase, CaseSite, FeedItem, Store, Verdict
+from ..store import LEGACY_ROLES, TERMINAL, AuditLog, Case, CaseLink, CasePhase, CaseSite, FeedItem, Store, Verdict
 from ..store import now as now_utc
 
 log = logging.getLogger("safetrace.api")
@@ -940,10 +940,13 @@ def case_links(case_id: str, p: Annotated[Principal, Depends(need("viewer"))]):
     c = _get_case(case_id)
     parent = store.parents_for([c.id]).get(c.id)
     kids = store.children_of(c.id, limit=LINKS_MAX)
+    # 지운 운영 정보·키트 지문의 예전 연결 줄(contact·kit)은 다시 쓰기 전이라도 읽지 않는다: 그 줄의 threat 는 목적지를
+    # 조사한 결과가 아니라 원 사건의 판단을 복사한 것이다(Codex 1회차 F1)
+    current = CaseSite.role.not_in(LEGACY_ROLES)
     with store.session() as s:
-        keys = set(s.scalars(select(CaseSite.site).where(CaseSite.case_id == c.id)))
+        keys = set(s.scalars(select(CaseSite.site).where(CaseSite.case_id == c.id, current)))
         rows = s.execute(select(CaseSite).join(Case, Case.id == CaseSite.case_id)
-                         .where(CaseSite.site.in_(keys), CaseSite.case_id != c.id)
+                         .where(CaseSite.site.in_(keys), CaseSite.case_id != c.id, current)
                          .order_by(Case.created_at.desc()).limit(GROUP_SITES_MAX)).scalars().all() if keys else []
     shared: dict[str, dict] = {}
     others: list[str] = []
@@ -974,7 +977,8 @@ def _related_groups(min_cases: int) -> tuple[list[dict], bool]:
                                 .order_by(Case.created_at.desc()).limit(GROUP_CASES_MAX + 1)))
         truncated = len(recent) > GROUP_CASES_MAX
         recent = recent[:GROUP_CASES_MAX]
-        rows = list(s.scalars(select(CaseSite).where(CaseSite.case_id.in_(recent)).order_by(CaseSite.id)
+        rows = list(s.scalars(select(CaseSite).where(CaseSite.case_id.in_(recent), CaseSite.role.not_in(LEGACY_ROLES))
+                              .order_by(CaseSite.id)
                               .limit(GROUP_SITES_MAX + 1))) if recent else []
     if len(rows) > GROUP_SITES_MAX:
         truncated, rows = True, rows[:GROUP_SITES_MAX]
