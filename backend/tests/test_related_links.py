@@ -237,11 +237,12 @@ def test_final_url_links_only_when_it_is_the_reported_site():
 
 
 def test_big_services_and_workers_dev_do_not_join_strangers():
-    """2026-10-25: cloudflare.com·google.com·WhatsApp 처럼 위협 화면이 흔히 링크하는 대형 서비스는 하위 조사가 위협으로 봐도
-    (Cloudflare 피싱 경고 화면) 잇지 않는다. workers.dev 는 하위 도메인마다 운영자가 달라 호스트가 같을 때만 잇는다."""
+    """2026-10-25: cloudflare.com·google.com·WhatsApp 처럼 위협 화면이 흔히 링크하는 대형 서비스와 피싱 키트가 링크한 진짜
+    브랜드 사이트는 하위 조사가 위협으로 봐도(Cloudflare 피싱 경고 화면, 진짜 Wells Fargo 로그인) 잇지 않는다. workers.dev 는 하위 도메인마다 운영자가 달라 호스트가 같을 때만 잇는다."""
     th = {"threat": "phishing"}
     cands = [{"url": f"https://{h}/x", "source": "link", "sub": 1, "threat": "phishing", "final_url": f"https://{h}/y"}
-             for h in ("www.cloudflare.com", "www.google.com", "api.whatsapp.com", "wa.me", "x.blogger.com")]
+             for h in ("www.cloudflare.com", "www.google.com", "api.whatsapp.com", "wa.me", "x.blogger.com",
+                       "oam.wellsfargo.com")]  # 마지막은 피싱 키트가 링크한 진짜 은행 사이트(하위 조사 피싱 0.62, 10/21)
     assert [r["role"] for r in related.case_sites("https://p.example/", None, th, cands)] == ["start"]
     assert related.link_key("login.acct1.workers.dev") == ("login.acct1.workers.dev", True)
     assert related.link_key("www.cloudflare.com") == ("cloudflare.com", False)  # 후보 고르기·운영 정보에는 그대로

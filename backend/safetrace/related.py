@@ -203,7 +203,8 @@ def case_sites(url: str, final_url: str | None, threat: dict | None, candidates:
       키트가 봇을 보낸 진짜 브랜드 사이트(allegro.pl 등 목록 밖 브랜드)가 최종 주소가 되면 그 브랜드를 사칭한 남남이 묶인다
     - 페이지 링크는 하위 조사에서 위험하다고 확인된 것만(_risky_candidate). 조사하지 않은 링크는 위협 화면이 흔히 다는
       대형 서비스·도구 링크가 대부분이다. 경유 도메인(리다이렉트 경로)은 그대로 잇는다
-    - 대형 서비스(LINK_GENERIC_SITES)는 역할과 관계없이 잇지 않는다"""
+    - 대형 서비스(LINK_GENERIC_SITES)와 피싱 키트가 링크한 진짜 브랜드 사이트(real_brand_site, 하위 조사가 위협으로 봐도)는
+      역할과 관계없이 잇지 않는다: 서로 다른 Wells Fargo 사칭 키트가 진짜 wellsfargo.com 으로 이어진다"""
     out: list[dict] = []
     seen: set[tuple[str, str]] = set()
     main_threat = threat.get("threat") if isinstance(threat, dict) and isinstance(threat.get("threat"), str) else None
@@ -213,7 +214,8 @@ def case_sites(url: str, final_url: str | None, threat: dict | None, candidates:
     def add(u, role, th=None, blocked=False):
         host = _host(u)
         key = link_key(host or "")
-        if key is None or key[0] in LINK_GENERIC_SITES or (host, role) in seen or len(out) >= SITES_PER_CASE:
+        if (key is None or key[0] in LINK_GENERIC_SITES or real_brand_site(host or "") or (host, role) in seen
+                or len(out) >= SITES_PER_CASE):
             return
         seen.add((host, role))
         out.append({"host": host[:253], "site": key[0][:253], "role": role,
