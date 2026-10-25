@@ -233,3 +233,42 @@ def test_load_set_reads_normal_sites_list(tmp_path):
     real = Path(__file__).resolve().parents[2] / "data" / "normal_sites.csv"
     assert len(load_set(real, None)) == 168
 
+
+
+def test_hidden_reached_counts_only_main_observations():
+    """기획서 3.3 숨겨진 화면 도달: 단계형 시험 페이지의 숨긴 화면을 원래 조사가 관찰했는지(하위 조사·다른 경로는 세지 않는다)."""
+    obs = lambda url, step, text="", sub=None: {"kind": "observe", "data": {"url": url, "step": step, "text_excerpt": text,  # noqa: E731
+                                                                            **({"sub": sub} if sub else {})}}
+    assert ev.hidden_reached("http://testpages:8900/benign/", [obs("http://testpages:8900/benign/", 0)]) is None
+    got = ev.hidden_reached("http://testpages:8900/smish/", [obs("http://testpages:8900/smish/", 0),
+                                                             obs("http://testpages-alt:8900/smish/fee.html", 4)])
+    assert got == {"reached": True, "step": 4, "observed": 2}  # 다른 호스트로 넘어가도 경로로 본다
+    assert ev.hidden_reached("http://testpages:8900/gamble/", [obs("http://testpages:8900/gamble/", 0),
+                                                               obs("http://testpages:8900/gamble/deposit.html", 1, sub=1)])[
+        "reached"] is False  # 하위 조사의 관찰은 세지 않는다
+    assert ev.hidden_reached("http://testpages:8900/scam/", [obs("http://testpages:8900/scam/", 0),
+                                                             obs("http://testpages:8900/scam/", 1, "입금 계좌: 가상은행")])["reached"]
+
+
+def test_danger_screens_first_or_after_click():
+    """실사이트의 위험 화면(입력·결제·다운로드): 처음 나온 관찰 순서. 로그인 링크만 있는 화면은 위험 화면이 아니다."""
+    obs = lambda step, forb, sub=None: {"kind": "observe", "data": {"step": step, "forbidden": forb,  # noqa: E731
+                                                                   **({"sub": sub} if sub else {})}}
+    assert ev.danger_screens([obs(0, ["login:a:Log in"]), obs(1, ["input:password:비밀번호"])]) == {
+        "seen": True, "index": 1, "kinds": ["input"]}
+    assert ev.danger_screens([obs(0, ["payment:a:결제"])])["index"] == 0
+    assert ev.danger_screens([obs(0, []), obs(0, ["input:text:x"], sub=1)])["seen"] is False  # 하위 조사는 세지 않는다
+
+
+def test_report_header_names_comparison_conditions():
+    """비교 실험 결과는 머리에 조건(첫 화면만·행동 확신 문턱·User-Agent)을 적어 기본 조사 결과와 헷갈리지 않게 한다."""
+    rec = {"group": "kisa", "expected": "malicious", "url": "http://a.example/", "threat": "phishing", "repeat": 0,
+           "seconds": 3.0}
+    md = report([rec], {"started": "2026-10-25T16:00", "repeat": 1, "git": "x", "mode": "first_screen",
+                        "action_min_prob": 0.25, "user_agent": "Mozilla/5.0 (Linux; Android 10; K) `x`"})
+    head = md.splitlines()[2]
+    assert "첫 화면만" in head and "행동 확신 문턱 0.25" in head and "Android 10" in head
+    assert head.count("`") == 2  # 값 속 역따옴표는 지워 표 글꼴이 깨지지 않게
+    plain = report([rec], {"started": "2026-10-25T16:00", "repeat": 1, "git": "x", "mode": "agent",
+                           "action_min_prob": None, "user_agent": None}).splitlines()[2]
+    assert "첫 화면만" not in plain and "문턱" not in plain and "User-Agent" not in plain

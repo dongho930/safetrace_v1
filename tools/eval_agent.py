@@ -43,6 +43,47 @@ ROOT = Path(__file__).resolve().parents[1]
 MALICIOUS = {"phishing", "scam", "illegal_gambling", "malware"}
 SKIP_STATUS = {"UNREACHABLE", "BLOCKED"}
 IN_BOX = "/tmp/eval"  # 에이전트 컨테이너 안 작업 폴더
+# 단계형 시험 페이지의 '숨긴 위험 화면'(기획서 3.3 숨겨진 화면 도달): 신고 주소 경로 → 도달 표시(그 경로의 화면을 관찰했거나,
+# 같은 주소에서 누른 뒤 드러난 글자). 호스트는 보지 않는다(smish 는 다른 호스트 testpages-alt 로 넘어간다)
+HIDDEN_TARGETS: dict[str, tuple[str, str]] = {
+    "/phish/": ("path", "/phish/track.html"),        # 개인정보 입력
+    "/smish/": ("path", "/smish/fee.html"),          # 카드 입력
+    "/smish/notice.html": ("path", "/smish/app.html"),  # 앱 설치
+    "/scam/": ("text", "입금 계좌"),                   # 버튼을 눌러야 보이는 입금 계좌
+    "/gamble/": ("path", "/gamble/deposit.html"),    # 충전 입금
+    "/imgbtn/": ("path", "/imgbtn/next.html"),       # 이미지 버튼 뒤 입금 안내
+    "/imgbtn/ko.html": ("path", "/imgbtn/next.html"),
+}
+
+
+# ── 숨겨진 화면 도달(순수 함수) ─────────────────────────────────────────
+def hidden_reached(url: str, records: list[dict]) -> dict | None:
+    """단계형 시험 페이지면 숨긴 위험 화면에 닿았는지 {reached, step, observed}. 아니면 None.
+    원래 조사의 관찰 기록만 본다(하위 조사 sub 는 뺀다)."""
+    target = HIDDEN_TARGETS.get(urlsplit(url).path)
+    if target is None:
+        return None
+    kind, want = target
+    obs = [r.get("data") or {} for r in records if r.get("kind") == "observe" and "sub" not in (r.get("data") or {})]
+    for d in obs:
+        u, text = str(d.get("url") or ""), str(d.get("text_excerpt") or "")
+        if (kind == "path" and urlsplit(u).path == want) or (kind == "text" and want in text):
+            return {"reached": True, "step": d.get("step"), "observed": len(obs)}
+    return {"reached": False, "step": None, "observed": len(obs)}
+
+
+DANGER_REASONS = ("input", "payment", "download")  # 위험 화면: 입력칸·결제·다운로드 요소(agent/gate.classify_forbidden)
+
+
+def danger_screens(records: list[dict]) -> dict:
+    """원래 조사가 관찰한 화면 가운데 위험 화면(입력·결제·다운로드 요소가 있는 화면)이 있었는지와 처음 나온 단계.
+    실사이트에는 숨긴 화면의 정답이 없어서, 피해가 일어나는 화면을 관찰했는지를 이것으로 본다."""
+    obs = [r.get("data") or {} for r in records if r.get("kind") == "observe" and "sub" not in (r.get("data") or {})]
+    for i, d in enumerate(obs):
+        kinds = {str(x).split(":", 1)[0] for x in d.get("forbidden") or []}
+        if kinds & set(DANGER_REASONS):
+            return {"seen": True, "index": i, "kinds": sorted(kinds & set(DANGER_REASONS))}
+    return {"seen": False, "index": None, "kinds": []}
 
 
 # ── 채점(순수 함수) ─────────────────────────────────────────
@@ -286,7 +327,12 @@ def report(recs: list[dict], meta: dict | None = None) -> str:
     lines = ["# 에이전트 평가"]
     if meta:
         lines.append(f"\n{meta.get('started', '')} · 반복 {meta.get('repeat')} · 코드 {meta.get('git', '')}"
-                     f"{' · ' + meta['label'] if meta.get('label') else ''}")
+                     f"{' · ' + meta['label'] if meta.get('label') else ''}"
+                     f"{' · 첫 화면만(비교 실험)' if meta.get('mode') == 'first_screen' else ''}")
+        if meta.get("action_min_prob") is not None:
+            lines[-1] += f" · 행동 확신 문턱 {meta.get('action_min_prob')}"
+        if meta.get("user_agent"):
+            lines[-1] += f" · User-Agent `{str(meta['user_agent'])[:120].replace('`', '')}`"
     summ = summarize(recs)
     groups = [g for g in summ if g != "전체"] + ["전체"]
     lines += ["", "| 지표 | " + " | ".join(groups) + " |", "|---|" + "---|" * len(groups)]
@@ -311,6 +357,33 @@ def report(recs: list[dict], meta: dict | None = None) -> str:
     if hits:  # 제목은 페이지가 정해 자동으로 빼지 않는다: 사람이 확인해 진짜 사이트면 목록에 보탠다
         lines += ["", "원 사건 제목과 이름이 같은 자동 접수 대상(진짜 사이트인지 확인해 related.KIT_LINKED_REAL_SITES 에 보탤 후보): "
                   + " · ".join(f"{g} {', '.join(s)}" for g, s in hits.items())]
+    hid = [r for r in recs if isinstance(r.get("hidden"), dict)]
+    if hid:
+        got = [r for r in hid if r["hidden"].get("reached")]
+        lines += ["", "## 숨겨진 화면 도달 (단계형 시험 페이지)", "",
+                  "버튼을 눌러야 드러나는 입금·입력·설치 화면(`HIDDEN_TARGETS`)을 원래 조사가 관찰한 회차. 기획서 3.3 목표 90% 이상.", "",
+                  f"도달 {len(got)}/{len(hid)} ({_pct(len(got), len(hid))})", "",
+                  "| 시험 페이지 | 도달 | 도달한 단계 |", "|---|---|---|"]
+        by: dict[str, list[dict]] = {}
+        for r in hid:
+            by.setdefault(r["url"], []).append(r)
+        for url, rs in by.items():
+            ok = [r for r in rs if r["hidden"].get("reached")]
+            steps = sorted({r["hidden"].get("step") for r in ok if r["hidden"].get("step") is not None})
+            lines.append(f"| {urlsplit(url).path} | {len(ok)}/{len(rs)} | {', '.join(map(str, steps)) or '-'} |")
+    dg = [r for r in recs if isinstance(r.get("danger"), dict) and r.get("expected") != "benign"
+          and outcome(r["expected"], r) != "skipped"]
+    if dg:
+        lines += ["", "## 위험 화면 관찰 (입력·결제·다운로드 요소가 있는 화면, 위협 정답 회차)", "",
+                  "실사이트에는 숨긴 화면의 정답이 없어서, 피해가 일어나는 화면을 원래 조사가 관찰했는지로 본다. 첫 화면 = 관찰한 "
+                  "첫 화면에 이미 있었음, 누른 뒤 = 첫 화면에는 없고 누른 뒤에 나옴.", "",
+                  "| 그룹 | 회차 | 위험 화면 관찰 | 첫 화면 | 누른 뒤 | 없음 |", "|---|---|---|---|---|---|"]
+        for g in sorted({r["group"] for r in dg}):
+            rs = [r for r in dg if r["group"] == g]
+            seen = [r for r in rs if r["danger"].get("seen")]
+            first = sum(1 for r in seen if r["danger"].get("index") == 0)
+            lines.append(f"| {g} | {len(rs)} | {len(seen)} ({_pct(len(seen), len(rs))}) | {first} | {len(seen) - first} | "
+                         f"{len(rs) - len(seen)} |")
     sbs = sb_summary(recs)
     lines += ["", "## 외부 평판 비교 (Safe Browsing, 조사 당시)", "",
               "같은 회차에서 Safe Browsing 만 썼다면(신고 주소 또는 브라우저가 연 경유·최종 주소가 일치)과 SafeTrace 의 위협 판단을 "
@@ -421,6 +494,33 @@ def run_inside(args) -> None:
     # 평가 증거는 임시 폴더에 쓰고 버린다. 서명 서비스의 체인은 API 만 열 수 있으므로(#37) 여기서는
     # 이 프로세스 안에서 일회용 키로 서명한다(실제 증거 서명 키는 여전히 에이전트에 없다)
     s = Settings(evidence_dir=Path(IN_BOX) / "evidence", signer_url=None, evidence_hmac_key=secrets.token_hex(32))
+    decider = None
+    if args.action_min_prob is not None:
+        # 비교 실험: 다음 행동 확신 문턱(기본 settings.action_min_prob)을 바꿔 더 누르게 했을 때. 판단 서비스가 아니라 이 프로세스의
+        # 조사기가 문턱을 본다(loop.py). 안전 게이트·금지 요소는 그대로다
+        s = s.model_copy(update={"action_min_prob": float(args.action_min_prob)})
+    if args.user_agent:
+        # 비교 실험: 휴대폰에만 내용을 보여 주는 스미싱 키트가 있는지 보려고 User-Agent 만 바꾼다(화면 크기는 그대로)
+        s = s.model_copy(update={"browser_user_agent": args.user_agent[:300]})
+    if args.first_screen:
+        # 비교 실험(기획서 3.3 '첫 화면만 보는 방식'): 같은 조사기가 첫 화면(자동 이동·대기 화면 포함)을 본 뒤 누르지 않고
+        # 바로 끝내고 위협 판단은 그대로 판단 모델이 한다. 하위 조사도 하지 않는다. 평가 도구에서만 바꿔 끼운다
+        from safetrace.agent.runner import make_decider
+        from safetrace.decision.schema import ActionDecision, ActionKind
+
+        class FirstScreen:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def action(self, state):
+                return ActionDecision(choice="finish", action=ActionKind.FINISH, probabilities={"finish": 1.0},
+                                      model="first-screen", provider="ablation", latency_ms=0)
+
+            def threat(self, req):
+                return self.inner.threat(req)
+
+        s = s.model_copy(update={"candidate_max": 0})
+        decider = FirstScreen(make_decider(s))
     with open(args.out, "a", encoding="utf-8") as f:
         for rep in range(args.repeat):
             for row in rows:  # 한 URL 을 연달아 돌리지 않고 목록을 한 바퀴씩 돈다(시간대 편차 분산)
@@ -434,7 +534,7 @@ def run_inside(args) -> None:
                     if isinstance(e, dict) and e.get("type") == "status" and e.get("phase") == "related" and not t_main:
                         t_main.append(time.monotonic())
                 try:
-                    final = investigate(cid, row["url"], s, emit=on_event)
+                    final = investigate(cid, row["url"], s, emit=on_event, decider=decider)
                     th = final.get("threat") or {}
                     rec.update(status=final["status"], reason=final["reason"], threat=th.get("threat"),
                                probability=th.get("probability"), hold=th.get("hold"),
@@ -448,6 +548,11 @@ def run_inside(args) -> None:
                     kinds = [json.loads(x) for x in chain.read_text(encoding="utf-8").splitlines()]
                     fin = next((k["data"] for k in kinds if k["kind"] == "finish"), {})
                     rec["steps"] = sum(1 for k in kinds if k["kind"] == "action")
+                    rec["observed"] = sum(1 for k in kinds if k["kind"] == "observe" and "sub" not in k["data"])
+                    rec["danger"] = danger_screens(kinds)
+                    hid = hidden_reached(row["url"], kinds)
+                    if hid is not None:
+                        rec["hidden"] = hid
                     rec["blocked_destinations"] = [b["host"] for b in fin.get("blocked_destinations", [])]
                     # 조사 당시 받은 Safe Browsing 조회(원래 조사, 하위 조사의 조회는 candidate_safebrowsing)
                     sbr = next((k["data"] for k in kinds if k["kind"] == "safebrowsing"), None)
@@ -486,7 +591,9 @@ def run_host(args) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     local = out_dir / f"{name}.jsonl"
     meta = {"meta": True, "started": started.isoformat(timespec="minutes"), "repeat": args.repeat,
-            "group": args.group, "label": args.label, "git": _git()}
+            "group": args.group, "label": args.label, "git": _git(),
+            "mode": "first_screen" if args.first_screen else "agent", "action_min_prob": args.action_min_prob,
+            "user_agent": args.user_agent}
     subprocess.run(dc + ["exec", "-T", "agent", "sh", "-c", f"rm -rf {IN_BOX} && mkdir -p {IN_BOX}/bin"],
                    cwd=ROOT, check=True)
     # 도구와 평가 목록을 다른 자리·고정 이름에 둔다(목록 파일 이름이 도구와 같아도 도구를 덮어써 실행되지 않게)
@@ -497,6 +604,12 @@ def run_host(args) -> None:
            "--set", data, "--out", f"{IN_BOX}/out.jsonl"]
     if args.group:
         cmd += ["--group", args.group]
+    if args.first_screen:
+        cmd += ["--first-screen"]
+    if args.action_min_prob is not None:
+        cmd += ["--action-min-prob", str(args.action_min_prob)]
+    if args.user_agent:
+        cmd += ["--user-agent", args.user_agent]
     try:
         # 조사 로그(INFO)는 줄이고 진행 줄만 보여 준다
         proc = subprocess.Popen(dc + ["exec", "-T", "-w", "/app", "agent", *cmd], cwd=ROOT,
@@ -542,6 +655,12 @@ def main() -> None:
     r.add_argument("--group", help="testpage | normal | kisa 중 하나만")
     r.add_argument("--label", default="", help="결과 파일 이름에 붙일 메모")
     r.add_argument("--set", default="data/eval_set.csv")
+    r.add_argument("--first-screen", action="store_true",
+                   help="비교 실험: 첫 화면만 보고 판단(누르지 않음, 하위 조사 없음). 기획서 3.3 '첫 화면만 보는 방식'")
+    r.add_argument("--action-min-prob", type=float, default=None,
+                   help="비교 실험: 다음 행동 확신 문턱(기본은 설정값 0.45). 낮추면 확신이 낮은 클릭도 한다")
+    r.add_argument("--user-agent", default=None,
+                   help="비교 실험: 브라우저 User-Agent 를 이 값으로(예: 안드로이드 Chrome). 화면 크기는 그대로")
     r.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
     r.add_argument("--out", help=argparse.SUPPRESS)
     p = sub.add_parser("report")
