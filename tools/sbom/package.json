@@ -1,0 +1,8 @@
+{
+  "name": "safetrace-sbom-tools",
+  "private": true,
+  "description": "tools/make_sbom.sh 가 쓰는 SBOM 도구(npm ci --ignore-scripts 로 무결성 해시 확인)",
+  "dependencies": {
+    "@cyclonedx/cyclonedx-npm": "4.1.2"
+  }
+}
