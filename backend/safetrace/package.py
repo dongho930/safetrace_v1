@@ -69,13 +69,11 @@ _SCHEMA: dict[str, dict[str, object]] = {
     "candidate_results": {"results": [_DICT]},
     "blocked_request": {"navigation": _BOOL},
     "recording": {"t0": _NUM},
-    "intel": {"obs": _INT, "items": [_DICT], "kit": _DICT},
 }
 _ITEM = {  # 목록 안 사전의 필드
     "candidates": {"id": _STR, "text": _STR},
     "found": {"url": _STR, "host": _STR, "source": _STR, "score": _INT, "text": _STR},
     "matches": {"url": _STR, "threatType": _STR},
-    "items": {"kind": _STR, "value": _STR, "src": _STR},
     "results": {"sub": _INT, "url": _STR, "final_url": _STR, "threat": _STR, "probability": _PROB, "hold": _BOOL,
                 "status": _STR, "reason": _STR, "reputation_match": _BOOL, "reputation_unchecked": _BOOL,
                 "blocked": _BOOL, "brand_name": _BOOL, "score": _INT, "text": _STR},
@@ -148,17 +146,6 @@ def clean_records(records: list) -> tuple[list[dict], list[str]]:
     return out, bad
 
 
-def masked_intel(items: object) -> list[dict]:
-    """운영 정보 목록을 화면·요약용으로: 전화·계좌·왓츠앱 번호는 끝 4자리만(agent/intel.py mask)."""
-    from .agent.intel import mask
-
-    out = []
-    for x in items[:50] if isinstance(items, list) else []:
-        if isinstance(x, dict) and isinstance(x.get("kind"), str) and isinstance(x.get("value"), str):
-            out.append({"kind": x["kind"][:16], "value": mask(x["kind"], x["value"][:200]), "src": x.get("src")})
-    return out
-
-
 def _element_text(observe: dict | None, element: str | None) -> str | None:
     if not observe or not element:
         return None
@@ -188,9 +175,8 @@ def _exploration(records: list[dict]) -> tuple[dict, dict]:
                 blocked_other += 1
             continue
         if kind == "intel":
-            # 운영 정보(페이지에 적힌 연락처·계좌)는 요약에 가린 값으로만 둔다. 원래 값은 서명 체인(ZIP, 조사관 이상)에 있다
-            if isinstance(d.get("step"), int):
-                step_of(d["step"])["intel"] = {"seq": seq, "items": masked_intel(d.get("items")), "kit": d.get("kit")}
+            # 지운 운영 정보(2026-10-25)가 예전 체인에 남긴 기록: 페이지에 적힌 전화·계좌 원래 값이라 요약(열람자도 받는다)에
+            # 넣지 않는다. 원래 기록은 조사관 이상만 받는 ZIP 의 체인에 그대로 있다
             continue
         if kind in _STEP_KINDS and isinstance(d.get("step"), int):
             s = step_of(d["step"])

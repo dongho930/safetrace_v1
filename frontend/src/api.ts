@@ -54,58 +54,8 @@ export type CaseOut = {
   auto: boolean | null; // 자동으로 만든 연관 사건인지(PR 4b)
   children: ChildCase[] | null; // 이 사건의 후보로 만든 사건(상세에만)
   auto_skipped: { url: string; reason: string }[] | null; // 하위 조사했지만 자동 사건이 없는 후보와 이유(상세에만)
-  action: Action | null; // 현재 조치(요청함·차단 확인·삭제 확인·다시 나타남·종결)
 };
 
-// 조치 추적(모니터링 담당자): 위협 확정 뒤 기관에 요청 → 차단·삭제 확인 → 재확인에서 다시 나타남 → 종결. 판(rev)을 쌓는다
-export type ActionState = "requested" | "blocked" | "removed" | "reappeared" | "closed";
-export type Action = { rev: number; state: ActionState; agency: string | null; ref: string | null; note: string | null; actor: string; check_id: number | null; created_at: string };
-// 재확인: 신고 주소에 다시 접속해 본 결과(격리된 조사 컨테이너가 한다). 값은 조사 대상 서버가 정한 글자를 포함한다
-export type Check = { id: number; state: string; requested_by: string; requested_at: string; done_at: string | null; result: string | null; reason: string | null; http_status: number | null; final_host: string | null; title: string | null };
-const ACTION_STATES = ["requested", "blocked", "removed", "reappeared", "closed"];
-function cleanAction(x: unknown): Action | null {
-  if (!isObj(x) || typeof x.rev !== "number" || typeof x.state !== "string" || !ACTION_STATES.includes(x.state)) return null;
-  return {
-    rev: x.rev,
-    state: x.state as ActionState,
-    agency: strOr(x.agency)?.slice(0, 16) ?? null,
-    ref: strOr(x.ref)?.slice(0, 100) ?? null,
-    note: strOr(x.note)?.slice(0, 1000) ?? null,
-    actor: text(x.actor, 64),
-    check_id: typeof x.check_id === "number" ? x.check_id : null,
-    created_at: text(x.created_at, 40),
-  };
-}
-function cleanCheck(x: unknown): Check[] {
-  if (!isObj(x) || typeof x.id !== "number" || typeof x.state !== "string") return [];
-  return [{
-    id: x.id,
-    state: x.state.slice(0, 12),
-    requested_by: text(x.requested_by, 64),
-    requested_at: text(x.requested_at, 40),
-    done_at: strOr(x.done_at)?.slice(0, 40) ?? null,
-    result: strOr(x.result)?.slice(0, 16) ?? null,
-    reason: strOr(x.reason)?.slice(0, 64) ?? null,
-    http_status: typeof x.http_status === "number" ? x.http_status : null,
-    final_host: strOr(x.final_host)?.slice(0, 253) ?? null,
-    title: strOr(x.title)?.slice(0, 200) ?? null,
-  }];
-}
-export const getActions = async (id: string): Promise<{ actions: Action[]; checks: Check[]; interval: number }> => {
-  const v = await req<unknown>(`/api/cases/${encodeURIComponent(id)}/actions`);
-  const o = isObj(v) ? v : {};
-  return {
-    actions: list(o.actions).slice(0, 50).flatMap((x) => cleanAction(x) ?? []),
-    checks: list(o.checks).slice(0, 20).flatMap(cleanCheck),
-    interval: typeof o.recheck_interval_hours === "number" ? o.recheck_interval_hours : 24,
-  };
-};
-export const saveAction = async (id: string, a: { rev: number; state: ActionState; agency: string | null; ref: string; note: string }) => {
-  const v = cleanAction(await req<unknown>(`/api/cases/${encodeURIComponent(id)}/actions`, { method: "POST", body: JSON.stringify(a) }));
-  if (!v) throw new ApiError(500, "조치 형식 오류");
-  return v;
-};
-export const requestRecheck = (id: string) => req<unknown>(`/api/cases/${encodeURIComponent(id)}/recheck`, { method: "POST" });
 
 // 연관 후보로 만든 사건(부모 사건 상세의 요약)
 export type ChildCase = { id: string; url: string; candidate_url: string; status: string; threat: string | null; verdict: string | null; auto: boolean };
@@ -226,11 +176,8 @@ export const createCase = (url: string, source: string) =>
   });
 // 사건 간 연결(related-sites PR 5). 값은 조사 대상 페이지에서 온 글자라 정해진 모양만 남긴다
 export type CaseBrief = { id: string; url: string; status: string; threat: string | null; verdict: string | null };
-// 이은 열쇠의 종류: site(사이트) | contact(운영 정보: 텔레그램·계좌 등, 페이지에 적힌 값) | kit(키트 지문)
-export type LinkKind = "site" | "contact" | "kit";
-const linkKind = (v: unknown): LinkKind => (v === "contact" || v === "kit" ? v : "site");
-export type CaseLinks = { parent: CaseBrief | null; children: (CaseBrief & { auto: boolean })[]; shared: { site: string; kind: LinkKind; hosts: string[]; roles: string[]; cases: CaseBrief[] }[] };
-export type GroupSite = { site: string; kind: LinkKind; hosts: string[]; threat: string | null; blocked: boolean; cases: number; candidate: { case_id: string; host: string } | null };
+export type CaseLinks = { parent: CaseBrief | null; children: (CaseBrief & { auto: boolean })[]; shared: { site: string; hosts: string[]; roles: string[]; cases: CaseBrief[] }[] };
+export type GroupSite = { site: string; hosts: string[]; threat: string | null; blocked: boolean; cases: number; candidate: { case_id: string; host: string } | null };
 export type RelatedGroup = { key: string; cases: CaseBrief[]; sites: GroupSite[]; threat_sites: number; blocked_estimate_sites: number };
 const brief = (x: unknown): CaseBrief[] =>
   isObj(x) && typeof x.id === "string" && typeof x.url === "string" && typeof x.status === "string"
@@ -244,7 +191,7 @@ export const getLinks = async (id: string): Promise<CaseLinks> => {
     children: list(o.children).slice(0, 50).flatMap((x) => brief(x).map((b) => ({ ...b, auto: isObj(x) && x.auto === true }))),
     shared: list(o.shared)
       .slice(0, 50)
-      .flatMap((g) => (isObj(g) && typeof g.site === "string" ? [{ site: g.site.slice(0, 253), kind: linkKind(g.kind), hosts: strs(g.hosts).slice(0, 10), roles: strs(g.roles).slice(0, 5), cases: list(g.cases).slice(0, 50).flatMap(brief) }] : [])),
+      .flatMap((g) => (isObj(g) && typeof g.site === "string" ? [{ site: g.site.slice(0, 253), hosts: strs(g.hosts).slice(0, 10), roles: strs(g.roles).slice(0, 5), cases: list(g.cases).slice(0, 50).flatMap(brief) }] : [])),
   };
 };
 export const listGroups = async (): Promise<{ groups: RelatedGroup[]; truncated: boolean; ms: number }> => {
@@ -263,7 +210,6 @@ export const listGroups = async (): Promise<{ groups: RelatedGroup[]; truncated:
                 isObj(x) && typeof x.site === "string"
                   ? [{
                       site: x.site.slice(0, 253),
-                      kind: linkKind(x.kind),
                       hosts: strs(x.hosts).slice(0, 10),
                       threat: strOr(x.threat)?.slice(0, 32) ?? null,
                       blocked: x.blocked === true,
@@ -301,17 +247,15 @@ export type IocSummary = {
   byThreat: [string, number][];
   excluded: [string, number][];
   stixSkipped: number;
-  contacts: { included: boolean; verified: number; unverified: number; overLimit: number };
   limits: { cases: number; chainCases: number; indicators: number };
   ms: number;
 };
 const count = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0);
 const counts = (v: unknown): [string, number][] =>
   isObj(v) ? Object.entries(v).slice(0, 20).flatMap(([k, n]): [string, number][] => (typeof n === "number" ? [[k.slice(0, 32), count(n)]] : [])) : [];
-export const iocSummary = async (days: number, contacts: boolean): Promise<IocSummary> => {
-  const o = await req<unknown>(`/api/ioc?days=${days}&contacts=${contacts}`);
+export const iocSummary = async (days: number): Promise<IocSummary> => {
+  const o = await req<unknown>(`/api/ioc?days=${days}`);
   const v = isObj(o) ? o : {};
-  const c = isObj(v.contacts) ? v.contacts : {};
   const l = isObj(v.limits) ? v.limits : {};
   return {
     days: count(v.days),
@@ -323,13 +267,12 @@ export const iocSummary = async (days: number, contacts: boolean): Promise<IocSu
     byThreat: counts(v.by_threat),
     excluded: counts(v.excluded),
     stixSkipped: count(v.stix_skipped),
-    contacts: { included: c.included === true, verified: count(c.verified), unverified: count(c.unverified), overLimit: count(c.over_limit) },
     limits: { cases: count(l.cases), chainCases: count(l.chain_cases), indicators: count(l.indicators) },
     ms: count(v.ms),
   };
 };
-export async function downloadIoc(fmt: "csv" | "stix", days: number, contacts: boolean): Promise<void> {
-  const r = await send(`/api/ioc.${fmt}?days=${days}&contacts=${contacts}`, {});
+export async function downloadIoc(fmt: "csv" | "stix", days: number): Promise<void> {
+  const r = await send(`/api/ioc.${fmt}?days=${days}`, {});
   const name = /filename="([^"]+)"/.exec(r.headers.get("Content-Disposition") ?? "")?.[1] ?? `safetrace-ioc.${fmt === "csv" ? "csv" : "stix.json"}`;
   const url = URL.createObjectURL(await r.blob());
   const a = document.createElement("a");
@@ -579,74 +522,17 @@ export function cleanCase(v: unknown): CaseOut | null {
           .slice(0, 20)
           .flatMap((x) => (isObj(x) && typeof x.url === "string" && typeof x.reason === "string" ? [{ url: x.url.slice(0, 2000), reason: x.reason.slice(0, 32) }] : []))
       : null,
-    action: cleanAction(v.action),
   };
 }
 
-// 처리 기관 안내·요청서 초안(조사관 이상). 기관·조문은 서버의 고정 표에서, 요청서 글의 제목·주소는 조사 대상 페이지 값을
-// 서버가 한 줄로 정리한 것이다. 화면에는 글자로만 넣는다(링크로 만드는 것은 서버 고정 표의 기관 주소뿐)
-export type Agency = { id: string; name: string; phone: string; url: string; does: string; when?: string };
-export type Referral =
-  | { applicable: false; reason_ko: string; notice: string }
-  | { applicable: true; threat_ko: string; basis: "confirmed" | "ai"; draft: boolean; agency: Agency; also: Agency[]; laws: { cite: string; text: string }[]; subject: string; text: string; notice: string };
-const agency = (x: unknown): Agency[] =>
-  isObj(x) && typeof x.name === "string" && typeof x.url === "string" && /^https:\/\/[a-z0-9.-]+\/$/.test(x.url)
-    ? [{ id: text(x.id, 16), name: x.name.slice(0, 80), phone: text(x.phone, 16), url: x.url, does: text(x.does, 120), when: text(x.when, 120) }]
-    : [];
-export const getReferral = async (id: string): Promise<Referral> => {
-  const v = await req<unknown>(`/api/cases/${encodeURIComponent(id)}/referral`);
-  const o = isObj(v) ? v : {};
-  const ag = agency(o.agency)[0];
-  if (o.applicable !== true || !ag) return { applicable: false, reason_ko: text(o.reason_ko, 200), notice: text(o.notice, 400) };
-  return {
-    applicable: true,
-    threat_ko: text(o.threat_ko, 32),
-    basis: o.basis === "confirmed" ? "confirmed" : "ai",
-    draft: o.draft !== false,
-    agency: ag,
-    also: list(o.also).slice(0, 5).flatMap(agency),
-    laws: list(o.laws).slice(0, 5).flatMap((x) => (isObj(x) && typeof x.cite === "string" ? [{ cite: x.cite.slice(0, 120), text: text(x.text, 300) }] : [])),
-    subject: text(o.subject, 300),
-    text: text(o.text, 8000),
-    notice: text(o.notice, 400),
-  };
-};
-
-// 운영 정보(조사관 이상): 화면에 적힌 운영 연락처·입금 계좌·입력값을 보내는 곳과 키트 지문, 같은 열쇠가 나온 다른 사건.
-// 값은 조사 대상 페이지가 적은 글자다(확인 안 됨). 화면에는 글자로만 넣는다
-export type IntelItem = { kind: string; value: string; src: string | null; step: number | null; others: CaseBrief[] };
-export type KitPrint = { kind: "dom" | "res"; hash: string; host: string; step: number | null; others: CaseBrief[] };
-export type CaseIntel = { items: IntelItem[]; kits: KitPrint[] };
-export const getIntel = async (id: string): Promise<CaseIntel> => {
-  const v = await req<unknown>(`/api/cases/${encodeURIComponent(id)}/intel`);
-  const o = isObj(v) ? v : {};
-  const step = (x: unknown) => (typeof x === "number" && Number.isInteger(x) && x >= 0 ? x : null);
-  return {
-    items: list(o.items)
-      .slice(0, 50)
-      .flatMap((x): IntelItem[] =>
-        isObj(x) && typeof x.kind === "string" && typeof x.value === "string"
-          ? [{ kind: x.kind.slice(0, 16), value: x.value.slice(0, 200), src: strOr(x.src)?.slice(0, 8) ?? null, step: step(x.step), others: list(x.others).slice(0, 50).flatMap(brief) }]
-          : [],
-      ),
-    kits: list(o.kits)
-      .slice(0, 20)
-      .flatMap((x): KitPrint[] =>
-        isObj(x) && (x.kind === "dom" || x.kind === "res") && typeof x.hash === "string" && /^[0-9a-f]{32}$/.test(x.hash)
-          ? [{ kind: x.kind, hash: x.hash, host: text(x.host, 253), step: step(x.step), others: list(x.others).slice(0, 50).flatMap(brief) }]
-          : [],
-      ),
-  };
-};
-
-// 현황판(열람자 이상): 기간 안 사건의 접수·처리·판정·조치 수. 서버가 센 값이지만 모양을 다시 맞춘다
+// 현황판(열람자 이상): 기간 안 사건의 접수·처리·판정 수. 서버가 센 값이지만 모양을 다시 맞춘다
 export type Pair = [string, number];
 export type Stats = {
   days: number;
   cases: number;
   truncated: boolean;
   ms: number;
-  kpi: { received: number; finished: number; pending: number; other: number; aiThreat: number; confirmed: number; waiting: number; reappeared: number };
+  kpi: { received: number; finished: number; pending: number; other: number; aiThreat: number; confirmed: number; waiting: number };
   daily: { date: string; received: number; aiThreat: number; confirmed: number }[];
   ai: Pair[];
   decisions: Pair[];
@@ -656,7 +542,6 @@ export type Stats = {
   brands: Pair[];
   hosting: Pair[];
   tlds: Pair[];
-  actions: Pair[];
   timing: { toMainS: { n: number; median: number | null; p90: number | null }; toVerdictH: { n: number; median: number | null; p90: number | null }; waitingH: { n: number; median: number | null; max: number | null } };
   agreement: { pairs: number; sameClass: number; bothThreat: number; sameType: number; aiThreatReviewerBenign: number; aiBenignReviewerThreat: number };
   related: { auto: number; manual: number; autoAiThreat: number; autoConfirmed: number };
@@ -683,7 +568,7 @@ export const getStats = async (days: number): Promise<Stats> => {
     cases: statN(v.cases),
     truncated: v.truncated === true,
     ms: statN(v.ms),
-    kpi: { received: statN(k.received), finished: statN(k.finished), pending: statN(k.pending), other: statN(k.other), aiThreat: statN(k.ai_threat), confirmed: statN(k.confirmed), waiting: statN(k.waiting), reappeared: statN(k.reappeared) },
+    kpi: { received: statN(k.received), finished: statN(k.finished), pending: statN(k.pending), other: statN(k.other), aiThreat: statN(k.ai_threat), confirmed: statN(k.confirmed), waiting: statN(k.waiting) },
     daily: list(v.daily)
       .slice(0, 100)
       .flatMap((x) => {
@@ -698,7 +583,6 @@ export const getStats = async (days: number): Promise<Stats> => {
     brands: statPairs(v.brands),
     hosting: statPairs(v.hosting),
     tlds: statPairs(v.tlds),
-    actions: statDict(v.actions),
     timing: { toMainS: timing(t.to_main_s), toVerdictH: timing(t.to_verdict_h), waitingH: timing(t.waiting_h) },
     agreement: { pairs: statN(a.pairs), sameClass: statN(a.same_class), bothThreat: statN(a.both_threat), sameType: statN(a.same_type), aiThreatReviewerBenign: statN(a.ai_threat_reviewer_benign), aiBenignReviewerThreat: statN(a.ai_benign_reviewer_threat) },
     related: { auto: statN(r.auto), manual: statN(r.manual), autoAiThreat: statN(r.auto_ai_threat), autoConfirmed: statN(r.auto_confirmed) },

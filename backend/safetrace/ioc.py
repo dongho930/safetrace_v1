@@ -1,8 +1,7 @@
 """IOC 내보내기(분석가 업무): 담당자가 위협으로 확정한 사건의 지표를 다른 기관·차단 장비가 읽는 형식(CSV·STIX 2.1)으로.
 
 - 담당자의 **현재 판정이 위협**인 사건만 넣는다(AI 판단·보류·정상 확정은 넣지 않는다). 기간은 확정 시각 기준
-- 지표: 신고 주소·최종 주소의 URL(쿼리·조각·사용자 정보 뺌)과 호스트(도메인·IP). 운영 정보(텔레그램·입력값을 보내는 곳·
-  전화·계좌)는 따로 고를 때만, 검증한 증거 체인의 원래 조사 기록에서
+- 지표: 신고 주소·최종 주소의 URL(쿼리·조각·사용자 정보 뺌)과 호스트(도메인·IP)
 - 운영자를 가리키지 않는 곳은 뺀다: 공식 브랜드·사행사업자 도메인(피싱 키트가 봇을 진짜 사이트로 보낸다), 흔한 대형 사이트,
   사이트 빌더·서비스 홈, 내부·예약 IP. 단축 서비스·공용 호스팅 본 도메인은 호스트 지표로 내지 않는다(단축 주소 자체는
   신고 주소일 때만 URL 로)
@@ -24,26 +23,22 @@ from urllib.parse import unquote, urlsplit
 
 from .decision.brands import SHARED_HOSTING, SHORTENER_HOSTS, on_domain, site_of
 from .masking import mask_pii
-from .related import WIDGET_FORM_HOSTS, WILDCARD_DNS
+from .related import WILDCARD_DNS
 
 DAYS_MAX = 90
 CASES_MAX = 1000  # 한 번에 내보내는 사건(확정 시각 최신순)
-CHAIN_CASES_MAX = 200  # 증거 체인을 검증해 읽는 사건(운영 정보·단축 URL 목적지, 검증에 파일 해시가 들어 비싸다)
+CHAIN_CASES_MAX = 200  # 증거 체인을 검증해 읽는 사건(단축 URL 목적지, 검증에 파일 해시가 들어 비싸다)
 INDICATORS_MAX = 5000
 CASE_IDS_PER_ROW = 20
 VALUE_MAX = 2048
 
 NETWORK_TYPES = ("url", "domain", "ipv4", "ipv6")
-CONTACT_TYPES = ("telegram", "kakao", "line", "whatsapp", "discord", "phone", "account", "form")  # agent/intel.KINDS
-TYPE_KO = {"url": "URL", "domain": "도메인", "ipv4": "IPv4", "ipv6": "IPv6", "telegram": "텔레그램", "kakao": "카카오톡",
-           "line": "라인", "whatsapp": "왓츠앱", "discord": "디스코드", "phone": "휴대전화", "account": "입금 계좌",
-           "form": "입력값을 보내는 곳"}
-ROLE_KO = {"start": "신고 주소", "landing": "단축 URL 목적지", "final": "최종 주소", "contact": "페이지에 적힌 운영 정보"}
+TYPE_KO = {"url": "URL", "domain": "도메인", "ipv4": "IPv4", "ipv6": "IPv6"}
+ROLE_KO = {"start": "신고 주소", "landing": "단축 URL 목적지", "final": "최종 주소"}
 EXCLUDED_KO = {"official": "공식 브랜드·사행사업자 도메인", "generic": "흔한 대형 사이트", "service": "사이트 빌더·서비스 홈",
                "internal": "내부·예약 IP", "shortener": "단축 서비스(호스트)", "shortener_page": "단축 서비스의 안내 화면",
                "shared_root": "공용 호스팅 본 도메인", "elsewhere": "다른 사이트의 최종 주소(누른 링크일 수 있음)",
-               "unverified_destination": "단축 URL 목적지를 확인하지 못함", "widget": "입력 위젯(번역 등)",
-               "pii": "개인정보 모양", "format": "형식 오류"}
+               "unverified_destination": "단축 URL 목적지를 확인하지 못함", "pii": "개인정보 모양", "format": "형식 오류"}
 CSV_HEADER = ["유형", "값", "위협 유형", "근거", "사건 수", "사건 id", "처음 확정(UTC)", "마지막 확정(UTC)", "연관 묶음"]
 
 THREAT_KO = {"phishing": "피싱", "scam": "사기", "illegal_gambling": "불법 도박", "malware": "악성코드"}
@@ -222,47 +217,6 @@ def network_indicators(url: str | None, final_url: str | None,
     return out, excluded
 
 
-def contact_indicators(items: list[dict]) -> tuple[list[tuple[str, str, str]], set[tuple[str, str, str]]]:
-    """검증한 체인의 운영 정보(main._intel_of 의 items: kind·value)에서 (유형, 값, 근거) 목록과 뺀 것."""
-    out: list[tuple[str, str, str]] = []
-    excluded: set[tuple[str, str, str]] = set()
-    for x in items if isinstance(items, list) else []:
-        kind, value = (x.get("kind"), x.get("value")) if isinstance(x, dict) else (None, None)
-        if kind not in CONTACT_TYPES or not isinstance(value, str) or _clean_value(value) is None:
-            continue
-        if kind == "form":  # 입력값을 보내는 곳: 공식·흔한 사이트·내부 주소로 보내는 양식은 운영자의 서버가 아니다
-            try:
-                host = _ascii_host(urlsplit(value).hostname or "")
-            except ValueError:
-                host = None
-            reason = "format" if not host else _host_reason(host) or ("widget" if on_domain(host, WIDGET_FORM_HOSTS) else None)
-            if reason:
-                excluded.add((reason, "form", host or "-"))
-                continue
-            if _has_pii(value):  # 수집할 때 한 번 가렸지만 여러 번 인코딩한 값은 남을 수 있다(Codex 1회차 F3)
-                excluded.add(("pii", "form", _digest(value)))
-                continue
-        out.append((kind, value, "contact"))
-    return out, excluded
-
-
-def contact_url(kind: str, value: str) -> str | None:
-    """운영 정보를 STIX url 지표로 쓸 수 있는 주소. 표준 형식이 없는 전화·계좌·왓츠앱 번호, 카카오톡 아이디는 None(CSV 에만)."""
-    if kind == "telegram":
-        return f"https://t.me/{value}"
-    if kind == "kakao" and value.startswith("o/"):
-        return f"https://open.kakao.com/{value}"
-    if kind == "kakao" and value.startswith("_"):
-        return f"https://pf.kakao.com/{value}"
-    if kind == "line":
-        return f"https://line.me/ti/p/{value}"
-    if kind == "discord":
-        return f"https://discord.gg/{value}"
-    if kind == "form" and value.startswith(("http://", "https://")):
-        return value
-    return None
-
-
 def _utc(dt: datetime) -> datetime:
     return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
 
@@ -274,7 +228,7 @@ def stamp(dt: datetime) -> str:
 
 
 def collect(cases: list[dict]) -> tuple[list[dict], Counter, bool]:
-    """사건 {id, url, final_url, threat, at, contacts(목록 또는 None)} 목록에서 값마다 하나로 모은 지표와 뺀 이유별 수.
+    """사건 {id, url, final_url, threat, at, landing} 목록에서 값마다 하나로 모은 지표와 뺀 이유별 수.
     반환: (지표, 뺀 것, 지표 상한에서 잘랐는지). 지표: {type, value, roles, threats, cases, first, last}"""
     acc: dict[tuple[str, str], dict] = {}
     excluded: set[tuple[str, str, str]] = set()
@@ -282,9 +236,6 @@ def collect(cases: list[dict]) -> tuple[list[dict], Counter, bool]:
     for c in cases:
         found, ex = network_indicators(c["url"], c.get("final_url"), c.get("landing"))
         excluded |= ex
-        if c.get("contacts") is not None:
-            more, ex = contact_indicators(c["contacts"])
-            found, excluded = found + more, excluded | ex
         for typ, value, role in found:
             x = acc.get((typ, value))
             if x is None:
@@ -302,7 +253,7 @@ def collect(cases: list[dict]) -> tuple[list[dict], Counter, bool]:
 
 
 def indicator_groups(indicators: list[dict]) -> dict[str, str]:
-    """사건 id → 연관 묶음 열쇠: 내보내는 지표(같은 도메인·URL·운영 정보)를 함께 가진 사건끼리 잇는다. 사건 연결 표
+    """사건 id → 연관 묶음 열쇠: 내보내는 지표(같은 도메인·URL)를 함께 가진 사건끼리 잇는다. 사건 연결 표
     (case_sites)는 판정 뒤에 체인에 붙은 기록에서도 열쇠가 나와 그것으로 campaign 을 꾸밀 수 있어 쓰지 않는다(Codex 2회차 F1).
     지표는 모두 판정이 본 범위의 값이다."""
     from .related import groups
@@ -352,8 +303,7 @@ def stix_pattern(typ: str, value: str) -> str | None:
         return f"[domain-name:value = {_quote(value)}]"
     if typ in ("ipv4", "ipv6"):
         return f"[{typ}-addr:value = {_quote(value)}]"
-    u = contact_url(typ, value)
-    return f"[url:value = {_quote(u)}]" if u else None
+    return None
 
 
 def _sid(kind: str, *parts: str) -> str:
@@ -367,7 +317,7 @@ IDENTITY_ID = _sid("identity", "safetrace")
 
 
 def to_stix(indicators: list[dict], case_group: dict[str, str]) -> tuple[dict, int]:
-    """STIX 2.1 묶음(identity·indicator·campaign·relationship). 반환: (묶음, STIX 형식이 없어 뺀 운영 정보 수)."""
+    """STIX 2.1 묶음(identity·indicator·campaign·relationship). 반환: (묶음, STIX 패턴이 없어 뺀 지표 수)."""
     objects: list[dict] = [{"type": "identity", "spec_version": "2.1", "id": IDENTITY_ID, "created": _IDENTITY_AT,
                             "modified": _IDENTITY_AT, "name": "SafeTrace", "identity_class": "system"}]
     campaigns: dict[str, dict] = {}
@@ -398,7 +348,7 @@ def to_stix(indicators: list[dict], case_group: dict[str, str]) -> tuple[dict, i
                 cmp = campaigns[key] = {"type": "campaign", "spec_version": "2.1", "id": _sid("campaign", key),
                                         "created_by_ref": IDENTITY_ID, "created": first, "modified": last,
                                         "name": f"SafeTrace 연관 묶음 {key[:8]}",
-                                        "description": "같은 사이트·운영 정보·키트 지문으로 이어진, 담당자가 위협으로 확정한 사건들",
+                                        "description": "같은 지표로 이어진, 담당자가 위협으로 확정한 사건들",
                                         "first_seen": first, "last_seen": last}
             cmp["created"] = cmp["first_seen"] = min(cmp["first_seen"], first)
             cmp["modified"] = cmp["last_seen"] = max(cmp["last_seen"], last)
@@ -412,7 +362,7 @@ def to_stix(indicators: list[dict], case_group: dict[str, str]) -> tuple[dict, i
 def summary(indicators: list[dict], excluded: Counter, stix_skipped: int | None = None) -> dict:
     by_type = Counter(x["type"] for x in indicators)
     threats = Counter(t for x in indicators for t in x["threats"])
-    out = {"indicators": len(indicators), "by_type": {t: by_type[t] for t in (*NETWORK_TYPES, *CONTACT_TYPES) if by_type[t]},
+    out = {"indicators": len(indicators), "by_type": {t: by_type[t] for t in NETWORK_TYPES if by_type[t]},
            "by_threat": dict(sorted(threats.items())), "excluded": {k: excluded[k] for k in EXCLUDED_KO if excluded[k]}}
     if stix_skipped is not None:
         out["stix_skipped"] = stix_skipped

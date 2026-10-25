@@ -233,18 +233,3 @@ def test_load_set_reads_normal_sites_list(tmp_path):
     real = Path(__file__).resolve().parents[2] / "data" / "normal_sites.csv"
     assert len(load_set(real, None)) == 168
 
-
-def test_intel_summary_links_sites_like_service():
-    """평가 도구의 운영 정보·키트 묶음: 서비스와 같게 정상으로 본 회차는 잇지 않고 키트 지문은 위협 회차만."""
-    def r(site, threat, intel=(), kit=(), group="kisa", expected="illegal_gambling"):
-        return {"group": group, "expected": expected, "url": site, "threat": threat, "status": "COMPLETED", "seconds": 1,
-                "intel": list(intel), "kit": list(kit), "site": site}
-
-    recs = [r("a.com", "illegal_gambling", ["telegram:a"], ["dom:x"]), r("b.com", "illegal_gambling", kit=["dom:x"]),
-            r("c.com", "illegal_gambling", ["telegram:a"]), r("d.com", "unknown", kit=["dom:x"]),
-            r("e.com", "benign", ["telegram:a"], group="normal", expected="benign")]
-    s = ev.intel_summary(recs)
-    assert s["clusters"] == [["a.com", "b.com", "c.com"]] and s["cluster_keys"] == [["kit:dom", "telegram"]]
-    assert s["benign_clusters"] == 0 and s["groups"]["kisa"]["with_intel"] == 2
-    text = ev.report(recs)
-    assert "## 운영 정보·키트 지문" in text and "telegram:a" not in text  # 값은 보고서에 적지 않는다

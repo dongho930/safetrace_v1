@@ -16,13 +16,11 @@ import redis
 
 from ..config import get_settings
 from ..live import RedisLivePublisher
-from .recheck import check as recheck
 from .runner import investigate
 
 log = logging.getLogger("safetrace.worker")
 
 JOBS = "st:jobs"
-CHECKS = "st:checks"  # 재확인(조치 추적): 신고 주소에 다시 접속해 지금 상태만 본다(agent/recheck.py)
 EVENTS = "st:events"
 GROUP = "agents"
 _CASE_ID = re.compile(r"^[a-f0-9\-]{36}$")
@@ -56,29 +54,14 @@ def recover_interrupted(r, consumer: str, min_idle_ms: int) -> list[str]:
     return done
 
 
-def run_check(r, s, fields: dict) -> None:
-    """재확인 한 건: 결과를 API 가 만든 대기 번호(check_id)와 함께 보낸다. 실패해도 워커는 계속 돈다."""
-    case_id, url, check_id = fields.get("case_id", ""), fields.get("url", ""), fields.get("check_id", "")
-    if not _CASE_ID.match(case_id) or not check_id.isdigit() or not url.startswith(("http://", "https://")):
-        return
-    try:
-        res = recheck(url[:2048], s.egress_proxy, set(s.test_allowlist))
-    except Exception as e:  # noqa: BLE001  어떤 실패든 '오류' 결과로 돌려준다
-        log.exception("recheck failed")
-        res = {"result": "error", "reason": type(e).__name__}
-    r.xadd(EVENTS, {"case_id": case_id, "payload": json.dumps({"type": "check", "check_id": int(check_id), "result": res},
-                                                                ensure_ascii=False)}, maxlen=100000)
-
-
 def main():
     logging.basicConfig(level=logging.INFO)
     s = get_settings()
     r = redis.Redis.from_url(s.redis_url, decode_responses=True, socket_timeout=30)  # XREADGROUP block(5초)보다 길게
-    for stream in (JOBS, CHECKS):
-        try:
-            r.xgroup_create(stream, GROUP, id="0", mkstream=True)
-        except redis.ResponseError:
-            pass
+    try:
+        r.xgroup_create(JOBS, GROUP, id="0", mkstream=True)
+    except redis.ResponseError:
+        pass
     consumer = socket.gethostname()
     live = RedisLivePublisher(s.redis_url)  # 콘솔 실시간 화면(시청 중일 때만 발행)
     # 최대 조사 시간(원래 조사 + 연관 후보 하위 조사, 후보마다 브라우저를 새로 띄우는 시간 포함)보다 길게
@@ -92,13 +75,8 @@ def main():
             except redis.RedisError:
                 log.exception("recover failed")
             last_recover = time.monotonic()
-        resp = r.xreadgroup(GROUP, consumer, {JOBS: ">", CHECKS: ">"}, count=1, block=5000)
-        for stream, msgs in resp or []:
-            if stream == CHECKS:
-                for msg_id, fields in msgs:
-                    run_check(r, s, fields)
-                    r.xack(CHECKS, GROUP, msg_id)
-                continue
+        resp = r.xreadgroup(GROUP, consumer, {JOBS: ">"}, count=1, block=5000)
+        for _stream, msgs in resp or []:
             for msg_id, fields in msgs:
                 case_id, url = fields.get("case_id", ""), fields.get("url", "")
                 if not _CASE_ID.match(case_id):

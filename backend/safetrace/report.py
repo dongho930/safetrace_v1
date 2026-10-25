@@ -350,6 +350,12 @@ def render_pdf(rep: dict, evidence_dir: Path) -> bytes:
     box.setStyle(TableStyle([("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#B45309")),
                              ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FFF7ED"))]))
     out.append(box)
+    ref = rep.get("referral") or {}
+    if ref.get("applicable"):  # 이 보고서가 기관에 내는 요청 자료다: 받는 곳과 요청 사항을 맨 위에(자세한 것은 끝 절)
+        ag = ref["agency"]
+        out.append(Spacer(1, 4))
+        out.append(kv([("받는 기관", f"{ag['name']} · {ag['phone']}"),
+                       ("요청 사항", ref["ask"] + (" (초안 · 담당자 판정 전)" if ref.get("draft") else ""))]))
 
     out.append(P("1. 대상 및 조사 개요", h2))
     dur = inv.get("duration_seconds")
@@ -448,7 +454,6 @@ def render_pdf(rep: dict, evidence_dir: Path) -> bytes:
         out.append(t)
 
     n = 4 + bool(screens) + bool(rel and rel["investigated"])
-    ref = rep.get("referral") or {}
     if ref.get("applicable"):
         out.append(P(f"{n}. 처리 요청 안내" + (" (초안 · 담당자 판정 전)" if ref.get("draft") else ""), h2))
         ag = ref["agency"]
@@ -458,7 +463,9 @@ def render_pdf(rep: dict, evidence_dir: Path) -> bytes:
             ("함께 알릴 곳", P("<br/>".join(_t(f"{x['name']} · {x['phone']} · {x['url']}" + (f" — {x['when']}" if x["when"] else ""))
                                        for x in ref["also"]) or "-", base)),
             ("참고 조문", P("<br/>".join(_t(f"{x['cite']}: {x['text']}") for x in ref["laws"]), base)),
-            ("요청서 초안", "콘솔 '처리 요청' 탭 또는 report.json 의 referral.text (조문 해당 여부는 받는 기관이 판단)"),
+            ("요청 제목", ref["subject"]),
+            ("요청 사항", ref["ask"] + " (조문 해당 여부는 받는 기관이 판단)"),
+            ("기관 양식에 옮길 글", "report.json 의 referral.text (위 내용과 증거 체인 끝을 한 글로 묶은 것)"),
         ]))
         n += 1
     out.append(P(f"{n}. 증거 무결성", h2))

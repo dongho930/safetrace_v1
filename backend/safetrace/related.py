@@ -11,8 +11,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import re
 from urllib.parse import urlsplit
 
@@ -237,77 +235,6 @@ def case_sites(url: str, final_url: str | None, threat: dict | None, candidates:
     return out
 
 
-# ── 운영 정보·키트 지문으로 잇기(분석가 업무, agent/intel.py) ─────────────────────────
-# 같은 텔레그램 아이디·계좌·수집 서버·화면 구조가 나온 사건끼리 잇는다. 값은 조사 대상 페이지가 적은 것이라(남의 연락처를
-# 적어 둘 수 있다) 판단·자동 연관 사건에는 쓰지 않고 묶음을 보여 주는 데만 쓴다. case_sites 에 role contact·kit 으로 둔다
-INTEL_ROLES = ("contact", "kit")
-INTEL_PER_CASE = 24
-# 입력 양식이 보내는 곳 중 운영자를 가리키지 않는 위젯(관찰한 것만): 2026-10-22 Meta 사칭 vercel 키트 화면의 Google 번역 위젯
-WIDGET_FORM_HOSTS: tuple[str, ...] = ("translate.googleapis.com",)
-# 열쇠는 서버 비밀키 HMAC, 보이는 값은 끝 4자리만(연관 묶음·CSV 는 열람자도 본다). 키 없는 해시면 가린 값과 함께 공개된
-# 열쇠에 가운데 네 자리(1만 개)를 대입해 원래 번호를 찾을 수 있다(Codex 지적)
-_PII_KINDS = ("phone", "account", "whatsapp")
-_NO_KIT = (None, "benign", "unknown")  # 키트 지문은 위협으로 본 사건만(오류·주차·봇 확인 화면 같은 흔한 틀을 피한다)
-HASH32 = re.compile(r"[0-9a-f]{32}")
-
-
-def intel_key(kind: object, value: object, secret: bytes) -> tuple[str, str] | None:
-    """운영 정보 하나의 (이을 열쇠, 보일 값). 잇지 않으면 None. 입력값을 보내는 곳은 주소 전체(쿼리 빼고)가 같을 때만
-    잇는다: 등록 도메인으로 이으면 script.google.com·workers.dev 같은 공용 서비스로 남남끼리 묶인다. 내부 주소는 잇지 않는다."""
-    from .agent.intel import KINDS, mask
-
-    if kind not in KINDS or not isinstance(value, str) or not value:
-        return None
-    value = value[:200]
-    if kind == "form":
-        u = urlsplit(value)
-        host = (u.hostname or "").lower()
-        # 공식 브랜드·단축 서비스·흔한 대형 사이트·내부 주소(연결 열쇠가 없는 곳)와 위젯으로 보내는 양식은 잇지 않는다:
-        # 피싱 키트가 진짜 facebook.com 으로 보내는 양식을 달아 두면 남남끼리 묶인다(2026-10-22 Meta 키트에서 관찰)
-        if not host or link_key(host) is None or on_domain(host, WIDGET_FORM_HOSTS):
-            return None
-        # 열쇠는 주소 전체(쿼리 빼고)의 비밀키 HMAC, 보이는 값은 호스트만(경로에 개인정보가 들 수 있다, Codex 2회차)
-        endpoint = f"{host}{u.path or '/'}"[:200]
-        mac = hmac.new(secret, f"safetrace.intel-link/1|form|{endpoint}".encode(), hashlib.sha256).hexdigest()[:24]
-        return f"form:{host}:{mac}", host
-    if kind in _PII_KINDS:
-        mac = hmac.new(secret, f"safetrace.intel-link/1|{kind}|{value}".encode(), hashlib.sha256).hexdigest()[:24]
-        return f"{kind}:{mac}", mask(kind, value)
-    return f"{kind}:{value}", value
-
-
-def intel_rows(records: list[dict], threat: str | None, secret: bytes) -> list[dict]:
-    """검증한 체인의 원래 조사 intel 기록에서 이을 열쇠 줄(case_sites 모양). 정상으로 본 사건은 잇지 않는다."""
-    if threat == "benign":
-        return []
-    out: list[dict] = []
-    seen: set[str] = set()
-
-    def add(site: str, host: str, role: str) -> None:
-        if site not in seen and len(out) < INTEL_PER_CASE:
-            seen.add(site)
-            out.append({"host": host[:253], "site": site[:253], "role": role, "threat": threat, "blocked": False,
-                        "generic": False})
-
-    for r in records:
-        d = r.get("data") if isinstance(r, dict) else None
-        if r.get("kind") != "intel" or not isinstance(d, dict) or isinstance(d.get("sub"), int):
-            continue
-        for x in d.get("items") if isinstance(d.get("items"), list) else []:
-            k = intel_key(x.get("kind"), x.get("value"), secret) if isinstance(x, dict) else None
-            if k:
-                add(k[0], k[1], "contact")
-        kit, url = d.get("kit"), d.get("url")
-        host = (urlsplit(url).hostname or "").lower() if isinstance(url, str) else ""
-        if threat in _NO_KIT or not isinstance(kit, dict) or link_key(host) is None:
-            continue  # 공식·단축 서비스·흔한 대형 사이트 화면의 구조는 운영자를 가리키지 않는다
-        for part in ("dom", "res"):
-            h = kit.get(part)
-            if isinstance(h, str) and HASH32.fullmatch(h):
-                add(f"kit:{part}:{h}", host, "kit")
-    return out
-
-
 def groups(case_sites_rows: list[tuple[str, str, bool]], min_cases: int = 2) -> list[set[str]]:
     """(사건 id, 열쇠, 공용 호스팅) 목록을 열쇠로 이어(합집합 찾기) 사건이 min_cases 개 이상인 묶음."""
     parent: dict[str, str] = {}
@@ -333,12 +260,14 @@ def groups(case_sites_rows: list[tuple[str, str, bool]], min_cases: int = 2) -> 
 
 def backfill(store) -> int:
     """종료된 사건 전부의 연결 호스트를 다시 쓴다(여러 번 돌려도 같은 결과). 반환: 쓴 사건 수."""
-    from sqlalchemy import select
+    from sqlalchemy import delete, select
 
-    from .store import TERMINAL, Case
+    from .store import LEGACY_ROLES, TERMINAL, Case, CaseSite
 
-    with store.session() as s:
+    with store.session() as s, s.begin():
         ids = list(s.scalars(select(Case.id).where(Case.status.in_(TERMINAL))))
+        # 지운 기능(운영 정보·키트 지문, 2026-10-25)이 남긴 연결 줄: 끝나지 않은 사건 것까지 지운다
+        s.execute(delete(CaseSite).where(CaseSite.role.in_(LEGACY_ROLES)))
     for cid in ids:
         store.write_sites(cid)
     return len(ids)

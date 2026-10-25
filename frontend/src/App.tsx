@@ -18,23 +18,13 @@ import {
   createRelated,
   createUser,
   downloadGroupCsv,
-  getIntel,
-  type CaseIntel,
   getLinks,
-  getActions,
-  saveAction,
-  requestRecheck,
-  type Action,
-  type ActionState,
-  type Check,
-  getReferral,
   getStats,
   getIntake,
   setIntake,
   type Intake,
   type Pair,
   type Stats,
-  type Referral,
   listGroups,
   type CaseLinks,
   type RelatedGroup,
@@ -67,7 +57,7 @@ import {
   buildOverlay, buildPath, buildReasons, buildScreens, clip, CURSOR_IN, cursorTravel, hostOrFile, hostPath, jpegSize, liveActivity, liveClick, locateSeg, MAX_RECORDINGS, recCursor, recordingClicks, recordings, SCREEN_H,
   SCREEN_W, segStarts, type Activity, type ClickPoint, type Overlay, type Reason, type RecItem, type Screen, type Tone,
 } from "./evidence";
-import { ACTION_LABEL, ACTION_STATE_LABEL, AGENCY_LABEL, CHECK_RESULT_LABEL, INTEL_KIND, linkKeyLabel, NET_CATEGORY_LABEL, overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
+import { ACTION_LABEL, NET_CATEGORY_LABEL, overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
 
 // 조사 대상 페이지에서 온 문자열은 모두 React 기본 이스케이프로만 출력한다(raw HTML 금지).
 
@@ -152,16 +142,13 @@ const isSuspect = (c: CaseOut) => !!c.threat && !["benign", "unknown"].includes(
 // 원래 결과가 나왔고 연관 사이트를 조사하는 중인 사건은 원래 결과의 상태로 분류한다(조사 중 폴더에 넣지 않는다)
 const relatedRunning = (c: CaseOut) => c.phase === "related" && c.status === "RUNNING" && !!c.main_status;
 const asMain = (c: CaseOut): CaseOut => (relatedRunning(c) ? { ...c, status: c.main_status as string } : c);
-type FolderId = "review" | "running" | "suspect" | "decided" | "unreachable" | "tracking" | "reappeared" | "all";
+type FolderId = "review" | "running" | "suspect" | "decided" | "unreachable" | "all";
 const FOLDERS: { id: FolderId; label: string; color: string; test: (c: CaseOut) => boolean }[] = [
   { id: "review", label: "검토 필요", color: "var(--review)", test: (c) => needsReview(asMain(c)) },
   { id: "running", label: "조사 중", color: "var(--primary)", test: (c) => (c.status === "RUNNING" || c.status === "QUEUED") && !relatedRunning(c) },
   { id: "suspect", label: "위협 의심 · 판정 전", color: "var(--threat)", test: (c) => asMain(c).status === "COMPLETED" && isSuspect(c) && !c.verdict },
   { id: "decided", label: "판정 완료", color: "var(--safe)", test: (c) => c.verdict?.decision === "threat" || c.verdict?.decision === "benign" },
   { id: "unreachable", label: "접속 불가 · 차단", color: "var(--idle-line)", test: (c) => ["UNREACHABLE", "BLOCKED", "FAILED"].includes(asMain(c).status) },
-  // 조치 추적: 기관에 요청했거나 차단·삭제를 확인해 재확인 중인 사건, 재확인에서 다시 접속된 사건(다시 요청할 것)
-  { id: "tracking", label: "조치 추적", color: "var(--primary)", test: (c) => ["requested", "blocked", "removed"].includes(c.action?.state ?? "") },
-  { id: "reappeared", label: "다시 나타남", color: "var(--threat)", test: (c) => c.action?.state === "reappeared" },
   { id: "all", label: "전체", color: "var(--header)", test: () => true },
 ];
 // 담당자가 확인할 사건(검토 필요, 위협 의심인데 판정 전)은 목록에 파란 점
@@ -332,7 +319,6 @@ export default function App() {
               key={selected}
               id={selected}
               canDecide={user.kind === "user" && ROLE_RANK[user.role] >= ROLE_RANK.reviewer}
-              canAct={user.kind === "user" && ROLE_RANK[user.role] >= ROLE_RANK.investigator}
               canExport={ROLE_RANK[user.role] >= ROLE_RANK.investigator}
               onDecided={refresh}
               onOpen={setSelected}
@@ -498,20 +484,18 @@ function RoleSelect({ value, onChange, label, disabled }: { value: Role; onChang
 
 // ── IOC 내보내기(검토관 이상): 담당자가 위협으로 확정한 사건의 지표를 CSV·STIX 2.1 로 ─────────────
 const IOC_TYPE: Record<string, string> = dict({
-  url: "URL", domain: "도메인", ipv4: "IPv4", ipv6: "IPv6", telegram: "텔레그램", kakao: "카카오톡", line: "라인", whatsapp: "왓츠앱",
-  discord: "디스코드", phone: "휴대전화", account: "입금 계좌", form: "입력값을 보내는 곳",
+  url: "URL", domain: "도메인", ipv4: "IPv4", ipv6: "IPv6",
 });
 const IOC_EXCLUDED: Record<string, string> = dict({
   official: "공식 브랜드·사행사업자 도메인", generic: "흔한 대형 사이트", service: "사이트 빌더·서비스 홈", internal: "내부·예약 IP",
   shortener: "단축 서비스(호스트)", shortener_page: "단축 서비스의 안내 화면", shared_root: "공용 호스팅 본 도메인",
-  elsewhere: "다른 사이트의 최종 주소(누른 링크일 수 있음)", unverified_destination: "단축 URL 목적지를 확인하지 못함", widget: "입력 위젯(번역 등)",
+  elsewhere: "다른 사이트의 최종 주소(누른 링크일 수 있음)", unverified_destination: "단축 URL 목적지를 확인하지 못함",
   pii: "주소에 개인정보 모양", format: "형식 오류",
 });
 const IOC_DAYS = [1, 7, 30, 90];
 
 function IocDialog({ onClose }: { onClose: () => void }) {
   const [days, setDays] = useState(30);
-  const [contacts, setContacts] = useState(false);
   const [sum, setSum] = useState<IocSummary | null>(null);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState<"" | "csv" | "stix">("");
@@ -519,27 +503,26 @@ function IocDialog({ onClose }: { onClose: () => void }) {
     let live = true;
     setSum(null);
     setMsg("");
-    iocSummary(days, contacts).then(
+    iocSummary(days).then(
       (s) => live && setSum(s),
       (e: Error) => live && setMsg(e.message),
     );
     return () => {
       live = false;
     };
-  }, [days, contacts]);
+  }, [days]);
   const listed = (xs: [string, number][], label: Record<string, string>) => xs.map(([k, n]) => `${label[k] ?? k} ${n}`).join(" · ") || "없음";
   const get = async (fmt: "csv" | "stix") => {
     setBusy(fmt);
     setMsg("");
     try {
-      await downloadIoc(fmt, days, contacts);
+      await downloadIoc(fmt, days);
     } catch (e) {
       setMsg(e instanceof Error ? e.message : "내려받기 실패");
     } finally {
       setBusy("");
     }
   };
-  const c = sum?.contacts;
   return (
     <Dialog title="IOC 내보내기" onClose={onClose}>
       <p className="small" style={{ margin: 0 }}>
@@ -558,15 +541,7 @@ function IocDialog({ onClose }: { onClose: () => void }) {
             ))}
           </select>
         </label>
-        <label className="ioc-check">
-          <input type="checkbox" checked={contacts} onChange={(e) => setContacts(e.target.checked)} /> 운영 정보 포함(텔레그램·카카오톡·입력값을 보내는 곳·전화·계좌)
-        </label>
       </div>
-      {contacts && (
-        <p className="warn small" style={{ margin: 0 }}>
-          전화·계좌는 페이지에 적힌 원래 값입니다. 받는 기관과 처리 근거를 확인한 뒤 내보내세요.
-        </p>
-      )}
       {msg && (
         <p className="err" role="alert">
           {msg}
@@ -596,17 +571,6 @@ function IocDialog({ onClose }: { onClose: () => void }) {
               <th>뺀 것</th>
               <td>{listed(sum.excluded, IOC_EXCLUDED)}</td>
             </tr>
-            {c?.included && (
-              <tr>
-                <th>운영 정보</th>
-                <td>
-                  증거 체인을 검증한 {c.verified}건에서
-                  {c.unverified > 0 && ` · 검증하지 못해 뺀 ${c.unverified}건`}
-                  {c.overLimit > 0 && ` · 최신 ${sum.limits.chainCases}건만(나머지 ${c.overLimit}건 뺌)`}
-                  {sum.stixSkipped > 0 && ` · STIX 표준 형식이 없는 ${sum.stixSkipped}개(전화·계좌 등)는 CSV 에만`}
-                </td>
-              </tr>
-            )}
           </tbody>
         </table>
       ) : (
@@ -1170,7 +1134,6 @@ function EmptyWorkspace() {
 const Workspace = memo(function Workspace({
   id,
   canDecide,
-  canAct,
   canExport,
   onDecided,
   onOpen,
@@ -1179,7 +1142,6 @@ const Workspace = memo(function Workspace({
 }: {
   id: string;
   canDecide: boolean;
-  canAct: boolean;
   canExport: boolean;
   onDecided: () => void;
   onOpen: (id: string) => void;
@@ -1307,7 +1269,6 @@ const Workspace = memo(function Workspace({
               onPick={setPick}
               related={related}
               canCreate={canExport}
-              canAct={canAct}
               onOpen={onOpen}
               onChanged={() => {
                 getCase(id).then(setC).catch(() => undefined);
@@ -1801,14 +1762,13 @@ function Summary({ c, running, reasons, picked, onPick }: { c: CaseOut | null; r
 }
 const CIRCLED = [..."①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"];
 
-// ── 조사 경과 탭: 성격별 세 묶음(증거 → 연관 → 조치, 분석가가 일하는 순서). 기본은 근거 화면 ─────────────
-type TabId = "screens" | "path" | "related" | "links" | "intel" | "referral" | "actions" | "rec" | "log";
-// 증거: 이 사이트에서 본 것(화면 → 흐름 → 영상 → 원본 기록), 연관: 같은 조직(이 신고에서 찾은 사이트 → 운영자를 가리키는 값 →
-// 그 둘로 이어진 다른 사건), 조치: 요청서 → 요청 뒤 추적
+// ── 조사 경과 탭: 성격별 두 묶음(증거 → 연관, 분석가가 일하는 순서). 기본은 근거 화면 ─────────────
+// 처리 요청(받는 기관·요청 사항)은 보고서 PDF 에 들어 있다(2026-10-25 보고서로 합침)
+type TabId = "screens" | "path" | "related" | "links" | "rec" | "log";
+// 증거: 이 사이트에서 본 것(화면 → 흐름 → 영상 → 원본 기록), 연관: 같은 조직(이 신고에서 찾은 사이트 → 같은 사이트로 이어진 다른 사건)
 const TAB_GROUPS: { id: string; name: string; tabs: TabId[] }[] = [
   { id: "evidence", name: "증거", tabs: ["screens", "path", "rec", "log"] },
-  { id: "related", name: "연관", tabs: ["related", "intel", "links"] },
-  { id: "action", name: "조치", tabs: ["referral", "actions"] },
+  { id: "related", name: "연관", tabs: ["related", "links"] },
 ];
 type VerifyState = { ok: boolean; records: number; errors: string[] } | null;
 
@@ -1823,7 +1783,6 @@ function CaseTabs({
   onPick,
   related,
   canCreate,
-  canAct,
   onOpen,
   onChanged,
 }: {
@@ -1837,7 +1796,6 @@ function CaseTabs({
   onPick: (f: string) => void;
   related: boolean;
   canCreate: boolean;
-  canAct: boolean;
   onOpen: (id: string) => void;
   onChanged: () => void;
 }) {
@@ -1850,14 +1808,9 @@ function CaseTabs({
     rec: recs.length > 1 ? `조사 녹화 ${recs.length}` : "조사 녹화",
     log: `행동 기록 ${events.length}`,
     related: `연관 사이트 ${nCands}`,
-    intel: "운영 정보",
     links: "연결된 사건",
-    referral: "처리 요청",
-    actions: c?.action ? `조치 · ${ACTION_STATE_LABEL[c.action.state] ?? c.action.state}` : "조치 추적",
   };
-  // 운영 정보·처리 요청은 조사관 이상만
-  const shown = (t: TabId) => canCreate || (t !== "intel" && t !== "referral");
-  const groups = TAB_GROUPS.map((g) => ({ ...g, tabs: g.tabs.filter(shown) })).filter((g) => g.tabs.length);
+  const groups = TAB_GROUPS;
   // ←→ 는 묶음을 넘어 화면에 보이는 순서대로 옮긴다
   const tabs: [TabId, string][] = groups.flatMap((g) => g.tabs.map((t) => [t, label[t]] as [TabId, string]));
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -1919,14 +1872,6 @@ function CaseTabs({
         {tab === "screens" && <ScreensTab id={id} c={c} events={events} screens={screens} pick={pick} onPick={onPick} />}
         {tab === "path" && c && <PathTab c={c} events={events} />}
         {tab === "links" && <LinksTab id={id} onOpen={onOpen} />}
-        {tab === "intel" && canCreate && !related && <IntelTab id={id} onOpen={onOpen} />}
-        {tab === "intel" && canCreate && related && (
-          <div className="floor">
-            <p className="muted">연관 사이트 조사가 끝나면 볼 수 있습니다</p>
-          </div>
-        )}
-        {tab === "referral" && canCreate && <ReferralTab id={id} rev={c?.verdict?.rev ?? 0} related={related} />}
-        {tab === "actions" && c && <ActionsTab c={c} canAct={canAct} canRecheck={canCreate} onChanged={onChanged} />}
         {tab === "related" && c && <RelatedTab id={id} c={c} events={events} related={related} canCreate={canCreate} onOpen={onOpen} onChanged={onChanged} />}
         {tab === "rec" && (
           <div className="floor">
@@ -1946,323 +1891,6 @@ function CaseTabs({
         )}
       </div>
     </>
-  );
-}
-
-// 처리 요청: 판정 유형에 맞는 처리 기관·참고 조문과 기관 양식에 옮겨 쓸 요청서 초안(조사관 이상).
-// 확정 판정이 없으면 AI 판단 기준 초안이다. 판정이 바뀌면(rev) 다시 받는다
-function ReferralTab({ id, rev, related }: { id: string; rev: number; related: boolean }) {
-  const [r, setR] = useState<Referral | null>(null);
-  const [err, setErr] = useState("");
-  const [copied, setCopied] = useState(false);
-  useEffect(() => {
-    if (related) return;
-    let live = true;
-    setR(null);
-    setErr("");
-    getReferral(id)
-      .then((v) => live && setR(v))
-      .catch((e) => live && setErr(e instanceof Error ? e.message : "불러오지 못했습니다"));
-    return () => {
-      live = false;
-    };
-  }, [id, rev, related]);
-  if (related) return <div className="floor"><p className="muted">연관 사이트 조사가 끝나면 요청서를 만들 수 있습니다</p></div>;
-  if (err) return <div className="floor"><p className="err">{err}</p></div>;
-  if (!r) return <div className="floor"><p className="muted">불러오는 중…</p></div>;
-  if (!r.applicable) return <div className="floor"><p className="muted">{r.reason_ko || "요청 대상이 아닙니다"}</p></div>;
-  const copy = () => {
-    navigator.clipboard
-      .writeText(r.text)
-      .then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      })
-      .catch(() => setErr("복사하지 못했습니다(브라우저 권한)"));
-  };
-  const Org = ({ a, main }: { a: typeof r.agency; main?: boolean }) => (
-    <li className="ref-org">
-      <span className="ref-org-name">
-        {main && <span className="chip st-REVIEW_REQUIRED">처리 기관</span>} {a.name}
-      </span>
-      <span className="muted small">
-        {a.does}
-        {a.when ? ` · ${a.when}` : ""}
-      </span>
-      <span className="mono small">
-        ☎ {a.phone} ·{" "}
-        <a href={a.url} target="_blank" rel="noopener noreferrer">
-          {a.url}
-        </a>
-      </span>
-    </li>
-  );
-  return (
-    <div className="floor referral">
-      <p className="ref-head">
-        <strong>{r.threat_ko}</strong> · {r.basis === "confirmed" ? "담당자 판정 기준" : "AI 판단 기준 초안 — 담당자 판정 뒤 다시 확인"}
-      </p>
-      <ul className="ref-orgs">
-        <Org a={r.agency} main />
-        {r.also.map((a) => (
-          <Org key={a.id} a={a} />
-        ))}
-      </ul>
-      <h3 className="sub-h">참고 조문 (해당 여부는 받는 기관이 판단)</h3>
-      <ul className="ref-laws">
-        {r.laws.map((l) => (
-          <li key={l.cite}>
-            <strong>{l.cite}</strong> <span className="muted">{l.text}</span>
-          </li>
-        ))}
-      </ul>
-      <h3 className="sub-h">
-        요청서 초안{" "}
-        <button type="button" className="btn btn-ghost btn-sm" onClick={copy}>
-          {copied ? "복사함" : "복사"}
-        </button>
-      </h3>
-      <pre className="ref-text">{r.text}</pre>
-      <p className="muted small">{r.notice}</p>
-    </div>
-  );
-}
-
-// 운영 정보: 화면에 적힌 운영자 연락 수단·입금 계좌·입력값을 보내는 곳과 키트 지문(조사관 이상).
-// 모두 조사 대상 페이지가 적은 값이라 '확인 안 됨'이다. 같은 값이 나온 다른 사건으로 이어 준다
-function IntelTab({ id, onOpen }: { id: string; onOpen: (id: string) => void }) {
-  const [v, setV] = useState<CaseIntel | null>(null);
-  const [err, setErr] = useState("");
-  useEffect(() => {
-    let live = true;
-    getIntel(id)
-      .then((x) => live && setV(x))
-      .catch((e) => live && setErr(e instanceof Error ? e.message : "불러오지 못했습니다"));
-    return () => {
-      live = false;
-    };
-  }, [id]);
-  if (err) return <div className="floor"><p className="err">{err}</p></div>;
-  if (!v) return <div className="floor"><p className="muted">불러오는 중…</p></div>;
-  return (
-    <div className="floor intel">
-      <p className="muted small">페이지에 적힌 값이다(사실 확인 안 됨). 판단에는 쓰지 않고, 같은 값이 나온 사건을 잇는 데만 쓴다.</p>
-      <h3 className="sub-h">운영 연락처·입금 정보 {v.items.length}</h3>
-      {v.items.length === 0 ? (
-        <p className="muted">화면에서 찾은 운영 연락처가 없습니다</p>
-      ) : (
-        <ul className="rel-list">
-          {v.items.map((x) => (
-            <li key={`${x.kind}:${x.value}`} className="rel-row">
-              <span className="rel-site">
-                <span>
-                  <span className="row-badge">{INTEL_KIND[x.kind] ?? x.kind}</span>
-                  <span className="mono">{x.value}</span>
-                </span>
-                <span className="muted small">
-                  {x.step != null ? `${x.step}단계 화면` : "화면"} · {x.src === "link" ? "링크" : x.src === "form" ? "입력 양식" : "화면 글자"}
-                  {x.others.length ? ` · 같은 값 다른 사건 ${x.others.length}건` : ""}
-                </span>
-              </span>
-              <span />
-              {x.others[0] ? (
-                <button type="button" className="btn btn-ghost btn-sm" onClick={() => onOpen(x.others[0].id)}>
-                  다른 사건 보기
-                </button>
-              ) : (
-                <span />
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-      <h3 className="sub-h">키트 지문 {v.kits.length}</h3>
-      {v.kits.length === 0 ? (
-        <p className="muted">지문 없음(요소가 적은 화면·공식·단축 서비스 화면은 만들지 않습니다)</p>
-      ) : (
-        <ul className="rel-list">
-          {v.kits.map((k) => (
-            <li key={`${k.kind}:${k.hash}`} className="rel-row">
-              <span className="rel-site">
-                <span>
-                  <span className="row-badge">{k.kind === "dom" ? "화면 구조" : "빌드 파일"}</span>
-                  <span className="mono">{k.hash.slice(0, 12)}</span> · <span className="mono">{clip(k.host, 50)}</span>
-                </span>
-                <span className="muted small">{k.others.length ? `같은 지문 다른 사건 ${k.others.length}건` : "같은 지문 사건 없음"}</span>
-              </span>
-              <span />
-              {k.others[0] ? (
-                <button type="button" className="btn btn-ghost btn-sm" onClick={() => onOpen(k.others[0].id)}>
-                  다른 사건 보기
-                </button>
-              ) : (
-                <span />
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-// 조치 추적: 위협 확정 뒤 기관에 요청한 것과 그 뒤(차단·삭제 확인, 재확인에서 다시 나타남, 종결)를 판으로 쌓는다.
-// 재확인은 신고 주소에 다시 접속해 본 결과다(격리된 조사 컨테이너가 하고, 조치를 추적 중이면 정해진 간격마다 저절로)
-function ActionsTab({ c, canAct, canRecheck, onChanged }: { c: CaseOut; canAct: boolean; canRecheck: boolean; onChanged: () => void }) {
-  const [data, setData] = useState<{ actions: Action[]; checks: Check[]; interval: number } | null>(null);
-  const [err, setErr] = useState("");
-  const [msg, setMsg] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [state, setState] = useState<ActionState>("requested");
-  const [agency, setAgency] = useState("kisa");
-  const [ref, setRef] = useState("");
-  const [note, setNote] = useState("");
-  const [tick, setTick] = useState(0);
-  useEffect(() => {
-    let live = true;
-    getActions(c.id)
-      .then((v) => live && setData(v))
-      .catch((e) => live && setErr(e instanceof Error ? e.message : "불러오지 못했습니다"));
-    return () => {
-      live = false;
-    };
-  }, [c.id, tick]);
-  // 진행 중인 재확인이 있으면 끝날 때까지 2초마다 다시 받는다
-  const pending = data?.checks.some((x) => x.state === "pending") ?? false;
-  useEffect(() => {
-    if (!pending) return;
-    const t = setTimeout(() => setTick((n) => n + 1), 2000);
-    return () => clearTimeout(t);
-  }, [pending, data]);
-  if (err) return <div className="floor"><p className="err">{err}</p></div>;
-  if (!data) return <div className="floor"><p className="muted">불러오는 중…</p></div>;
-  const cur = data.actions[0] ?? null;
-  const confirmed = c.verdict?.decision === "threat";
-  const save = async () => {
-    setBusy(true);
-    setMsg("");
-    try {
-      await saveAction(c.id, { rev: cur?.rev ?? 0, state, agency: state === "requested" ? agency : null, ref, note });
-      setRef("");
-      setNote("");
-      setTick((n) => n + 1);
-      onChanged();
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : "저장하지 못했습니다");
-      setTick((n) => n + 1);
-    } finally {
-      setBusy(false);
-    }
-  };
-  const recheck = async () => {
-    setBusy(true);
-    setMsg("");
-    try {
-      await requestRecheck(c.id);
-      setTick((n) => n + 1);
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : "재확인을 요청하지 못했습니다");
-    } finally {
-      setBusy(false);
-    }
-  };
-  const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }) : "-");
-  return (
-    <div className="floor actions">
-      <p className="ref-head">
-        <strong>{cur ? ACTION_STATE_LABEL[cur.state] ?? cur.state : "조치 없음"}</strong>
-        {cur?.agency ? ` · ${AGENCY_LABEL[cur.agency] ?? cur.agency}` : ""}
-        {cur?.ref ? ` · 접수 ${cur.ref}` : ""}
-        {cur ? ` · ${cur.actor === "system:recheck" ? "재확인(시스템)" : cur.actor} · ${fmt(cur.created_at)}` : ""}
-        {cur && ["requested", "blocked", "removed", "reappeared"].includes(cur.state) ? ` · ${data.interval}시간마다 재확인` : ""}
-      </p>
-      {msg && <p className="err" role="alert">{msg}</p>}
-      {canAct && confirmed ? (
-        <div className="act-form">
-          <select className="field" value={state} onChange={(e) => setState(e.target.value as ActionState)} aria-label="조치 상태">
-            {(["requested", "blocked", "removed", "closed"] as ActionState[]).map((x) => (
-              <option key={x} value={x}>
-                {ACTION_STATE_LABEL[x]}
-              </option>
-            ))}
-          </select>
-          {state === "requested" && (
-            <select className="field" value={agency} onChange={(e) => setAgency(e.target.value)} aria-label="요청한 기관">
-              {Object.keys(AGENCY_LABEL).map((x) => (
-                <option key={x} value={x}>
-                  {AGENCY_LABEL[x]}
-                </option>
-              ))}
-            </select>
-          )}
-          <input className="field" value={ref} maxLength={100} onChange={(e) => setRef(e.target.value)} placeholder="기관 접수 번호(선택)" aria-label="기관 접수 번호" />
-          <input className="field grow" value={note} maxLength={1000} onChange={(e) => setNote(e.target.value)} placeholder="메모(선택)" aria-label="조치 메모" />
-          <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={save}>
-            기록
-          </button>
-        </div>
-      ) : (
-        <p className="muted small">{confirmed ? "조치 기록은 조사관 이상 담당자 계정만 합니다" : "담당자가 위협으로 확정한 사건에 조치를 기록합니다"}</p>
-      )}
-      <h3 className="sub-h">
-        재확인 {data.checks.length}{" "}
-        {canRecheck && (
-          <button type="button" className="btn btn-ghost btn-sm" disabled={busy || pending} onClick={recheck}>
-            {pending ? "재확인 중…" : "지금 재확인"}
-          </button>
-        )}
-      </h3>
-      {data.checks.length === 0 ? (
-        <p className="muted">재확인 기록 없음</p>
-      ) : (
-        <ul className="rel-list">
-          {data.checks.map((x) => (
-            <li key={x.id} className="rel-row">
-              <span className="rel-site">
-                <span>
-                  <span className={`chip ${x.result === "alive" ? "st-threat" : ""}`}>
-                    {x.state === "pending" ? "확인 중" : x.state === "expired" ? "응답 없음(만료)" : CHECK_RESULT_LABEL[x.result ?? ""] ?? x.result}
-                  </span>{" "}
-                  <span className="mono">{fmt(x.done_at ?? x.requested_at)}</span>
-                  {x.http_status ? <span className="mono"> · HTTP {x.http_status}</span> : null}
-                </span>
-                <span className="muted small">
-                  {x.final_host ? `${clip(x.final_host, 50)} · ` : ""}
-                  {x.title ? `「${clip(x.title, 60)}」 · ` : ""}
-                  {x.requested_by === "system:recheck" ? "정기 재확인" : `${x.requested_by} 요청`}
-                </span>
-              </span>
-              <span />
-              <span />
-            </li>
-          ))}
-        </ul>
-      )}
-      <h3 className="sub-h">조치 기록 {data.actions.length}</h3>
-      {data.actions.length === 0 ? (
-        <p className="muted">기록 없음</p>
-      ) : (
-        <ul className="rel-list">
-          {data.actions.map((a) => (
-            <li key={a.rev} className="rel-row">
-              <span className="rel-site">
-                <span>
-                  판 {a.rev} · <strong>{ACTION_STATE_LABEL[a.state] ?? a.state}</strong>
-                  {a.agency ? ` · ${AGENCY_LABEL[a.agency] ?? a.agency}` : ""}
-                  {a.ref ? ` · 접수 ${a.ref}` : ""}
-                </span>
-                <span className="muted small">
-                  {a.actor === "system:recheck" ? "재확인(시스템)" : a.actor} · {fmt(a.created_at)}
-                  {a.note ? ` · ${clip(a.note, 120)}` : ""}
-                </span>
-              </span>
-              <span />
-              <span />
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
   );
 }
 
@@ -2328,8 +1956,7 @@ function LinksTab({ id, onOpen }: { id: string; onOpen: (id: string) => void }) 
       {links.shared.map((g) => (
         <section key={g.site}>
           <h3 className="sub-h">
-            {g.kind === "contact" ? "같은 운영 정보" : g.kind === "kit" ? "같은 키트 지문" : "같은 사이트"}{" "}
-            <span className="mono">{clip(linkKeyLabel(g.site, g.kind, g.hosts), 60)}</span> · {g.cases.length}건
+            같은 사이트 <span className="mono">{clip(g.site, 60)}</span> · {g.cases.length}건
           </h3>
           <ul className="rel-list">
             {g.cases.map((b) => (
@@ -2342,7 +1969,7 @@ function LinksTab({ id, onOpen }: { id: string; onOpen: (id: string) => void }) 
   );
 }
 
-// ── 현황판(열람자 이상): 기간 안 사건의 접수·처리·판정·조치 수. 값(주소)은 없고 수·이름표만 ─────────────
+// ── 현황판(열람자 이상): 기간 안 사건의 접수·처리·판정 수. 값(주소)은 없고 수·이름표만 ─────────────
 const DASH_DAYS = [7, 30, 90];
 const DASH_DECISION_LABEL: Record<string, string> = dict({ threat: "위협 확정", benign: "정상 확정", hold: "보류", none: "판정 전" });
 const RULE_LABEL: Record<string, string> = dict({
@@ -2352,7 +1979,6 @@ const RULE_LABEL: Record<string, string> = dict({
   official_betting_domain: "공식 사행사업자 도메인",
 });
 const AI_LABEL: Record<string, string> = dict({ ...THREAT_LABEL, none: "판단 없음" });
-const ACTION_LABEL_ALL: Record<string, string> = dict({ ...ACTION_STATE_LABEL, none: "아직 요청 안 함" });
 const SERIES_THREAT = "#C62828"; // 위협으로 본 사건(콘솔의 위협 색, 검증기 통과: 파랑과 CVD ΔE 26.7)
 const SERIES_OTHER = "#2A78D6";
 const pctOf = (a: number, b: number) => (b ? `${Math.round((a / b) * 100)}%` : "-");
@@ -2426,7 +2052,6 @@ function DashboardPane() {
             <Kpi label="AI 가 위협으로 봄" value={k.aiThreat} sub={`끝난 사건의 ${pctOf(k.aiThreat, k.finished)}`} />
             <Kpi label="담당자 위협 확정" value={k.confirmed} />
             <Kpi label="판정 대기" value={k.waiting} sub={s.timing.waitingH.max != null ? `가장 오래 ${fmtHours(s.timing.waitingH.max)}` : undefined} tone={k.waiting ? "review" : undefined} />
-            <Kpi label="다시 나타남" value={k.reappeared} sub="차단·삭제 확인 뒤 다시 접속됨" tone={k.reappeared ? "threat" : undefined} />
           </div>
           <div className="dash-card">
             <h3>날짜별 접수</h3>
@@ -2513,10 +2138,6 @@ function DashboardPane() {
             <div className="dash-card">
               <h3>최상위 도메인(위협 사건)</h3>
               <BarList items={s.tlds} />
-            </div>
-            <div className="dash-card">
-              <h3>조치 상태(위협 확정 사건)</h3>
-              <BarList items={s.actions.filter(([, n]) => n > 0)} label={ACTION_LABEL_ALL} />
             </div>
             <div className="dash-card">
               <h3>연관 사건</h3>
@@ -2702,11 +2323,10 @@ function GroupsPane({ canExport, onOpenCase }: { canExport: boolean; onOpenCase:
             <li key={x.key}>
               <button type="button" className="row" aria-current={g?.key === x.key} onClick={() => setPick(x.key)}>
                 <span className="row-dot" />
-                <span className="row-host">{clip(x.sites[0] ? linkKeyLabel(x.sites[0].site, x.sites[0].kind, x.sites[0].hosts) : x.key, 50)}</span>
+                <span className="row-host">{clip(x.sites[0]?.site ?? x.key, 50)}</span>
                 <span className="row-time">{x.cases.length}건</span>
                 <span className="row-sub">
-                  위협 사이트 {x.threat_sites} · 회선 차단 추정 {x.blocked_estimate_sites} · 사이트 {x.sites.filter((s) => s.kind === "site").length}
-                  {x.sites.some((s) => s.kind !== "site") ? ` · 운영 정보·키트 ${x.sites.filter((s) => s.kind !== "site").length}` : ""}
+                  위협 사이트 {x.threat_sites} · 회선 차단 추정 {x.blocked_estimate_sites} · 사이트 {x.sites.length}
                 </span>
               </button>
             </li>
@@ -2718,7 +2338,7 @@ function GroupsPane({ canExport, onOpenCase }: { canExport: boolean; onOpenCase:
         {!g ? (
           <div className="empty">
             <h2>연관 묶음</h2>
-            <p>같은 사이트(단축 서비스·공식·흔한 대형 사이트 제외, 공용 호스팅은 호스트가 같을 때만)나 같은 운영 정보(텔레그램·계좌 등 페이지에 적힌 값)·키트 지문(화면 구조)이 나온 사건끼리 묶습니다.</p>
+            <p>같은 사이트로 이어진 사건끼리 묶습니다. 단축 서비스·공식·흔한 대형 사이트·키트가 링크한 진짜 브랜드 사이트로는 잇지 않고, 공용 호스팅은 호스트가 같을 때만, 페이지 링크는 하위 조사로 위험하다고 확인한 것만 씁니다.</p>
           </div>
         ) : (
           <div className="detail-body">
@@ -2755,20 +2375,16 @@ function GroupsPane({ canExport, onOpenCase }: { canExport: boolean; onOpenCase:
               {g.sites.map((s) => (
                 <li key={s.site} className="rel-row">
                   <span className="rel-site">
-                    <span className="mono">{clip(linkKeyLabel(s.site, s.kind, s.hosts), 60)}</span>
+                    <span className="mono">{clip(s.site, 60)}</span>
                     <span className="muted small">
                       사건 {s.cases}건 · {s.hosts.slice(0, 3).map((x) => clip(x, 40)).join(", ")}
                     </span>
                   </span>
-                  {s.kind === "site" ? (
-                    <span className={`chip ${s.threat ? "st-threat" : ""}`}>
-                      {s.threat ? `위협 의심 · ${THREAT_LABEL[s.threat] ?? s.threat}` : "판단 없음"}
-                      {s.blocked ? " · 회선 차단 추정" : ""}
-                    </span>
-                  ) : (
-                    <span className="chip">{s.kind === "contact" ? "운영 정보 · 확인 안 됨" : "키트 지문"}</span>
-                  )}
-                  {canExport && s.kind === "site" && s.threat && s.candidate ? (
+                  <span className={`chip ${s.threat ? "st-threat" : ""}`}>
+                    {s.threat ? `위협 의심 · ${THREAT_LABEL[s.threat] ?? s.threat}` : "판단 없음"}
+                    {s.blocked ? " · 회선 차단 추정" : ""}
+                  </span>
+                  {canExport && s.threat && s.candidate ? (
                     <button
                       type="button"
                       className="btn btn-ghost btn-sm"

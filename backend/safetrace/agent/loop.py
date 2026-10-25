@@ -33,7 +33,7 @@ from ..decision.schema import ActionKind, Candidate, PageState, ThreatRequest, a
 from ..evidence import EvidenceWriter
 from ..masking import mask_pii
 from ..proxy.egress import EGRESS_HEADER
-from . import intel, netfilter
+from . import netfilter
 from .candidates import TEXT_MAX, platform_link
 from .candidates import select as select_candidates
 from .gate import Budget, ElementInfo, SafetyGate, classify_forbidden
@@ -585,13 +585,6 @@ class AgentRun:
             **({"boxes": boxes} if shot and boxes else {}),
             **({"capture": "expanded"} if shot and expanded else {}),
         }, [shot] if shot else [])
-        # 운영 정보·키트 지문(분석가 업무): 관찰 기록과 따로 남긴다(원래 값이라 콘솔 열람자에게는 가려 보낸다).
-        # 판단 요청(PageState)·Jev 로는 보내지 않는다
-        items = intel.extract(raw.get("contacts"), raw.get("snips"), raw.get("forms"), page.url)
-        kit = intel.kit_fingerprint(raw.get("kit"))
-        if items or kit:
-            self._record("intel", {"step": step, "obs": seq, "url": page.url[:2048], "items": items,
-                                   **({"kit": kit} if kit else {})})
         # 같은 화면 판정: URL·버튼 글자에 '남은 선택지'까지 넣는다. 효과 없던 행동이 빠져 선택지가 줄면 다른 상태로 보고
         # (줄어들기만 하므로 끝이 있다), 페이지를 오가는 진짜 반복은 그대로 잡는다.
         opts = "|".join(sorted(action_options(state)))
