@@ -201,6 +201,19 @@ def test_report_json_and_pdf(client, case_id):
     assert json.loads(z.read("report.json"))["integrity"]["head_hash"] == rep["integrity"]["head_hash"]
 
 
+def test_report_pdf_with_many_note_lines(client, case_id, reviewer):
+    """판정 메모는 1,000자까지 줄 수 제한이 없다. 줄바꿈 500개(999자) 메모도 PDF 가 만들어져야 한다
+    (메모를 표 한 칸에 넣으면 칸이 페이지보다 높아져 LayoutError → 그 사건의 보고서를 아무도 받지 못함)."""
+    _, tok = reviewer
+    cur = client.get(f"/api/cases/{case_id}", headers=h(VIEWER)).json().get("verdict") or {}
+    note = (("x" + chr(10)) * 499) + "x"
+    r = client.post(f"/api/cases/{case_id}/verdicts", headers=h(tok),
+                    json={"rev": cur.get("rev", 0), "decision": "hold", "threat": None, "note": note})
+    assert r.status_code == 201
+    r = client.get(f"/api/cases/{case_id}/report.pdf", headers=h(INVESTIGATOR))
+    assert r.status_code == 200 and r.content.startswith(b"%PDF")
+
+
 def test_report_pdf_does_not_interpret_page_markup(tmp_path):
     """페이지 제목·버튼 글자는 공격자 값이다. reportlab 문단 마크업(<img src> 등)으로 해석되면 서버의 로컬 파일을
     PDF 에 넣을 수 있다. 글자 그대로만 들어가야 한다."""
