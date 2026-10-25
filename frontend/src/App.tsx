@@ -36,7 +36,10 @@ import {
   getCase,
   getToken,
   list,
-  listCases,
+  casePage,
+  type CasePage,
+  type FolderId,
+  PAGE_SIZE,
   listUsers,
   listVerdicts,
   login,
@@ -140,14 +143,14 @@ const isSuspect = (c: CaseOut) => !!c.threat && !["benign", "unknown"].includes(
 // 원래 결과가 나왔고 연관 사이트를 조사하는 중인 사건은 원래 결과의 상태로 분류한다(조사 중 폴더에 넣지 않는다)
 const relatedRunning = (c: CaseOut) => c.phase === "related" && c.status === "RUNNING" && !!c.main_status;
 const asMain = (c: CaseOut): CaseOut => (relatedRunning(c) ? { ...c, status: c.main_status as string } : c);
-type FolderId = "review" | "running" | "suspect" | "decided" | "unreachable" | "all";
-const FOLDERS: { id: FolderId; label: string; color: string; test: (c: CaseOut) => boolean }[] = [
-  { id: "review", label: "검토 필요", color: "var(--review)", test: (c) => needsReview(asMain(c)) },
-  { id: "running", label: "조사 중", color: "var(--primary)", test: (c) => (c.status === "RUNNING" || c.status === "QUEUED") && !relatedRunning(c) },
-  { id: "suspect", label: "위협 의심 · 판정 전", color: "var(--threat)", test: (c) => asMain(c).status === "COMPLETED" && isSuspect(c) && !c.verdict },
-  { id: "decided", label: "판정 완료", color: "var(--safe)", test: (c) => c.verdict?.decision === "threat" || c.verdict?.decision === "benign" },
-  { id: "unreachable", label: "접속 불가 · 차단", color: "var(--idle-line)", test: (c) => ["UNREACHABLE", "BLOCKED", "FAILED"].includes(asMain(c).status) },
-  { id: "all", label: "전체", color: "var(--header)", test: () => true },
+// 폴더 기준(어느 사건이 어느 폴더인지)과 건수는 서버가 전체 사건으로 계산한다(safetrace/caselist.py — 예전에 여기 있던 기준과 같다)
+const FOLDERS: { id: FolderId; label: string; color: string }[] = [
+  { id: "review", label: "검토 필요", color: "var(--review)" },
+  { id: "running", label: "조사 중", color: "var(--primary)" },
+  { id: "suspect", label: "위협 의심 · 판정 전", color: "var(--threat)" },
+  { id: "decided", label: "판정 완료", color: "var(--safe)" },
+  { id: "unreachable", label: "접속 불가 · 차단", color: "var(--idle-line)" },
+  { id: "all", label: "전체", color: "var(--header)" },
 ];
 // 담당자가 확인할 사건(검토 필요, 위협 의심인데 판정 전)은 목록에 파란 점
 const unread = (raw: CaseOut) => {
@@ -159,7 +162,8 @@ const unread = (raw: CaseOut) => {
 export default function App() {
   const [user, setUser] = useState<Me | null>(null);
   const [checking, setChecking] = useState(!!getToken());
-  const [cases, setCases] = useState<CaseOut[]>([]);
+  const [page, setPage] = useState<CasePage | null>(null);
+  const [offset, setOffset] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const [folder, setFolder] = useState<FolderId>("all");
   const [query, setQuery] = useState("");
@@ -173,7 +177,7 @@ export default function App() {
     clearToken();
     clearShotCache();
     setUser(null);
-    setCases([]);
+    setPage(null);
     setSelected(null);
     setDialog("");
     setView("cases");
@@ -188,15 +192,35 @@ export default function App() {
       .finally(() => setChecking(false));
   }, [signOut]);
 
+  // 검색어는 입력이 멈추고 0.3초 뒤에 서버로 보낸다(한 글자마다 요청하지 않게)
+  const [q, setQ] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setQ(query.trim()), 300);
+    return () => clearTimeout(t);
+  }, [query]);
+  // 폴더·검색·출처가 바뀌면 첫 쪽부터
+  useEffect(() => setOffset(0), [folder, q, source]);
+
+  // 늦게 도착한 이전 조건의 응답이 지금 목록을 덮지 않게 요청마다 번호를 붙인다
+  const seq = useRef(0);
   const refresh = useCallback(async () => {
+    const my = ++seq.current;
     try {
-      setCases(await listCases());
+      const pg = await casePage({ folder, q, source, offset });
+      if (my !== seq.current) return;
+      // 사건이 줄어 지금 쪽이 비면 마지막 쪽으로
+      if (pg.items.length === 0 && pg.offset > 0 && pg.total > 0) {
+        setOffset(Math.floor((pg.total - 1) / PAGE_SIZE) * PAGE_SIZE);
+        return;
+      }
+      setPage(pg);
       setError("");
     } catch (e) {
+      if (my !== seq.current) return;
       if (e instanceof ApiError && e.status === 401) signOut();
       setError(e instanceof Error ? e.message : "목록 조회 실패");
     }
-  }, [signOut]);
+  }, [signOut, folder, q, source, offset]);
 
   useEffect(() => {
     if (!user) return;
@@ -205,13 +229,9 @@ export default function App() {
     return () => clearInterval(t);
   }, [user, refresh]);
 
-  // 지금 폴더·검색에 맞는 목록. 이전·다음 사건과 '저장하고 다음 사건'도 이 순서를 따른다
+  // 지금 폴더·검색·출처에 맞는 목록 한 쪽(서버가 거름). 이전·다음 사건과 '저장하고 다음 사건'도 이 순서를 따른다
   const current = FOLDERS.find((f) => f.id === folder) ?? FOLDERS[FOLDERS.length - 1];
-  const q = query.trim().toLowerCase();
-  const shown = useMemo(
-    () => cases.filter((c) => current.test(c) && (!source || c.source === source) && (!q || c.url.toLowerCase().includes(q))),
-    [cases, current, q, source],
-  );
+  const shown = page?.items ?? [];
   const at = selected ? shown.findIndex((c) => c.id === selected) : -1;
   const prevId = at > 0 ? shown[at - 1].id : null;
   const nextId = at >= 0 ? (shown[at + 1]?.id ?? null) : (shown[0]?.id ?? null);
@@ -271,7 +291,7 @@ export default function App() {
       ) : (
       <div className="workspace">
         <FolderNav
-          cases={cases}
+          counts={page?.counts ?? null}
           folder={folder}
           onFolder={setFolder}
           canCreate={ROLE_RANK[user.role] >= ROLE_RANK.investigator}
@@ -284,6 +304,9 @@ export default function App() {
         <CaseList
           title={current.label}
           cases={shown}
+          total={page?.total ?? 0}
+          offset={offset}
+          onOffset={setOffset}
           selected={selected}
           error={error}
           query={query}
@@ -291,7 +314,7 @@ export default function App() {
           source={source}
           onSource={setSource}
           onSelect={setSelected}
-          monitor={<LiveMonitor cases={cases} onOpen={setSelected} onEnded={refresh} />}
+          monitor={<LiveMonitor running={page?.live ?? null} queued={page?.queued ?? null} onOpen={setSelected} onEnded={refresh} />}
         />
         <section className="detail scroll" aria-label="사건 상세">
           {selected ? (
@@ -751,14 +774,14 @@ function IntakeBox({ canToggle }: { canToggle: boolean }) {
 
 // ── 왼쪽: 접수 버튼 + 분류 폴더 ─────────────────────────
 function FolderNav({
-  cases,
+  counts,
   folder,
   onFolder,
   canCreate,
   canToggleIntake,
   onCreated,
 }: {
-  cases: CaseOut[];
+  counts: Record<FolderId, number> | null;
   folder: FolderId | null;
   onFolder: (f: FolderId) => void;
   canCreate: boolean;
@@ -785,7 +808,7 @@ function FolderNav({
         <button key={f.id} type="button" className="folder" aria-current={f.id === folder} onClick={() => onFolder(f.id)}>
           <span className="folder-mark" style={{ background: f.color }} />
           <span className="folder-label">{f.label}</span>
-          <span className="folder-n">{cases.filter(f.test).length}</span>
+          <span className="folder-n">{counts ? counts[f.id].toLocaleString("ko-KR") : ""}</span>
         </button>
       ))}
       <IntakeBox canToggle={canToggleIntake} />
@@ -802,6 +825,9 @@ function FolderNav({
 function CaseList({
   title,
   cases,
+  total,
+  offset,
+  onOffset,
   selected,
   error,
   query,
@@ -813,6 +839,9 @@ function CaseList({
 }: {
   title: string;
   cases: CaseOut[];
+  total: number;
+  offset: number;
+  onOffset: (o: number) => void;
   selected: string | null;
   error: string;
   query: string;
@@ -827,7 +856,7 @@ function CaseList({
       {monitor}
       <div className="caselist-head">
         <h2>{title}</h2>
-        <span className="muted small">{cases.length}건</span>
+        <span className="muted small">{total.toLocaleString("ko-KR")}건</span>
         <div className="spacer" />
         <label className="sr" htmlFor="case-search">
           URL 검색
@@ -871,15 +900,26 @@ function CaseList({
         ))}
         {cases.length === 0 && <li className="rows-empty">해당하는 사건이 없습니다.</li>}
       </ul>
+      {total > PAGE_SIZE && (
+        <div className="pager" role="navigation" aria-label="목록 쪽">
+          <button type="button" className="btn btn-ghost btn-sm" disabled={offset === 0} onClick={() => onOffset(Math.max(0, offset - PAGE_SIZE))}>
+            ‹ 이전
+          </button>
+          <span className="muted small">
+            {(offset + 1).toLocaleString("ko-KR")}–{Math.min(offset + cases.length, total).toLocaleString("ko-KR")} / {total.toLocaleString("ko-KR")}
+          </span>
+          <button type="button" className="btn btn-ghost btn-sm" disabled={offset + PAGE_SIZE >= total} onClick={() => onOffset(offset + PAGE_SIZE)}>
+            다음 ›
+          </button>
+        </div>
+      )}
     </section>
   );
 }
 
 // ── 실시간 화면(목록 칸 맨 위, 항상 표시): 에이전트는 한 번에 한 건을 조사한다 ─────────────
-function LiveMonitor({ cases, onOpen, onEnded }: { cases: CaseOut[]; onOpen: (id: string) => void; onEnded: () => void }) {
-  const running = cases.find((c) => c.status === "RUNNING" && !c.auto && c.source !== "feed") ?? cases.find((c) => c.status === "RUNNING");
-  // 목록은 최신순이므로 가장 오래된 대기 사건(다음 차례)은 뒤에서 찾는다
-  const queued = running ? undefined : [...cases].reverse().find((c) => c.status === "QUEUED");
+// 띄울 사건은 서버가 고른다(조사 중인 것 중 사람이 접수한 것 먼저, 없으면 가장 오래 기다린 대기 사건)
+function LiveMonitor({ running, queued, onOpen, onEnded }: { running: CaseOut | null; queued: CaseOut | null; onOpen: (id: string) => void; onEnded: () => void }) {
   return (
     <section className="monitor" aria-label="실시간 조사 화면">
       {running ? (

@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from .. import accounts, intake, ioc, package, related, report, stats, verdicts
+from .. import accounts, caselist, intake, ioc, package, related, report, stats, verdicts
 from ..accounts import ROLES, AccountError
 from ..config import get_settings
 from ..evidence import Head, Signer, VerifyResult, iter_evidence, open_evidence, verify_case
@@ -824,6 +824,40 @@ def list_cases(p: Annotated[Principal, Depends(need("viewer"))], limit: int = Qu
     ids = [c.id for c in rows]
     latest, phases, parents = verdicts.latest_for(store, ids), store.phases_for(ids), store.parents_for(ids)
     return [CaseOut.of(c, latest.get(c.id), phases.get(c.id), parents.get(c.id)) for c in rows]
+
+
+class CasePageOut(BaseModel):
+    items: list[CaseOut]
+    total: int  # 지금 폴더·검색·출처 조건에 맞는 전체 수
+    offset: int
+    limit: int
+    counts: dict[str, int]  # 폴더마다 전체 사건 수(검색·출처와 무관)
+    live: CaseOut | None  # 실시간 화면에 띄울 조사 중 사건
+    queued: CaseOut | None  # 조사 중 사건이 없을 때 다음 차례인 대기 사건
+
+
+def _case_outs(rows: list[Case]) -> list[CaseOut]:
+    ids = [c.id for c in rows]
+    latest, phases, parents = verdicts.latest_for(store, ids), store.phases_for(ids), store.parents_for(ids)
+    return [CaseOut.of(c, latest.get(c.id), phases.get(c.id), parents.get(c.id)) for c in rows]
+
+
+@app.get("/api/cases/page", response_model=CasePageOut)
+def case_page(
+    p: Annotated[Principal, Depends(need("viewer"))],
+    folder: str = Query("all", pattern="^(" + "|".join(caselist.FOLDERS) + ")$"),
+    q: str = Query("", max_length=caselist.QUERY_MAX),
+    source: str = Query("", pattern="^[a-z]{0,32}$"),
+    offset: int = Query(0, ge=0, le=caselist.OFFSET_MAX),
+    limit: int = Query(50, ge=1, le=caselist.PAGE_MAX),
+):
+    """콘솔 사건 목록: 폴더 건수는 전체 사건으로 세고, 목록은 폴더·검색·출처로 거른 한 쪽만 준다."""
+    rows, total = caselist.page(store, folder, q.strip(), source, offset, limit)
+    running, queued = caselist.live(store)
+    extra = _case_outs([x for x in (running, queued) if x is not None])
+    return CasePageOut(items=_case_outs(rows), total=total, offset=offset, limit=limit, counts=caselist.counts(store),
+                       live=extra[0] if running is not None else None,
+                       queued=extra[0] if running is None and queued is not None else None)
 
 
 @app.get("/api/cases/{case_id}", response_model=CaseOut)
