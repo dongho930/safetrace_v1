@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -73,7 +74,9 @@ class LocalOCR:
         return text[:max_len]
 
     def _read_retry(self, png: bytes) -> str:
-        """가장자리 색 여백·배율을 바꿔 다시 읽고, 평균 점수가 가장 높은 결과를 _RETRY_MIN_SCORE 이상일 때만 돌려준다."""
+        """가장자리 색 여백·배율을 바꿔 다시 읽는다. 글자를 찾은 결과가 모두 같은 글자(공백 무시)이고 평균 점수가
+        _RETRY_MIN_SCORE 이상일 때만 돌려준다. 결과끼리 다르면 어느 것이 맞는지 모르므로 못 읽은 것으로 둔다 — 점수 높은 것만
+        남기면 다른 결과의 금지 문구('결제하기')를 버려, 못 읽던 결제 이미지가 클릭 후보가 될 수 있다(Codex 지적)."""
         try:
             import cv2  # noqa: PLC0415  (rapidocr 의존성)
         except ImportError:
@@ -81,7 +84,7 @@ class LocalOCR:
         img = _decode(png)
         if img is None:
             return ""
-        best, best_score = "", 0.0
+        found: list[tuple[float, str]] = []  # (평균 점수, 글자)
         for pad, fx in _RETRY:
             v = cv2.copyMakeBorder(img, pad, pad, pad, pad, cv2.BORDER_REPLICATE)
             if fx != 1.0:
@@ -99,10 +102,11 @@ class LocalOCR:
                 except (TypeError, ValueError):
                     continue
             if words:
-                score = sum(sc for _, sc in words) / len(words)
-                if score > best_score:
-                    best, best_score = " ".join(t for t, _ in words), score
-        return best if best_score >= _RETRY_MIN_SCORE else ""
+                found.append((sum(sc for _, sc in words) / len(words), " ".join(t for t, _ in words)))
+        if not found or len({re.sub(r"\s+", "", t) for _, t in found}) > 1:
+            return ""
+        score, text = max(found)
+        return text if score >= _RETRY_MIN_SCORE else ""
 
     def read_many(self, pngs: list[bytes], max_len: int = 80, deadline: float | None = None) -> list[str]:
         """여러 이미지 버튼을 한 번에 읽는다. 결과 순서는 입력과 같다.

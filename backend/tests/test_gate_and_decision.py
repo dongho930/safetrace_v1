@@ -526,9 +526,12 @@ def test_ocr_retry_uses_only_confident_text(monkeypatch):
         return ocr
 
     monkeypatch.setattr(ocrmod, "_pad", lambda p: p)
-    # 처음 읽기는 빈 결과, 다시 읽기 세 번 중 점수가 가장 높은 것을 쓴다
-    ocr = make([[], [[None, "허후공굼", "0.52"]], [[None, "본인 확인", "0.83"]], []])
+    # 처음 읽기는 빈 결과, 다시 읽은 결과가 같은 글자(공백 무시)면 쓴다
+    ocr = make([[], [[None, "본인확인", "0.78"]], [[None, "본인 확인", "0.83"]], []])
     assert ocr.read(png) == "본인 확인"
+    # 다시 읽은 결과끼리 다르면 어느 것이 맞는지 모르므로 못 읽은 것으로 둔다
+    ocr = make([[], [[None, "허후공굼", "0.52"]], [[None, "본인 확인", "0.83"]], []])
+    assert ocr.read(png) == ""
     # 다시 읽어도 점수가 낮은 글자뿐이면 못 읽은 것으로 둔다(금지 요소로 남음)
     ocr = make([[], [[None, "허후공굼", "0.51"]], [[None, "후 해", "0.55"]], []])
     assert ocr.read(png) == ""
@@ -537,6 +540,32 @@ def test_ocr_retry_uses_only_confident_text(monkeypatch):
     ocr = make([])
     ocr._engine = lambda img: (calls.append(1) or [[None, "다음", "0.9"]], None)
     assert ocr.read(png) == "다음" and len(calls) == 1
+
+
+def test_ocr_retry_cannot_drop_forbidden_text(monkeypatch):
+    """다시 읽기 결과가 서로 다르면 점수가 가장 높은 것만 남기지 않는다: 한 번은 금지 문구('결제하기'), 한 번은 '다음'으로 읽혔으면
+    못 읽은 것으로 둬 관찰 단계가 금지 요소(unreadable_image)로 막는다(Codex 3회차 Medium — 점수 높은 '다음'만 남겨 못 읽던
+    결제 이미지가 클릭 후보가 될 수 있었다)."""
+    import io
+
+    from PIL import Image
+
+    import safetrace.agent.ocr as ocrmod
+    from safetrace.agent.gate import ElementInfo, classify_forbidden
+
+    buf = io.BytesIO()
+    Image.new("RGB", (260, 64), (26, 86, 219)).save(buf, "PNG")
+    png = buf.getvalue()
+    answers = iter([[], [[None, "결제하기", "0.80"]], [[None, "다음", "0.95"]], []])
+    ocr = ocrmod.LocalOCR.__new__(ocrmod.LocalOCR)
+    ocr.__init__()
+    ocr.available = True
+    ocr._engine = lambda img: (next(answers, []), None)
+    monkeypatch.setattr(ocrmod, "_pad", lambda p: p)
+    text = ocr.read(png)
+    # 빈 글자 = 못 읽은 이미지: 관찰 단계(loop._observe)가 unreadable_image 금지 요소로 둔다. '다음'만 남으면 금지 분류를 통과한다
+    assert text == "", text
+    assert classify_forbidden(ElementInfo(tag="a", href="http://example.test/next", text="다음")) is None
 
 
 def test_ocr_mosaic_assigns_text_to_its_own_image(monkeypatch):
