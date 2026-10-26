@@ -1,0 +1,101 @@
+group,expected,url,note,hidden
+staged,malicious,http://testpages:8900/staged_c/s001/,모바일 청첩장·부고 · 3단계 · newtab·reveal·redirect,/staged_c/s001/app.html
+staged,phishing,http://testpages:8900/staged_c/s002/,택배 재배송 · 3단계 · button·modal·age,/staged_c/s002/payment.html
+staged,phishing,http://testpages:8900/staged_c/s003/,과태료 조회 · 3단계 · delay·image·scroll,/staged_c/s003/auth.html
+staged,phishing,http://testpages:8900/staged_c/s004/,지원금 신청 · 4단계 · hop·newtab·redirect·reveal,/staged_c/s004/form.html
+staged,phishing,http://testpages:8900/staged_c/s005/,은행 보안 인증 · 4단계 · age·newtab·button·modal,/staged_c/s005/login.html
+staged,scam,http://testpages:8900/staged_c/s006/,경품 당첨 · 4단계 · age·delay·image·scroll,/staged_c/s006/ship.html
+staged,scam,http://testpages:8900/staged_c/s007/,투자 리딩 · 4단계 · image·reveal·redirect·hop,/staged_c/s007/join.html
+staged,illegal_gambling,http://testpages:8900/staged_c/s008/,카지노·토토 · 4단계 · modal·reveal·button·newtab,/staged_c/s008/charge.html
+staged,malicious,http://testpages:8900/staged_c/s009/,모바일 청첩장·부고 · 4단계 · scroll·modal·age·delay,/staged_c/s009/viewer.html
+staged,phishing,http://testpages:8900/staged_c/s010/,택배 재배송 · 4단계 · redirect·hop·image·delay,/staged_c/s010/fee.html
+staged,phishing,http://testpages:8900/staged_c/s011/,과태료 조회 · 4단계 · redirect·reveal·newtab·button,/staged_c/s011/check.html
+staged,phishing,http://testpages:8900/staged_c/s012/,지원금 신청 · 1단계 · button,/staged_c/s012/form.html
+staged,phishing,http://testpages:8900/staged_c/s013/,은행 보안 인증 · 1단계 · scroll,/staged_c/s013/signin.html
+staged,scam,http://testpages:8900/staged_c/s014/,경품 당첨 · 1단계 · hop,/staged_c/s014/ship.html
+staged,scam,http://testpages:8900/staged_c/s015/,투자 리딩 · 1단계 · newtab,/staged_c/s015/join.html
+staged,illegal_gambling,http://testpages:8900/staged_c/s016/,카지노·토토 · 1단계 · age,/staged_c/s016/cash.html
+staged,malicious,http://testpages:8900/staged_c/s017/,모바일 청첩장·부고 · 1단계 · image,/staged_c/s017/install.html
+staged,phishing,http://testpages:8900/staged_c/s018/,택배 재배송 · 1단계 · reveal,/staged_c/s018/pay.html
+staged,phishing,http://testpages:8900/staged_c/s019/,과태료 조회 · 1단계 · modal,/staged_c/s019/auth.html
+staged,phishing,http://testpages:8900/staged_c/s020/,지원금 신청 · 2단계 · image·delay,/staged_c/s020/register.html
+staged,phishing,http://testpages:8900/staged_c/s021/,은행 보안 인증 · 2단계 · redirect·reveal,/staged_c/s021/signin.html
+staged,scam,http://testpages:8900/staged_c/s022/,경품 당첨 · 2단계 · modal·button,/staged_c/s022/receive.html
+staged,scam,http://testpages:8900/staged_c/s023/,투자 리딩 · 2단계 · delay·scroll,/staged_c/s023/vip.html
+staged,illegal_gambling,http://testpages:8900/staged_c/s024/,카지노·토토 · 2단계 · redirect·hop,/staged_c/s024/cash.html
+staged,malicious,http://testpages:8900/staged_c/s025/,모바일 청첩장·부고 · 2단계 · newtab·button,/staged_c/s025/app.html
+staged,phishing,http://testpages:8900/staged_c/s026/,택배 재배송 · 2단계 · age·scroll,/staged_c/s026/pay.html
+staged,phishing,http://testpages:8900/staged_c/s027/,과태료 조회 · 2단계 · hop·image,/staged_c/s027/verify.html
+staged,phishing,http://testpages:8900/staged_c/s028/,지원금 신청 · 3단계 · newtab·reveal·button,/staged_c/s028/register.html
+staged,phishing,http://testpages:8900/staged_c/s029/,은행 보안 인증 · 3단계 · modal·age·scroll,/staged_c/s029/secure.html
+staged,scam,http://testpages:8900/staged_c/s030/,경품 당첨 · 3단계 · delay·image·hop,/staged_c/s030/ship.html
+staged,scam,http://testpages:8900/staged_c/s031/,투자 리딩 · 3단계 · redirect·newtab·reveal,/staged_c/s031/join.html
+staged,illegal_gambling,http://testpages:8900/staged_c/s032/,카지노·토토 · 3단계 · modal·button·age,/staged_c/s032/deposit.html
+staged,malicious,http://testpages:8900/staged_c/s033/,모바일 청첩장·부고 · 3단계 · scroll·image·delay,/staged_c/s033/app.html
+staged,phishing,http://testpages:8900/staged_c/s034/,택배 재배송 · 3단계 · reveal·hop·redirect,/staged_c/s034/fee.html
+staged,phishing,http://testpages:8900/staged_c/s035/,과태료 조회 · 3단계 · newtab·button·modal,/staged_c/s035/check.html
+staged,phishing,http://testpages:8900/staged_c/s036/,지원금 신청 · 4단계 · delay·scroll·image·age,/staged_c/s036/form.html
+staged,phishing,http://testpages:8900/staged_c/s037/,은행 보안 인증 · 4단계 · redirect·hop·reveal·image,/staged_c/s037/signin.html
+staged,scam,http://testpages:8900/staged_c/s038/,경품 당첨 · 4단계 · button·modal·reveal·newtab,/staged_c/s038/receive.html
+staged,scam,http://testpages:8900/staged_c/s039/,투자 리딩 · 4단계 · age·delay·modal·scroll,/staged_c/s039/vip.html
+staged,illegal_gambling,http://testpages:8900/staged_c/s040/,카지노·토토 · 4단계 · redirect·hop·image·delay,/staged_c/s040/deposit.html
+staged,malicious,http://testpages:8900/staged_c/s041/,모바일 청첩장·부고 · 4단계 · redirect·newtab·reveal·button,/staged_c/s041/install.html
+staged,phishing,http://testpages:8900/staged_c/s042/,택배 재배송 · 4단계 · modal·scroll·age·button,/staged_c/s042/payment.html
+staged,phishing,http://testpages:8900/staged_c/s043/,과태료 조회 · 4단계 · image·scroll·delay·hop,/staged_c/s043/check.html
+staged,phishing,http://testpages:8900/staged_c/s044/,지원금 신청 · 1단계 · hop,/staged_c/s044/form.html
+staged,phishing,http://testpages:8900/staged_c/s045/,은행 보안 인증 · 1단계 · newtab,/staged_c/s045/secure.html
+staged,scam,http://testpages:8900/staged_c/s046/,경품 당첨 · 1단계 · age,/staged_c/s046/deposit.html
+staged,scam,http://testpages:8900/staged_c/s047/,투자 리딩 · 1단계 · image,/staged_c/s047/invest.html
+staged,illegal_gambling,http://testpages:8900/staged_c/s048/,카지노·토토 · 1단계 · reveal,/staged_c/s048/deposit.html
+staged,malicious,http://testpages:8900/staged_c/s049/,모바일 청첩장·부고 · 1단계 · modal,/staged_c/s049/install.html
+staged,phishing,http://testpages:8900/staged_c/s050/,택배 재배송 · 1단계 · delay,/staged_c/s050/payment.html
+staged,phishing,http://testpages:8900/staged_c/s051/,과태료 조회 · 1단계 · button,/staged_c/s051/verify.html
+staged,phishing,http://testpages:8900/staged_c/s052/,지원금 신청 · 2단계 · modal·button,/staged_c/s052/register.html
+staged,phishing,http://testpages:8900/staged_c/s053/,은행 보안 인증 · 2단계 · scroll·delay,/staged_c/s053/signin.html
+staged,scam,http://testpages:8900/staged_c/s054/,경품 당첨 · 2단계 · hop·redirect,/staged_c/s054/deposit.html
+staged,scam,http://testpages:8900/staged_c/s055/,투자 리딩 · 2단계 · button·newtab,/staged_c/s055/invest.html
+staged,illegal_gambling,http://testpages:8900/staged_c/s056/,카지노·토토 · 2단계 · age·scroll,/staged_c/s056/charge.html
+staged,malicious,http://testpages:8900/staged_c/s057/,모바일 청첩장·부고 · 2단계 · hop·image,/staged_c/s057/app.html
+staged,phishing,http://testpages:8900/staged_c/s058/,택배 재배송 · 2단계 · reveal·newtab,/staged_c/s058/pay.html
+staged,phishing,http://testpages:8900/staged_c/s059/,과태료 조회 · 2단계 · modal·age,/staged_c/s059/verify.html
+staged,phishing,http://testpages:8900/staged_c/s060/,지원금 신청 · 3단계 · hop·image·delay,/staged_c/s060/form.html
+staged,phishing,http://testpages:8900/staged_c/s061/,은행 보안 인증 · 3단계 · newtab·redirect·reveal,/staged_c/s061/secure.html
+staged,scam,http://testpages:8900/staged_c/s062/,경품 당첨 · 3단계 · button·age·modal,/staged_c/s062/ship.html
+staged,scam,http://testpages:8900/staged_c/s063/,투자 리딩 · 3단계 · image·delay·scroll,/staged_c/s063/join.html
+staged,illegal_gambling,http://testpages:8900/staged_c/s064/,카지노·토토 · 3단계 · reveal·hop·redirect,/staged_c/s064/charge.html
+staged,malicious,http://testpages:8900/staged_c/s065/,모바일 청첩장·부고 · 3단계 · button·newtab·modal,/staged_c/s065/app.html
+staged,phishing,http://testpages:8900/staged_c/s066/,택배 재배송 · 3단계 · scroll·delay·age,/staged_c/s066/fee.html
+staged,phishing,http://testpages:8900/staged_c/s067/,과태료 조회 · 3단계 · image·hop·redirect,/staged_c/s067/verify.html
+staged,phishing,http://testpages:8900/staged_c/s068/,지원금 신청 · 4단계 · newtab·modal·reveal·button,/staged_c/s068/apply.html
+staged,phishing,http://testpages:8900/staged_c/s069/,은행 보안 인증 · 4단계 · scroll·delay·modal·age,/staged_c/s069/login.html
+staged,scam,http://testpages:8900/staged_c/s070/,경품 당첨 · 4단계 · delay·hop·redirect·image,/staged_c/s070/receive.html
+staged,scam,http://testpages:8900/staged_c/s071/,투자 리딩 · 4단계 · newtab·reveal·button·redirect,/staged_c/s071/join.html
+staged,illegal_gambling,http://testpages:8900/staged_c/s072/,카지노·토토 · 4단계 · button·age·scroll·modal,/staged_c/s072/deposit.html
+staged,malicious,http://testpages:8900/staged_c/s073/,모바일 청첩장·부고 · 4단계 · image·hop·scroll·delay,/staged_c/s073/install.html
+staged,phishing,http://testpages:8900/staged_c/s074/,택배 재배송 · 4단계 · hop·redirect·newtab·reveal,/staged_c/s074/pay.html
+staged,phishing,http://testpages:8900/staged_c/s075/,과태료 조회 · 4단계 · age·button·newtab·modal,/staged_c/s075/auth.html
+staged,phishing,http://testpages:8900/staged_c/s076/,지원금 신청 · 1단계 · age,/staged_c/s076/register.html
+staged,phishing,http://testpages:8900/staged_c/s077/,은행 보안 인증 · 1단계 · image,/staged_c/s077/login.html
+staged,scam,http://testpages:8900/staged_c/s078/,경품 당첨 · 1단계 · reveal,/staged_c/s078/deposit.html
+staged,scam,http://testpages:8900/staged_c/s079/,투자 리딩 · 1단계 · modal,/staged_c/s079/join.html
+staged,illegal_gambling,http://testpages:8900/staged_c/s080/,카지노·토토 · 1단계 · delay,/staged_c/s080/cash.html
+staged,malicious,http://testpages:8900/staged_c/s081/,모바일 청첩장·부고 · 1단계 · button,/staged_c/s081/app.html
+staged,phishing,http://testpages:8900/staged_c/s082/,택배 재배송 · 1단계 · button,/staged_c/s082/pay.html
+staged,phishing,http://testpages:8900/staged_c/s083/,과태료 조회 · 1단계 · scroll,/staged_c/s083/check.html
+staged,phishing,http://testpages:8900/staged_c/s084/,지원금 신청 · 2단계 · hop·redirect,/staged_c/s084/apply.html
+staged,phishing,http://testpages:8900/staged_c/s085/,은행 보안 인증 · 2단계 · newtab·button,/staged_c/s085/signin.html
+staged,scam,http://testpages:8900/staged_c/s086/,경품 당첨 · 2단계 · scroll·age,/staged_c/s086/ship.html
+staged,scam,http://testpages:8900/staged_c/s087/,투자 리딩 · 2단계 · image·hop,/staged_c/s087/invest.html
+staged,illegal_gambling,http://testpages:8900/staged_c/s088/,카지노·토토 · 2단계 · reveal·newtab,/staged_c/s088/cash.html
+staged,malicious,http://testpages:8900/staged_c/s089/,모바일 청첩장·부고 · 2단계 · age·modal,/staged_c/s089/viewer.html
+staged,phishing,http://testpages:8900/staged_c/s090/,택배 재배송 · 2단계 · image·delay,/staged_c/s090/payment.html
+staged,phishing,http://testpages:8900/staged_c/s091/,과태료 조회 · 2단계 · reveal·redirect,/staged_c/s091/auth.html
+staged,phishing,http://testpages:8900/staged_c/s092/,지원금 신청 · 3단계 · age·button·modal,/staged_c/s092/apply.html
+staged,phishing,http://testpages:8900/staged_c/s093/,은행 보안 인증 · 3단계 · delay·image·scroll,/staged_c/s093/login.html
+staged,scam,http://testpages:8900/staged_c/s094/,경품 당첨 · 3단계 · redirect·hop·reveal,/staged_c/s094/receive.html
+staged,scam,http://testpages:8900/staged_c/s095/,투자 리딩 · 3단계 · modal·newtab·button,/staged_c/s095/vip.html
+staged,illegal_gambling,http://testpages:8900/staged_c/s096/,카지노·토토 · 3단계 · scroll·delay·age,/staged_c/s096/deposit.html
+staged,malicious,http://testpages:8900/staged_c/s097/,모바일 청첩장·부고 · 3단계 · hop·redirect·image,/staged_c/s097/viewer.html
+staged,phishing,http://testpages:8900/staged_c/s098/,택배 재배송 · 3단계 · button·reveal·newtab,/staged_c/s098/payment.html
+staged,phishing,http://testpages:8900/staged_c/s099/,과태료 조회 · 3단계 · scroll·age·modal,/staged_c/s099/check.html
+staged,phishing,http://testpages:8900/staged_c/s100/,지원금 신청 · 4단계 · delay·hop·image·redirect,/staged_c/s100/apply.html

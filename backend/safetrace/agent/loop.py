@@ -1129,13 +1129,14 @@ class AgentRun:
                 self.result.status, self.result.finish_reason = "REVIEW_REQUIRED", "decision_unavailable"
                 break
             prob = decision.probabilities.get(decision.choice, 0.0)
+            need = self.s.action_min_prob_click if decision.action == ActionKind.CLICK else self.s.action_min_prob
             self._record("decision", {
                 "step": step, "choice": decision.choice, "probability": prob,
                 "probabilities": dict(sorted(decision.probabilities.items(), key=lambda kv: -kv[1])[:10]),
                 "provider": decision.provider, "model": decision.model, "latency_ms": decision.latency_ms,
                 "observe_seq": obs.evidence_seq,
             })
-            if prob < self.s.action_min_prob or decision.action == ActionKind.FINISH:
+            if prob < need or decision.action == ActionKind.FINISH:
                 if await self._wait_auto_redirect(page, obs.state, step, *observed_from):
                     # 대기 화면이 스스로 다음 곳으로 넘어갔다: 끝내지 않고 넘어간 곳(막다른 곳 포함)을 이어서 본다
                     blocked_before = observed_from[1]
@@ -1159,7 +1160,7 @@ class AgentRun:
                     self.budget.steps += 1
                     step += 1
                     continue
-            if prob < self.s.action_min_prob:
+            if prob < need:
                 # 다음 행동을 확신하지 못하면 탐색만 멈춘다. 담당자 검토 여부는 위협 판단(확신 부족 시 hold)에 맡긴다:
                 # 탐색 확신도가 낮은 것과 위협 판단이 불확실한 것은 다르다.
                 self.result.status, self.result.finish_reason = "COMPLETED", "low_confidence_action"

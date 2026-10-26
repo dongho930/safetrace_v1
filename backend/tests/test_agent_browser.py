@@ -1116,8 +1116,8 @@ def test_boxes_skip_duplicated_marker(tmp_path):
 class _Picker:
     """시험용 판단기: 고를 수 있는 선택지(action_options)만 보고 정해진 순서로 고른다."""
 
-    def __init__(self, prefer):
-        self.prefer, self.seen = prefer, []
+    def __init__(self, prefer, prob: float = 0.9):
+        self.prefer, self.seen, self.prob = prefer, [], prob
 
     def action(self, state):
         from safetrace.decision.schema import ActionDecision, action_options, parse_action_key
@@ -1126,7 +1126,7 @@ class _Picker:
         self.seen.append((state.url, state.can_scroll, sorted(opts)))
         choice = next((k for k in self.prefer(state, opts) if k in opts), "finish")
         kind, _ = parse_action_key(choice, state)
-        return ActionDecision(choice=choice, probabilities={choice: 0.9}, model="t", provider="t", latency_ms=0,
+        return ActionDecision(choice=choice, probabilities={choice: self.prob}, model="t", provider="t", latency_ms=0,
                               action=kind, element_id=choice.removeprefix("click_") if choice.startswith("click_") else None)
 
     def threat(self, req):
@@ -1195,6 +1195,23 @@ def test_follows_page_that_moves_instead_of_going_back(settings, testpages):
     assert "/phish/track.html" in paths, paths
     assert not any(r["data"].get("action") == "back" for r in chain if r["kind"] == "action"), paths
     assert final["reason"] != "loop_detected", final
+
+
+def test_click_needs_lower_confidence_than_other_actions(settings, testpages):
+    """1순위가 클릭이면 action_min_prob_click(0.35)부터 누르고, 그보다 낮으면 멈춘다. 클릭이 아닌 행동은 action_min_prob(0.45)."""
+    def go(prob, prefer):
+        cid = str(uuid.uuid4())
+        final = investigate(cid, f"{BASE}/phish/late-start.html", settings, lambda e: None, decider=_Picker(prefer, prob))
+        chain = [json.loads(x) for x in (settings.evidence_dir / cid / "chain.jsonl").read_text(encoding="utf-8").splitlines()]
+        return final, [urlsplit(r["data"]["url"]).path for r in chain if r["kind"] == "observe"]
+
+    final, paths = go(0.38, lambda st, o: _click_text(st, "배송 조회") or _click_text(st, "재배송 신청") or ["finish"])
+    assert "/phish/late-button.html" in paths, (final, paths)
+    final, paths = go(0.30, lambda st, o: _click_text(st, "배송 조회") or ["finish"])
+    assert paths == ["/phish/late-start.html"] and final["reason"] == "low_confidence_action", (final, paths)
+    # 0.40 클릭은 누르고, 다음 화면의 0.40 '뒤로'는 실행하지 않고 멈춘다
+    final, paths = go(0.40, lambda st, o: ["back"] if st.title == "배송 조회" else _click_text(st, "배송 조회"))
+    assert final["reason"] == "low_confidence_action" and paths[-1] == "/phish/late-button.html", (final, paths)
 
 
 def test_no_late_button_wait_when_page_has_controls(settings, testpages):
