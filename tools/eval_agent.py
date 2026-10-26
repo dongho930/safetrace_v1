@@ -57,10 +57,11 @@ HIDDEN_TARGETS: dict[str, tuple[str, str]] = {
 
 
 # ── 숨겨진 화면 도달(순수 함수) ─────────────────────────────────────────
-def hidden_reached(url: str, records: list[dict]) -> dict | None:
+def hidden_reached(url: str, records: list[dict], hidden: str | None = None) -> dict | None:
     """단계형 시험 페이지면 숨긴 위험 화면에 닿았는지 {reached, step, observed}. 아니면 None.
+    hidden: 평가 목록의 hidden 열(숨긴 화면 경로, 단계형 시험 페이지 100종 data/staged_set.csv). 없으면 HIDDEN_TARGETS.
     원래 조사의 관찰 기록만 본다(하위 조사 sub 는 뺀다)."""
-    target = HIDDEN_TARGETS.get(urlsplit(url).path)
+    target = ("path", hidden) if hidden and hidden.startswith("/") else HIDDEN_TARGETS.get(urlsplit(url).path)
     if target is None:
         return None
     kind, want = target
@@ -550,7 +551,7 @@ def run_inside(args) -> None:
                     rec["steps"] = sum(1 for k in kinds if k["kind"] == "action")
                     rec["observed"] = sum(1 for k in kinds if k["kind"] == "observe" and "sub" not in k["data"])
                     rec["danger"] = danger_screens(kinds)
-                    hid = hidden_reached(row["url"], kinds)
+                    hid = hidden_reached(row["url"], kinds, row.get("hidden"))
                     if hid is not None:
                         rec["hidden"] = hid
                     rec["blocked_destinations"] = [b["host"] for b in fin.get("blocked_destinations", [])]

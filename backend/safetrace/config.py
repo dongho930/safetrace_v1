@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     openrouter_jev_model: str = "typesafe/jev-1.13"
     decision_timeout_s: float = 8.0
     action_min_prob: float = 0.45
+    # 1순위가 클릭이면 이 확률부터 누른다(누를 버튼은 안전 게이트가 그대로 검사한다). 진행 버튼이 1순위인데 효과 없을 뒤로·끝내기와
+    # 확률을 나눠 0.40~0.45 에서 멈추던 것(단계형 시험 페이지 100종, 2026-10-26)
+    action_min_prob_click: float = Field(0.35, ge=0.0, le=1.0)
     threat_min_prob: float = 0.6
 
     # 에이전트 예산

@@ -504,6 +504,41 @@ def test_ocr_cache_reuses_same_image(monkeypatch):
     assert len(calls) == 4
 
 
+def test_ocr_retry_uses_only_confident_text(monkeypatch):
+    """한 장 읽기에서 글자를 못 찾으면 여백·배율을 바꿔 다시 읽되, 평균 점수가 _RETRY_MIN_SCORE 이상인 결과만 쓴다
+    (못 읽던 이미지에 점수 0.5 언저리의 엉뚱한 글자가 붙어 누를 수 있는 후보가 되지 않게)."""
+    import io
+
+    from PIL import Image
+
+    import safetrace.agent.ocr as ocrmod
+
+    buf = io.BytesIO()
+    Image.new("RGB", (260, 64), (26, 86, 219)).save(buf, "PNG")
+    png = buf.getvalue()
+
+    def make(answers):
+        it = iter(answers)
+        ocr = ocrmod.LocalOCR.__new__(ocrmod.LocalOCR)
+        ocr.__init__()
+        ocr.available = True
+        ocr._engine = lambda img: (next(it, []), None)
+        return ocr
+
+    monkeypatch.setattr(ocrmod, "_pad", lambda p: p)
+    # 처음 읽기는 빈 결과, 다시 읽기 세 번 중 점수가 가장 높은 것을 쓴다
+    ocr = make([[], [[None, "허후공굼", "0.52"]], [[None, "본인 확인", "0.83"]], []])
+    assert ocr.read(png) == "본인 확인"
+    # 다시 읽어도 점수가 낮은 글자뿐이면 못 읽은 것으로 둔다(금지 요소로 남음)
+    ocr = make([[], [[None, "허후공굼", "0.51"]], [[None, "후 해", "0.55"]], []])
+    assert ocr.read(png) == ""
+    # 처음 읽기에서 읽었으면 다시 읽지 않는다
+    calls = []
+    ocr = make([])
+    ocr._engine = lambda img: (calls.append(1) or [[None, "다음", "0.9"]], None)
+    assert ocr.read(png) == "다음" and len(calls) == 1
+
+
 def test_ocr_mosaic_assigns_text_to_its_own_image(monkeypatch):
     """모자이크로 한 번에 읽고, 글자 중심이 들어간 이미지에만 배정한다. 못 읽은 것만 한 장씩 다시 읽는다."""
     import io
@@ -1147,3 +1182,11 @@ def test_boxes_from_maps_viewport_rects_to_capture(tmp_path):
     assert png_size(tmp_path / "a.png") == (1280, 2600)
     assert png_size(tmp_path / "b.png") is None
     assert png_size(tmp_path / "missing.png") is None
+
+
+def test_scroll_not_offered_when_page_cannot_scroll():
+    from safetrace.decision.schema import PageState, action_options
+
+    st = PageState(step=1, url="http://x/", title="", text="", candidates=[], can_scroll=False)
+    assert "scroll" not in action_options(st) and "finish" in action_options(st)
+    assert "scroll" in action_options(st.model_copy(update={"can_scroll": True}))

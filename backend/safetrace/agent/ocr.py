@@ -23,6 +23,11 @@ _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr")
 _CACHE_SIZE = 512  # 같은 이미지(바이트가 같은 스크린샷)는 다시 읽지 않는다. 같은 배너가 단계마다 다시 보인다
 # 모자이크: 이미지 버튼 캡처들을 원래 크기 그대로 한 장에 붙여 글자 검출을 한 번에 한다
 _MOSAIC_W, _MOSAIC_MAX_H, _MOSAIC_GAP = 1280, 2400, 24
+# 한 장 읽기에서 글자를 못 찾으면 가장자리 색으로 여백을 늘려(흰 여백 대신) 배율을 바꿔 다시 읽는다: 흰 여백을 두르면 색 배경 버튼의
+# 글자 검출이 실패하는 글자들이 있다('본인 확인'·'당첨 확인' 등, 2026-10-26). 다시 읽은 글자는 점수가 높을 때만 쓴다 — 못 읽던
+# 이미지(누르지 않는 금지 요소)에 엉뚱한 글자(점수 0.5 언저리)가 붙어 누를 수 있는 후보가 되지 않게
+_RETRY = ((12, 1.0), (12, 2.0), (48, 1.5))  # (여백 px, 배율)
+_RETRY_MIN_SCORE = 0.7
 
 
 class LocalOCR:
@@ -63,9 +68,41 @@ class LocalOCR:
             except Exception as e:
                 log.warning("ocr failed: %s", type(e).__name__)
                 return ""  # 실패는 저장하지 않는다(다음에 다시 시도)
-            text = _join(result)
+            text = _join(result) or self._read_retry(png)
             self._remember(key, text)
         return text[:max_len]
+
+    def _read_retry(self, png: bytes) -> str:
+        """가장자리 색 여백·배율을 바꿔 다시 읽고, 평균 점수가 가장 높은 결과를 _RETRY_MIN_SCORE 이상일 때만 돌려준다."""
+        try:
+            import cv2  # noqa: PLC0415  (rapidocr 의존성)
+        except ImportError:
+            return ""
+        img = _decode(png)
+        if img is None:
+            return ""
+        best, best_score = "", 0.0
+        for pad, fx in _RETRY:
+            v = cv2.copyMakeBorder(img, pad, pad, pad, pad, cv2.BORDER_REPLICATE)
+            if fx != 1.0:
+                v = cv2.resize(v, None, fx=fx, fy=fx, interpolation=cv2.INTER_CUBIC)
+            try:
+                result, _ = self._engine(v)
+            except Exception as e:
+                log.warning("ocr retry failed: %s", type(e).__name__)
+                continue
+            words = []
+            for r in result or []:
+                try:
+                    if len(r) >= 3 and float(r[2]) >= 0.5:
+                        words.append((str(r[1]), float(r[2])))
+                except (TypeError, ValueError):
+                    continue
+            if words:
+                score = sum(sc for _, sc in words) / len(words)
+                if score > best_score:
+                    best, best_score = " ".join(t for t, _ in words), score
+        return best if best_score >= _RETRY_MIN_SCORE else ""
 
     def read_many(self, pngs: list[bytes], max_len: int = 80, deadline: float | None = None) -> list[str]:
         """여러 이미지 버튼을 한 번에 읽는다. 결과 순서는 입력과 같다.

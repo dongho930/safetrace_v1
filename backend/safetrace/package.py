@@ -31,7 +31,7 @@ from .evidence import (
 from .store import AuditLog, Case, Verdict
 
 FORMAT = "safetrace.review-package/1"
-_STEP_KINDS = {"observe", "decision", "gate", "action", "action_error", "new_window", "wait_redirect", "dead_end",
+_STEP_KINDS = {"observe", "decision", "gate", "action", "action_error", "new_window", "wait_redirect", "wait_controls", "dead_end",
                "decision_error", "escalation"}
 
 
