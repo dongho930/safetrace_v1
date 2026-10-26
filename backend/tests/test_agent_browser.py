@@ -1151,6 +1151,52 @@ def test_waits_for_late_button_before_finishing(settings, testpages):
     assert any(urlsplit(r["data"]["url"]).path == "/phish/track.html" for r in chain if r["kind"] == "observe")
 
 
+def test_follows_page_that_moves_while_finishing(settings, testpages):
+    """끝내려는 사이(버튼을 기다리는 사이) 페이지가 스스로 다른 주소로 넘어가면 넘어간 화면을 다시 보고 끝낸다.
+    단축 서비스 대기 문구가 없는 자동 이동 화면을 첫 화면만 보고 끝내 숨긴 화면을 놓쳤다(단계형 시험 페이지 100종, 자동 이동 0/66)."""
+    d = _Picker(lambda st, o: ["finish"])
+    cid = str(uuid.uuid4())
+    final = investigate(cid, f"{BASE}/phish/self-redirect.html", settings, lambda e: None, decider=d)
+    chain = [json.loads(x) for x in (settings.evidence_dir / cid / "chain.jsonl").read_text(encoding="utf-8").splitlines()]
+    paths = [urlsplit(r["data"]["url"]).path for r in chain if r["kind"] == "observe"]
+    assert paths[0] == "/phish/self-redirect.html" and "/phish/track.html" in paths, paths
+    assert urlsplit(final["final_url"]).path == "/phish/track.html", final
+
+
+def test_waits_for_late_button_before_going_back(settings, testpages):
+    """누를 것이 거의 없는 화면에서 '뒤로'를 고르면 먼저 잠시 기다려 본다. 늦게 나타나는 버튼 화면에서 뒤로 갔다 다시 오기를
+    되풀이해 같은 화면 반복으로 끝났다(단계형 시험 페이지 100종의 중간 화면)."""
+    def prefer(st, o):
+        if st.title == "배송 조회":
+            return _click_text(st, "재배송 신청") or ["back"]
+        return _click_text(st, "배송 조회")
+    d = _Picker(prefer)
+    cid = str(uuid.uuid4())
+    final = investigate(cid, f"{BASE}/phish/late-start.html", settings, lambda e: None, decider=d)
+    chain = [json.loads(x) for x in (settings.evidence_dir / cid / "chain.jsonl").read_text(encoding="utf-8").splitlines()]
+    waits = [r["data"] for r in chain if r["kind"] == "wait_controls"]
+    assert len(waits) == 1 and waits[0]["appeared"], waits
+    assert any(urlsplit(r["data"]["url"]).path == "/phish/track.html" for r in chain if r["kind"] == "observe")
+    assert final["reason"] != "loop_detected", final
+
+
+def test_follows_page_that_moves_instead_of_going_back(settings, testpages):
+    """스스로 넘어가는 중간 화면에서 '뒤로'를 골라도, 기다리는 사이 넘어갔으면 돌아가지 않고 넘어간 화면을 본다
+    (단계형 시험 페이지 100종의 자동 이동 중간 화면에서 뒤로 갔다 다시 오기를 되풀이했다)."""
+    def prefer(st, o):
+        if st.title == "안내":
+            return ["back"]
+        return _click_text(st, "신청 계속") or ["finish"]
+    d = _Picker(prefer)
+    cid = str(uuid.uuid4())
+    final = investigate(cid, f"{BASE}/phish/redirect-start.html", settings, lambda e: None, decider=d)
+    chain = [json.loads(x) for x in (settings.evidence_dir / cid / "chain.jsonl").read_text(encoding="utf-8").splitlines()]
+    paths = [urlsplit(r["data"]["url"]).path for r in chain if r["kind"] == "observe"]
+    assert "/phish/track.html" in paths, paths
+    assert not any(r["data"].get("action") == "back" for r in chain if r["kind"] == "action"), paths
+    assert final["reason"] != "loop_detected", final
+
+
 def test_no_late_button_wait_when_page_has_controls(settings, testpages):
     """누를 것이 많은 보통 화면에서는 끝낼 때 기다리지 않는다(조사가 길어지지 않게)."""
     d = _Picker(lambda st, o: ["finish"])

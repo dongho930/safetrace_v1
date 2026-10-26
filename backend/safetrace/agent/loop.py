@@ -778,8 +778,10 @@ class AgentRun:
         않게. 한 주소에 한 번, 누를 것이 _FEW_CONTROLS 개 이하이고 금지 요소가 없을 때만(누를 것이 많은 보통 화면, 입력칸이 있는
         목적지 화면은 기다리지 않는다)."""
         url = page.url
-        # 입력·결제·다운로드 요소가 이미 보이는 화면은 목적지(위험 화면)라 기다리지 않는다(입력칸은 후보가 아니라 후보가 적다)
-        if url in self._waited_controls or len(obs.state.candidates) > _FEW_CONTROLS or obs.forbidden:
+        # 입력·결제·다운로드 요소가 이미 보이는 화면은 목적지(위험 화면)라 기다리지 않는다(입력칸은 후보가 아니라 후보가 적다).
+        # 관찰한 뒤 이미 다른 주소로 넘어갔으면 기다리지 않는다(호출한 쪽이 넘어간 곳을 다시 본다)
+        if (url in self._waited_controls or len(obs.state.candidates) > _FEW_CONTROLS or obs.forbidden
+                or url[:2048] != obs.state.url):
             return False
         self._waited_controls.add(url)
         n0 = await _count_controls(page)
@@ -1134,12 +1136,6 @@ class AgentRun:
                 "observe_seq": obs.evidence_seq,
             })
             if prob < self.s.action_min_prob or decision.action == ActionKind.FINISH:
-                if await self._wait_new_controls(page, obs, step):
-                    # 누를 것이 거의 없던 화면에 진행 버튼이 늦게 나타났다: 끝내지 않고 다시 관찰한다
-                    self.history.append("waited")
-                    self.budget.steps += 1
-                    step += 1
-                    continue
                 if await self._wait_auto_redirect(page, obs.state, step, *observed_from):
                     # 대기 화면이 스스로 다음 곳으로 넘어갔다: 끝내지 않고 넘어간 곳(막다른 곳 포함)을 이어서 본다
                     blocked_before = observed_from[1]
@@ -1147,10 +1143,17 @@ class AgentRun:
                     self.budget.steps += 1
                     step += 1
                     continue
+                if await self._wait_new_controls(page, obs, step):
+                    # 누를 것이 거의 없던 화면에 진행 버튼이 늦게 나타났다: 끝내지 않고 다시 관찰한다
+                    self.history.append("waited")
+                    self.budget.steps += 1
+                    step += 1
+                    continue
                 await self._settle_nav_checks(page, step)
-                if self._is_dead_end(page, observed_from[1]) or len(self.result.blocked_destinations) > observed_from[1]:
-                    # 관찰·판단하는 사이에 페이지가 스스로 열리지 않는 곳으로 넘어갔다(대기 문구가 없는 화면):
-                    # 끝내지 않고 막다른 곳으로 처리한다
+                if (self._is_dead_end(page, observed_from[1]) or len(self.result.blocked_destinations) > observed_from[1]
+                        or page.url[:2048] != obs.state.url):
+                    # 관찰·판단하는(기다리는) 사이에 페이지가 스스로 다른 곳으로 넘어갔다(대기 문구가 없는 자동 이동 화면,
+                    # 열리지 않는 곳 포함): 끝내지 않고 넘어간 곳을 이어서 본다(막다른 곳이면 맨 위에서 처리한다)
                     blocked_before = observed_from[1]
                     self.history.append("moved")
                     self.budget.steps += 1
@@ -1164,6 +1167,18 @@ class AgentRun:
             if decision.action == ActionKind.FINISH:
                 self.result.status, self.result.finish_reason = "COMPLETED", "agent_finished"
                 break
+            if decision.action == ActionKind.BACK:
+                # 누를 것이 거의 없는 화면에서 뒤로 가려 했는데 진행 버튼이 늦게 나타났거나, 기다리는(판단하는) 사이 페이지가
+                # 스스로 다른 곳으로 넘어갔다: 돌아가지 않고 다시 관찰한다(늦게 그리는 중간 화면·'이동 중' 중간 화면과 앞 화면을
+                # 오가다 같은 화면 반복으로 끝나던 것)
+                appeared = await self._wait_new_controls(page, obs, step)
+                if (appeared or page.url[:2048] != obs.state.url
+                        or len(self.result.blocked_destinations) > observed_from[1]):
+                    blocked_before = observed_from[1]
+                    self.history.append("waited" if appeared else "moved")
+                    self.budget.steps += 1
+                    step += 1
+                    continue
 
             blocked_before = len(self.result.blocked_destinations)
             before = await self._screenshot(page, "before")
