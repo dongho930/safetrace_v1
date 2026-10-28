@@ -20,6 +20,7 @@ from PIL import Image as PILImage
 
 from . import preview as _preview  # noqa: F401  Image.MAX_IMAGE_PIXELS 제한을 함께 쓴다
 from . import referral
+from .decision.schema import threat_source
 from .evidence import _SAFE_NAME, read_evidence, sha256_bytes
 from .package import clean_records
 
@@ -40,7 +41,7 @@ REASON_KO = {
     "reputation_match": "Safe Browsing 위험 일치(AI 는 정상으로 봄)",
     "candidate_reputation_match": "연관 후보가 Safe Browsing 위험 일치(AI 는 정상으로 봄)",
     "unreachable_reputation_match": "접속 불가 · Safe Browsing 위험 일치",
-    "unreachable_network_filtered": "접속 불가 · 회선이 도메인 이름을 보고 차단",
+    "unreachable_network_filtered": "접속 불가 · 회선 차단 추정",
     "goto_failed": "최초 접속 실패",
     "low_confidence_action": "다음 행동 확신 부족으로 탐색 종료",
     "loop_detected": "같은 화면 반복으로 탐색 종료",
@@ -50,6 +51,7 @@ REASON_KO = {
     "time_budget": "최대 시간 도달",
     "page_unresponsive": "페이지가 응답하지 않아 시간 예산에서 강제 종료",
     "threat_decision_unavailable": "위협 판단 불가(판단 서비스 장애)",
+    "decision_unavailable": "행동 판단 불가(판단 서비스 장애)",
 }
 SB_KO = {"match": "위험 목록 일치", "no_match": "일치 없음", "error": "조회 실패", "disabled": "조회 안 함(키 없음)",
          "skipped": "조회 안 함"}
@@ -90,7 +92,19 @@ def _ai(threat: dict | None) -> dict | None:
     return {"threat": threat.get("threat"), "threat_ko": THREAT_KO.get(threat.get("threat"), threat.get("threat")),
             "probability": threat.get("probability"), "hold": bool(threat.get("hold")),
             "override": _override_ko(threat.get("override")), "provider": threat.get("provider"),
-            "model": threat.get("model"), "brand": _brand(threat.get("override"))}
+            "model": threat.get("model"), "brand": _brand(threat.get("override")),
+            "source": threat_source(threat)}
+
+
+def opinion_ko(threat: object, threat_ko: object, probability: object, source: object) -> str:
+    """판단 한 줄. 확률은 AI(모델) 판단에만 붙인다: 코드 규칙이 정한 유형의 1.0 은 모델 확률이 아니고(콘솔과 같은 기준),
+    판단 불가의 확률은 위협 정도로 읽힐 수 있다."""
+    ko = threat_ko if isinstance(threat_ko, str) and threat_ko else "-"
+    if source == "rule":
+        return f"{ko} · 코드 규칙 판단"
+    if source == "model" and threat != "unknown":
+        return f"{ko} (AI 확률 {_pct(probability)})"
+    return ko
 
 
 def _brand(o: object) -> str | None:
@@ -103,12 +117,21 @@ def _brand(o: object) -> str | None:
 BLOCKED_KO = "회선 차단 추정"
 
 
+def assessment_line(ai: dict | None, error: bool = False) -> str:
+    """PDF '판단 결과'의 의심 유형 줄. 코드 규칙이 정한 유형은 'AI 확률 100%' 로 적지 않는다
+    (모델 원래 판단은 바로 아래 '코드 규칙' 줄에 있다)."""
+    if not ai:
+        return "판단 서비스 장애로 판단 없음" if error else "판단 없음"
+    return (opinion_ko(ai.get("threat"), ai.get("threat_ko"), ai.get("probability"), ai.get("source"))
+            + (" · 보류(담당자 검토)" if ai.get("hold") else ""))
+
+
 def related_opinion(r: dict) -> str:
-    """연관 사이트 표의 AI 의견 칸."""
+    """연관 사이트 표의 조사 판단 칸."""
     if r.get("error"):
         return "조사 실패"
-    return (f"{r.get('threat_ko') or '-'} ({_pct(r.get('probability'))})" + (" · 보류" if r.get("hold") else "")
-            + (f" · {BLOCKED_KO}" if r.get("blocked") else ""))
+    return (opinion_ko(r.get("threat"), r.get("threat_ko"), r.get("probability"), r.get("source"))
+            + (" · 보류" if r.get("hold") else "") + (f" · {BLOCKED_KO}" if r.get("blocked") else ""))
 
 
 def _override_ko(o: object) -> str | None:
@@ -123,9 +146,9 @@ def _override_ko(o: object) -> str | None:
     if reason == "shortener_warning":
         out = "단축 URL 서비스의 위험 경고 → 담당자 검토"
     elif reason == "link_takedown":
-        out = "단축·호스팅 서비스가 불법·약관 위반으로 링크를 정지 → 담당자 검토"
+        out = "단축·호스팅 서비스의 링크 정지 안내 → 담당자 검토"
     elif reason == "official_redirect":
-        out = f"조사 전에 공식 사이트({brand} · {dest})로 바로 넘김(봇 회피 흔적) → 담당자 검토"
+        out = f"조사 전에 공식 사이트({brand} · {dest})로 바로 이동 → 원래 주소 담당자 검토"
     elif reason == "brand_lookalike":
         out = (f"열리지 않은 목적지가 브랜드 사칭 도메인({brand} · {dest}) → 담당자 검토" if dest
                else f"브랜드 사칭 도메인({brand}), 화면 내용 없음 → 담당자 검토")
@@ -134,7 +157,7 @@ def _override_ko(o: object) -> str | None:
     elif reason == "brand_typo_domain":
         out = f"브랜드를 내세운 화면인데 도메인이 그 이름의 오타({brand} · {dest}) → 담당자 검토"
     elif reason == "brand_login_shared_hosting":
-        out = f"공용 호스팅에서 브랜드를 내세운 로그인 화면({brand} · {dest}) → 담당자 검토"
+        out = f"공용 호스팅의 브랜드·로그인 표지({brand} · {dest}) → 담당자 검토"
     elif reason == "brand_clone_title":
         out = f"공식 도메인 밖에서 브랜드 공식 화면 제목을 그대로 쓴 로그인 화면({brand} · {dest}) → 담당자 검토"
     elif reason == "official_betting_domain":
@@ -197,11 +220,14 @@ def build(pkg: dict, records: list[dict]) -> dict:
     related = []
     for c in cands.get("investigated", []):
         r, t = c.get("result") or {}, c.get("threat") or {}
+        th, prob = r.get("threat") or t.get("threat"), r.get("probability", t.get("probability"))
         related.append({"sub": c["sub"], "url": _cut(c.get("url"), _URL),
                         "final_url": _cut(r.get("final_url"), _URL),
-                        "threat": r.get("threat") or t.get("threat"),
-                        "threat_ko": THREAT_KO.get(r.get("threat") or t.get("threat")),
-                        "probability": r.get("probability", t.get("probability")),
+                        "threat": th,
+                        "threat_ko": THREAT_KO.get(th),
+                        "probability": prob,
+                        # 출처는 하위 조사의 판단 기록이 이 결과와 같을 때만(콘솔 candidatePresentation 과 같은 기준)
+                        "source": threat_source(t) if t.get("threat") == th and t.get("probability") == prob else None,
                         "hold": bool(r.get("hold") or t.get("hold")),
                         "reputation_match": bool(r.get("reputation_match")),
                         "reputation_unchecked": bool(r.get("reputation_unchecked")),
@@ -375,8 +401,7 @@ def render_pdf(rep: dict, evidence_dir: Path) -> bytes:
     ai = a.get("ai")
     sb = a.get("safebrowsing")
     rows: list[tuple[str, object]] = [
-        ("AI 의심 유형", (f"{ai['threat_ko']} (확률 {_pct(ai['probability'])})" + (" · 보류(담당자 검토)" if ai["hold"] else ""))
-         if ai else ("판단 서비스 장애로 판단 없음" if a.get("error") else "판단 없음")),
+        ("의심 유형", assessment_line(ai, bool(a.get("error")))),
     ]
     if ai and ai.get("override"):
         rows.append(("코드 규칙", ai["override"]))
@@ -447,7 +472,7 @@ def render_pdf(rep: dict, evidence_dir: Path) -> bytes:
     if rel and rel["investigated"]:
         out.append(P(f"{5 if screens else 4}. 연관 사이트 (자동 하위 조사)", h2))
         out.append(P(_t(f"페이지에서 찾은 연관 후보 {rel['found']}개 중 {len(rel['investigated'])}개를 같은 안전 조건으로 조사했다."), small))
-        data = [[P("주소", key), P("AI 의견", key), P("외부 평판", key)]]
+        data = [[P("주소", key), P("조사 판단", key), P("외부 평판", key)]]
         for r in rel["investigated"]:
             op = related_opinion(r)
             rep_ = "위험 일치" if r["reputation_match"] else "미확인" if r["reputation_unchecked"] else "일치 없음"

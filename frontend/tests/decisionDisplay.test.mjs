@@ -55,7 +55,7 @@ try {
   cleanup();
   throw error;
 }
-const { threatPresentation, casePresentation, reviewReason, caseDecisionText, candidatePresentation } = presentation;
+const { threatPresentation, casePresentation, reviewReason, reviewParts, caseDecisionText, candidatePresentation, reputationHit, reputationConflict } = presentation;
 
 function modelThreat(patch = {}) {
   return {
@@ -425,4 +425,72 @@ test("presentation does not rewrite the stored decision or verdict", () => {
   reviewReason(c);
   caseDecisionText(c);
   assert.equal(JSON.stringify(c), before);
+});
+
+// Safe Browsing match on a case the model already held: the server keeps finish_reason (agent_finished /
+// low_confidence_action) because runner only rewrites COMPLETED cases, so the display must read the reputation itself.
+const ownMatch = { status: "match", matches: [{ url: "https://reported.example/", threat_type: "SOCIAL_ENGINEERING" }] };
+
+test("a held benign opinion with its own Safe Browsing match is shown as a reputation conflict", () => {
+  for (const finish_reason of ["agent_finished", "low_confidence_action"]) {
+    const c = caseOut({ status: "REVIEW_REQUIRED", finish_reason, threat: modelThreat({ threat: "benign", probability: 0.49, hold: true }), safebrowsing: ownMatch });
+    assert.equal(reputationHit(c), "own");
+    assert.equal(reputationConflict(c), true);
+    assert.equal(casePresentation(c).probability, null);
+    assert.doesNotMatch(caseDecisionText(c), /0\.49/);
+    const reason = reviewReason(c);
+    assert.match(reason, /^AI 의견과 Safe Browsing 위험 평판 불일치/);
+    assert.match(reason, /AI 판단 불확실/);
+    // the raw model value is still kept for the action log
+    assert.equal(threatPresentation(c.threat).probability, 0.49);
+  }
+});
+
+test("a held threat opinion with its own Safe Browsing match keeps its number and names the match", () => {
+  const c = caseOut({ status: "REVIEW_REQUIRED", finish_reason: "low_confidence_action", threat: modelThreat({ probability: 0.55, hold: true }), safebrowsing: ownMatch });
+  assert.equal(reputationConflict(c), false);
+  assert.equal(casePresentation(c).probability, 0.55);
+  assert.deepEqual(reviewParts(c), ["Safe Browsing 위험 일치", "AI 판단 불확실"]);
+});
+
+test("an unknown opinion with its own Safe Browsing match names the match", () => {
+  const c = caseOut({ status: "REVIEW_REQUIRED", threat: modelThreat({ threat: "unknown", probability: 0.4, hold: true }), safebrowsing: ownMatch });
+  assert.deepEqual(reviewParts(c), ["Safe Browsing 위험 일치", "유형을 판단하지 못했습니다"]);
+});
+
+test("a match only on related candidates is not a conflict about the reported address", () => {
+  const sb = { status: "match", matches: [{ url: "https://candidate.example/", threat_type: "MALWARE" }] };
+  const c = caseOut({ status: "REVIEW_REQUIRED", threat: modelThreat({ threat: "benign", probability: 0.5, hold: true }), safebrowsing: sb, candidates: [candidate({ reputation_match: true })] });
+  assert.equal(reputationHit(c), "candidate");
+  assert.equal(reputationConflict(c), false);
+  assert.equal(casePresentation(c).probability, 0.5);
+  assert.deepEqual(reviewParts(c), ["연관 후보의 Safe Browsing 위험 일치", "AI 판단 불확실"]);
+  // legacy string candidates count as candidate addresses too
+  assert.equal(reputationHit({ ...c, candidates: ["https://candidate.example/"] }), "candidate");
+});
+
+test("a match without listed addresses is treated as the case's own address", () => {
+  const c = caseOut({ status: "REVIEW_REQUIRED", threat: modelThreat({ threat: "benign", probability: 0.5, hold: true }), safebrowsing: { status: "match", matches: [] } });
+  assert.equal(reputationHit(c), "own");
+  assert.equal(reputationConflict(c), true);
+});
+
+test("server reputation reasons are not repeated by the reputation note", () => {
+  const c = caseOut({ status: "REVIEW_REQUIRED", finish_reason: "reputation_match", threat: modelThreat({ threat: "benign", probability: 0.99 }), safebrowsing: ownMatch });
+  assert.deepEqual(reviewParts(c), ["AI 의견과 Safe Browsing 위험 평판 불일치"]);
+  const u = caseOut({ status: "REVIEW_REQUIRED", finish_reason: "unreachable_reputation_match", threat: null, safebrowsing: ownMatch });
+  assert.deepEqual(reviewParts(u), ["접속 불가 · Safe Browsing 위험 일치"]);
+});
+
+test("a rule decision in conflict with Safe Browsing is not called an AI opinion", () => {
+  const t = ruleThreat("official_betting_domain", { threat: "benign", hold: false, provider: "official_domain" });
+  const c = caseOut({ status: "REVIEW_REQUIRED", finish_reason: "reputation_match", threat: t, safebrowsing: ownMatch });
+  assert.match(reviewReason(c), /^규칙 판단과 Safe Browsing/);
+  assert.doesNotMatch(reviewReason(c), /AI 의견/);
+});
+
+test("an agreeing completed threat with a Safe Browsing match asks for no review", () => {
+  const c = caseOut({ threat: modelThreat({ probability: 0.9 }), safebrowsing: ownMatch });
+  assert.equal(reviewReason(c), null);
+  assert.equal(casePresentation(c).probability, 0.9);
 });
