@@ -195,7 +195,9 @@ def _override_ko(o: object) -> str | None:
     orig = o.get("original")
     if isinstance(orig, dict) and isinstance(orig.get("threat"), str):
         name = THREAT_KO.get(orig["threat"], orig["threat"])
-        if orig.get("provider") in MODEL_PROVIDERS:
+        if orig.get("provider") in MODEL_PROVIDERS and orig["threat"] == "unknown":
+            out += " · 모델은 원래 판단 불가"  # 판단 불가의 확률은 위험 정도로 읽힐 수 있어 적지 않는다(콘솔과 같은 기준)
+        elif orig.get("provider") in MODEL_PROVIDERS:
             out += f" · 모델 원래 판단 {name} {_pct(orig.get('probability'))}"
         elif orig.get("provider") in FALLBACK_PROVIDERS:
             out += f" · 규칙 적용 전 대체 판단 {name}"

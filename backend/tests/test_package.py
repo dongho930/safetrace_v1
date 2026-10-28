@@ -355,7 +355,7 @@ def test_malformed_signed_records_do_not_break_exports(tmp_path, client, case_id
      "단축·호스팅 서비스의 링크 정지 안내 → 담당자 검토 · 모델 원래 판단 정상 65%"),
     ({"reason": "brand_lookalike", "brand": "kbank", "destination": "g.kbank.mywire.org",
       "original": {"threat": "unknown", "probability": 0.5, "provider": "jev_typesafe"}},
-     "열리지 않은 목적지가 브랜드 사칭 도메인(kbank · g.kbank.mywire.org) → 담당자 검토 · 모델 원래 판단 판단 불가 50%"),
+     "열리지 않은 목적지가 브랜드 사칭 도메인(kbank · g.kbank.mywire.org) → 담당자 검토 · 모델은 원래 판단 불가"),
     ({"reason": "brand_name_domain", "brand": "roblox", "destination": "www.roblox.et",
       "original": {"threat": "benign", "probability": 0.85, "provider": "jev_typesafe"}},
      "브랜드 이름 그대로의 다른 도메인(roblox · www.roblox.et) → 담당자 검토 · 모델 원래 판단 정상 85%"),

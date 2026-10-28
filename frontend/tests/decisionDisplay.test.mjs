@@ -616,3 +616,14 @@ test("a network-filter escalation is shown as an estimate, not a detection", () 
   const card = cards.find((r) => r.key === "escalation");
   assert.equal(card.text, "회선 차단 추정");
 });
+
+test("an original 'unknown' model opinion carries no number", () => {
+  // 규칙 사건 10건 중 7건이 '모델 원래 의견: 판단 불가 0.94'처럼 판단 불가에 숫자를 붙였다(2026-10-28 최종 점검)
+  const t = ruleThreat("link_takedown");
+  t.override.original = { threat: "unknown", probability: 0.94, provider: "jev_typesafe" };
+  assert.equal(threatPresentation(t).originalOpinion, "모델 원래 의견: 판단 불가");
+  t.override.original = { threat: "unknown", provider: "jev_typesafe" };
+  assert.equal(threatPresentation(t).originalOpinion, "모델 원래 의견: 판단 불가");
+  t.override.original = { threat: "benign", probability: 0.72, provider: "jev_typesafe" };
+  assert.equal(threatPresentation(t).originalOpinion, "모델 원래 의견: 정상 0.72");
+});

@@ -52,7 +52,10 @@ export function threatPresentation(input: unknown): ThreatPresentation {
   const originalProbability = probability(original?.probability);
   let originalOpinion: string | null = null;
   if (original && Object.hasOwn(THREAT_LABEL, originalThreat)) {
-    if (modelProvider(original.provider) && originalProbability !== null)
+    // 판단 불가의 확률은 위험 정도로 읽힐 수 있어 숫자를 붙이지 않는다(요약·목록의 판단 불가와 같은 기준)
+    if (modelProvider(original.provider) && originalThreat === "unknown")
+      originalOpinion = `모델 원래 의견: ${THREAT_LABEL[originalThreat]}`;
+    else if (modelProvider(original.provider) && originalProbability !== null)
       originalOpinion = `모델 원래 의견: ${THREAT_LABEL[originalThreat]} ${originalProbability.toFixed(2)}`;
     else if (FALLBACK_PROVIDERS.includes(str(original.provider)))
       originalOpinion = `규칙 적용 전 의견: ${THREAT_LABEL[originalThreat]} · 대체 판단`;
