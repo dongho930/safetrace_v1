@@ -64,3 +64,12 @@ export const NET_CATEGORY_LABEL: Record<string, string> = dict({
   other: "기타",
 });
 export const ACTION_LABEL: Record<string, string> = dict({ scroll: "스크롤", back: "뒤로 가기", close_popup: "팝업 닫기", finish: "조사 끝내기" });
+// Safe Browsing 조회 결과(보고서 report.py SB_KO 와 같은 문구). 모르는 값은 그대로 글자로
+export const SB_STATUS_LABEL: Record<string, string> = dict({
+  match: "위험 목록 일치",
+  no_match: "일치 없음",
+  not_configured: "조회 안 함(키 없음)",
+  disabled: "조회 안 함(키 없음)",
+  skipped: "조회 안 함",
+  error: "조회 실패",
+});

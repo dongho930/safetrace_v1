@@ -20,7 +20,7 @@ from PIL import Image as PILImage
 
 from . import preview as _preview  # noqa: F401  Image.MAX_IMAGE_PIXELS 제한을 함께 쓴다
 from . import referral
-from .decision.schema import threat_source
+from .decision.schema import FALLBACK_PROVIDERS, MODEL_PROVIDERS, threat_source
 from .evidence import _SAFE_NAME, read_evidence, sha256_bytes
 from .package import clean_records
 
@@ -97,11 +97,13 @@ def _ai(threat: dict | None) -> dict | None:
 
 
 def opinion_ko(threat: object, threat_ko: object, probability: object, source: object) -> str:
-    """판단 한 줄. 확률은 AI(모델) 판단에만 붙인다: 코드 규칙이 정한 유형의 1.0 은 모델 확률이 아니고(콘솔과 같은 기준),
-    판단 불가의 확률은 위협 정도로 읽힐 수 있다."""
+    """판단 한 줄. 확률은 AI(모델) 판단에만 붙인다: 코드 규칙이 정한 유형의 1.0 과 대체 판단기(Jev 장애 때 낱말 점수)의
+    점수는 모델 확률이 아니고(콘솔과 같은 기준), 판단 불가의 확률은 위협 정도로 읽힐 수 있다."""
     ko = threat_ko if isinstance(threat_ko, str) and threat_ko else "-"
     if source == "rule":
         return f"{ko} · 코드 규칙 판단"
+    if source == "fallback":
+        return f"{ko} · {FALLBACK_KO}"
     if source == "model" and threat != "unknown":
         return f"{ko} (AI 확률 {_pct(probability)})"
     return ko
@@ -112,6 +114,8 @@ def _brand(o: object) -> str | None:
     b = o.get("brand") if isinstance(o, dict) else None
     return _cut(b, 40) if isinstance(b, str) and b else None
 
+
+FALLBACK_KO = "대체 판단(Jev 장애)"
 
 # 회선 차단은 '추정'이다: 이름으로 연결하면 끊기고 다른 이름으로는 응답하는 동작을 조사 대상 서버가 흉내 낼 수 있다(Codex 지적)
 BLOCKED_KO = "회선 차단 추정"
@@ -133,6 +137,19 @@ def hold_ko(t: dict) -> str | None:
     if not t.get("hold"):
         return None
     return "확신 낮음" if t.get("source") == "model" and t.get("threat") != "unknown" else "담당자 검토"
+
+
+def basis_ko(source: object) -> str:
+    """처리 요청의 근거가 담당자 판정이 아닐 때 그 판단을 낸 쪽."""
+    return {"rule": "코드 규칙 판단", "fallback": FALLBACK_KO, "model": "AI 판단"}.get(source, "조사 판단")  # type: ignore[arg-type]
+
+
+def reputation_line(sb: dict | None) -> str:
+    """PDF '외부 평판' 줄. 연관 후보 주소의 일치는 '(연관 후보)'로 표시한다."""
+    if not sb:
+        return "조회 기록 없음"
+    return f"Google Safe Browsing: {sb['status_ko']}" + "".join(
+        f" · {m.get('type') or '유형 없음'} {m['url']}" + (" (연관 후보)" if m.get("candidate") else "") for m in sb["matches"])
 
 
 def related_opinion(r: dict) -> str:
@@ -178,7 +195,11 @@ def _override_ko(o: object) -> str | None:
         out = f"코드 규칙({reason})" if reason else "코드 규칙"
     orig = o.get("original")
     if isinstance(orig, dict) and isinstance(orig.get("threat"), str):
-        out += f" · 모델 원래 판단 {THREAT_KO.get(orig['threat'], orig['threat'])} {_pct(orig.get('probability'))}"
+        name = THREAT_KO.get(orig["threat"], orig["threat"])
+        if orig.get("provider") in MODEL_PROVIDERS:
+            out += f" · 모델 원래 판단 {name} {_pct(orig.get('probability'))}"
+        elif orig.get("provider") in FALLBACK_PROVIDERS:
+            out += f" · 규칙 적용 전 대체 판단 {name}"
     return _cut(out, _TEXT)
 
 
@@ -227,6 +248,8 @@ def build(pkg: dict, records: list[dict]) -> dict:
     cur = review.get("current")
     sb = a.get("safebrowsing") or {}
     cands = pkg.get("candidates") or {}
+    # 평판 조회는 신고·경유 주소와 연관 후보를 함께 한다: 후보 주소의 일치를 신고 주소의 일치로 읽지 않게 표시한다
+    cand_urls = {c.get("url") for c in cands.get("found") or [] if isinstance(c, dict) and isinstance(c.get("url"), str)}
     related = []
     for c in cands.get("investigated", []):
         r, t = c.get("result") or {}, c.get("threat") or {}
@@ -273,7 +296,9 @@ def build(pkg: dict, records: list[dict]) -> dict:
             "error": bool(a.get("error")),
             "escalation": _cut((a.get("escalation") or {}).get("reason"), _TEXT),
             "safebrowsing": {"status": sb.get("status"), "status_ko": SB_KO.get(sb.get("status"), sb.get("status")),
-                             "matches": [{"url": _cut(m.get("url"), _URL), "type": m.get("threatType") or m.get("type")}
+                             "matches": [{"url": _cut(m.get("url"), _URL),
+                                          "type": m.get("threat_type") or m.get("threatType") or m.get("type"),
+                                          "candidate": m.get("url") in cand_urls}
                                          for m in sb.get("matches", [])[:10]]} if sb else None,
         },
         "related": {"found": len(cands.get("found", [])), "investigated": related} if cands else None,
@@ -416,9 +441,8 @@ def render_pdf(rep: dict, evidence_dir: Path) -> bytes:
     if ai and ai.get("override"):
         rows.append(("코드 규칙", ai["override"]))
     if a.get("escalation"):
-        rows.append(("담당자 검토 사유", a["escalation"]))
-    rows.append(("외부 평판", (f"Google Safe Browsing: {sb['status_ko']}"
-                              + "".join(f" · {m['type'] or ''} {m['url']}" for m in sb["matches"])) if sb else "조회 기록 없음"))
+        rows.append(("담당자 검토 사유", REASON_KO.get(a["escalation"], a["escalation"])))  # 기록은 사유 코드
+    rows.append(("외부 평판", reputation_line(sb)))
     if v:
         rows += [("담당자 판정", f"{v['decision_ko']}" + (f" — {v['threat_ko']}" if v.get("threat_ko") else "")),
                  ("판정 사유", "표 아래에 적음" if v.get("note") else "-"),
@@ -498,7 +522,8 @@ def render_pdf(rep: dict, evidence_dir: Path) -> bytes:
         out.append(P(f"{n}. 처리 요청 안내" + (" (초안 · 담당자 판정 전)" if ref.get("draft") else ""), h2))
         ag = ref["agency"]
         out.append(kv([
-            ("요청 유형", f"{ref['threat_ko']} — " + ("담당자 판정" if ref["basis"] == "confirmed" else "AI 판단(담당자 확인 필요)")),
+            ("요청 유형", f"{ref['threat_ko']} — " + ("담당자 판정" if ref["basis"] == "confirmed"
+                                                    else f"{basis_ko((a.get('ai') or {}).get('source'))}(담당자 확인 필요)")),
             ("처리 기관", f"{ag['name']} · {ag['phone']} · {ag['url']} — {ag['does']}"),
             ("함께 알릴 곳", P("<br/>".join(_t(f"{x['name']} · {x['phone']} · {x['url']}" + (f" — {x['when']}" if x["when"] else ""))
                                        for x in ref["also"]) or "-", base)),

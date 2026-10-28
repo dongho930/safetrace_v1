@@ -3,8 +3,10 @@ import type { Candidate, CaseOut, EvidenceEvent } from "./api";
 import { dict } from "./api";
 import { overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
 
+// model: Jev(AI) · rule: 코드 규칙(판단 엔진의 override 등) · fallback: Jev 가 응답하지 않을 때(장애·미설정) 판단 엔진이 쓰는
+// 대체 판단기(화면 글자의 낱말 점수, provider "rules"·model "rules-1"). 대체 판단의 점수는 AI 확률도 코드 규칙도 아니다
 export type ThreatPresentation = {
-  source: "model" | "rule" | "unknown";
+  source: "model" | "rule" | "fallback" | "unknown";
   sourceLabel: string;
   threat: string;
   typeLabel: string;
@@ -25,8 +27,10 @@ const RULE_LABEL = dict({
   brand_clone_title: "브랜드 화면 복제 규칙 감지",
   official_betting_domain: "공식 사행사업자 도메인 확인",
   official_domain: "공식 사행사업자 도메인 확인",
-  rules: "규칙 기반 판단",
 });
+// 서버 decision/schema.py 의 FALLBACK_PROVIDERS 와 같은 목록(시험이 맞춰 본다)
+const FALLBACK_PROVIDERS = ["rules"];
+const FALLBACK_LABEL = "대체 판단(Jev 장애)";
 
 const object = (v: unknown): Record<string, unknown> | null =>
   v !== null && typeof v === "object" && !Array.isArray(v) ? v as Record<string, unknown> : null;
@@ -40,8 +44,9 @@ export function threatPresentation(input: unknown): ThreatPresentation {
   const threat = str(t?.threat, 32);
   const provider = str(t?.provider, 64);
   const override = object(t?.override);
-  const rule = !!override || Object.hasOwn(RULE_LABEL, provider) || str(t?.model) === "rules-1";
-  const source = rule ? "rule" : modelProvider(provider) ? "model" : "unknown";
+  const rule = !!override || Object.hasOwn(RULE_LABEL, provider);
+  const fallback = !rule && (FALLBACK_PROVIDERS.includes(provider) || str(t?.model) === "rules-1");
+  const source = rule ? "rule" : fallback ? "fallback" : modelProvider(provider) ? "model" : "unknown";
   const original = object(override?.original);
   const originalThreat = str(original?.threat, 32);
   const originalProbability = probability(original?.probability);
@@ -49,8 +54,8 @@ export function threatPresentation(input: unknown): ThreatPresentation {
   if (original && Object.hasOwn(THREAT_LABEL, originalThreat)) {
     if (modelProvider(original.provider) && originalProbability !== null)
       originalOpinion = `모델 원래 의견: ${THREAT_LABEL[originalThreat]} ${originalProbability.toFixed(2)}`;
-    else if (str(original.provider) === "rules")
-      originalOpinion = `규칙 적용 전 의견: ${THREAT_LABEL[originalThreat]} · 규칙 판단`;
+    else if (FALLBACK_PROVIDERS.includes(str(original.provider)))
+      originalOpinion = `규칙 적용 전 의견: ${THREAT_LABEL[originalThreat]} · 대체 판단`;
   }
   const ruleKey = str(override?.reason, 64) || provider;
   // 원시 행동 기록도 입력되므로 표시용 규칙 객체만 만들고, 누락된 원모델 값을 만들어 내지 않는다.
@@ -63,12 +68,13 @@ export function threatPresentation(input: unknown): ThreatPresentation {
   } : undefined;
   return {
     source,
-    sourceLabel: source === "rule" ? "규칙 판단" : source === "model" ? "AI 판단" : "판단 기록",
+    sourceLabel: source === "rule" ? "규칙 판단" : source === "fallback" ? "대체 판단" : source === "model" ? "AI 판단" : "판단 기록",
     threat,
     typeLabel: THREAT_LABEL[threat] ?? (threat || "판단 없음"),
     probability: source === "model" && threat && threat !== "unknown" ? probability(t?.probability) : null,
-    ruleLabel: rule ? RULE_LABEL[ruleKey] ?? "규칙 기반 판단" : null,
-    ruleDescription: rule ? (safeOverride ? overrideLabel(safeOverride) : "관찰한 화면과 주소의 규칙에 따른 분류입니다") : null,
+    ruleLabel: rule ? RULE_LABEL[ruleKey] ?? "규칙 기반 판단" : fallback ? FALLBACK_LABEL : null,
+    ruleDescription: rule ? (safeOverride ? overrideLabel(safeOverride) : "관찰한 화면과 주소의 규칙에 따른 분류입니다")
+      : fallback ? "Jev 판단 서비스가 응답하지 않아(장애·미설정) 화면 글자의 낱말로 정한 대체 판단입니다 · AI 확률이 아닙니다" : null,
     originalOpinion,
   };
 }
@@ -116,6 +122,24 @@ export function lowConfidenceBenign(c: CaseOut | null): boolean {
   return lowBenign(casePresentation(c), c.threat?.hold);
 }
 
+// 검토 요청은 없지만 화면을 확인하라고 알릴 사건(초록으로 보이지 않게): Jev 대신 대체 판단기가 판단했거나, AI 정상의 확신이 낮다.
+// 담당자가 확정했거나 이미 검토 사유가 있으면(그쪽이 말한다) null
+export function attentionNote(c: CaseOut | null): string | null {
+  if (!c || !c.threat || reviewParts(c) !== null || c.verdict?.decision === "threat" || c.verdict?.decision === "benign") return null;
+  if (casePresentation(c).source === "fallback") return "대체 판단(Jev 장애) · 화면 확인 권장";
+  return lowConfidenceBenign(c) ? "AI 확신 낮음(정상 0.9 미만) · 화면 확인 권장" : null;
+}
+
+// 행동 선택(decision 기록)을 낸 쪽. Jev 만 확률을 보인다: 대체 판단기의 점수와, 남은 행동이 없어 코드가 끝낸 것(exhausted, 1.0)은
+// 모델 확률이 아니다. 조사 컨테이너가 쓴 기록이라 글자로만 본다
+export function decisionActor(d: unknown): { label: string; probability: number | null } {
+  const provider = str(object(d)?.provider, 64);
+  if (modelProvider(provider)) return { label: "Jev 선택", probability: probability(object(d)?.probability) };
+  if (provider === "exhausted") return { label: "남은 행동 없음", probability: null };
+  if (FALLBACK_PROVIDERS.includes(provider)) return { label: "대체 판단 선택(Jev 장애)", probability: null };
+  return { label: "행동 선택", probability: null };
+}
+
 // 판단하지 못한 까닭이 될 수 있는 탐색 종료(검토 사유가 아니라 사정 설명). '에이전트가 조사 완료 판단'은 설명이 안 돼 뺀다
 const EXPLORE_END = new Set(["low_confidence_action", "loop_detected", "dead_end", "step_budget", "time_budget", "goto_failed"]);
 export function exploreNote(c: CaseOut | null): string | null {
@@ -135,7 +159,7 @@ export function reviewParts(c: CaseOut | null): string[] | null {
   if (status !== "REVIEW_REQUIRED" && !c.threat?.hold) return null;
   const reason = mainReason(c);
   const p = threatPresentation(c.threat);
-  const conflict = `${p.source === "rule" ? "규칙 판단" : "AI 의견"}과 Safe Browsing 위험 평판 불일치`;
+  const conflict = `${p.source === "rule" ? "규칙 판단" : p.source === "fallback" ? "대체 판단" : "AI 의견"}과 Safe Browsing 위험 평판 불일치`;
   const reasons = dict({
     reputation_match: conflict,
     candidate_reputation_match: "연관 후보의 Safe Browsing 위험 일치",
@@ -150,7 +174,7 @@ export function reviewParts(c: CaseOut | null): string[] | null {
   const sb = hit === "own" ? (c.threat?.threat === "benign" ? conflict : "Safe Browsing 위험 일치")
     : hit === "candidate" ? "연관 후보의 Safe Browsing 위험 일치" : null;
   const base = (reason && reasons[reason])
-    || (p.source === "rule" && p.ruleLabel)
+    || ((p.source === "rule" || p.source === "fallback") && p.ruleLabel)
     || (c.threat?.hold && p.source === "model" && p.threat !== "unknown" && "AI 판단 불확실")
     || null;
   return [sb, base].filter((x): x is string => !!x);
@@ -169,8 +193,9 @@ export function caseDecisionText(c: CaseOut, explain = false): string {
   const note = explain && p.threat === "unknown" ? exploreNote(c) : null;
   if (note) return `${p.typeLabel}(${note})`;
   const suspect = !["benign", "unknown"].includes(p.threat);
-  const label = `${p.typeLabel}${suspect && (c.threat?.hold || p.source === "rule") ? " 의심" : ""}`;
+  const label = `${p.typeLabel}${suspect && (c.threat?.hold || p.source === "rule" || p.source === "fallback") ? " 의심" : ""}`;
   if (p.source === "rule") return `${label} · 규칙 판단`;
+  if (p.source === "fallback") return `${label} · 대체 판단`;
   if (p.probability !== null) return `${label} · ${p.probability.toFixed(2)}`;
   return label;
 }
