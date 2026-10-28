@@ -147,8 +147,11 @@ def build(rep: dict) -> dict:
     if why == "confirmed":
         kind = f"{spec['label']} (담당자 판정 · 판 {v.get('rev')} · {clean(v.get('reviewer'), 40)})"
     else:
-        # 코드 규칙이 정한 유형은 확률이 1.0 으로 기록된다: 'AI 100%' 로 적지 않는다
-        src = "코드 규칙" if ai.get("override") else f"AI 판단 {_pct(ai.get('probability'))}"
+        # 코드 규칙이 정한 유형은 확률이 1.0 으로 기록된다: 'AI 100%' 로 적지 않는다. 출처(source)는 보고서가 판단 기록에서
+        # 정한다(대체 규칙 판단기도 규칙). 출처를 모르는 판단은 확률을 붙이지 않는다
+        source = ai.get("source", "rule" if ai.get("override") else "model")
+        src = ("코드 규칙" if ai.get("override") or source == "rule"
+               else f"AI 판단 {_pct(ai.get('probability'))}" if source == "model" else "조사 판단")
         kind = (f"{spec['label']} 의심 ({src}" + (" · 담당자 판정 보류" if v.get("decision") == "hold" else " · 담당자 판정 전")
                 + ")")
     lines += ["", f"2. 유형: {kind}"]

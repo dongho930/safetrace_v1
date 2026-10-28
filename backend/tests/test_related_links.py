@@ -206,3 +206,30 @@ def test_big_services_and_workers_dev_do_not_join_strangers():
     assert [r["role"] for r in related.case_sites("https://p.example/", None, th, cands)] == ["start"]
     assert related.link_key("login.acct1.workers.dev") == ("login.acct1.workers.dev", True)
     assert related.link_key("www.cloudflare.com") == ("cloudflare.com", False)  # 후보 고르기·운영 정보에는 그대로
+
+
+def test_brief_marks_decision_source(client, store):
+    """연결된 사건 줄: 코드 규칙이 정한 유형을 'AI' 로 부르지 않게 판단 출처를 함께 준다(출처를 모르면 null)."""
+    from safetrace.api.main import record_event
+
+    k = uniq()
+    kit = {"url": f"https://kit-{k}.example/", "host": f"kit-{k}.example", "source": "link", "sub": 1, "threat": "phishing"}
+
+    def make(url, threat):
+        with store.session() as s, s.begin():
+            c = Case(url=url, source="report", status="RUNNING", created_by="t")
+            s.add(c)
+        record_event(c.id, {"type": "status", "status": "COMPLETED", "reason": "agent_finished", "final_url": url,
+                            "threat": threat, "candidates": [kit]})
+        return c.id
+
+    model = make(f"http://m-{k}.example/", {"threat": "phishing", "probability": 0.9, "hold": False, "provider": "jev_typesafe"})
+    rule = make(f"http://r-{k}.example/", {"threat": "phishing", "probability": 1.0, "hold": True, "provider": "link_takedown",
+                                           "override": {"reason": "link_takedown"}})
+    other = make(f"http://o-{k}.example/", {"threat": "phishing", "probability": 0.9, "hold": False})
+    got = {y["id"]: y["source"] for x in client.get(f"/api/cases/{model}/links", headers=h(VIEWER)).json()["shared"]
+           for y in x["cases"]}
+    assert got == {rule: "rule", other: None}
+    got = {y["id"]: y["source"] for x in client.get(f"/api/cases/{rule}/links", headers=h(VIEWER)).json()["shared"]
+           for y in x["cases"]}
+    assert got[model] == "model"

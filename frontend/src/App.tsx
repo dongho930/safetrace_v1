@@ -25,6 +25,7 @@ import {
   type IntakeSource,
   type Pair,
   type Stats,
+  type CaseBrief,
   type CaseLinks,
   dict,
   downloadExport,
@@ -58,7 +59,7 @@ import {
   SCREEN_W, segStarts, type Activity, type ClickPoint, type Overlay, type Reason, type RecItem, type Screen, type Tone,
 } from "./evidence";
 import { ACTION_LABEL, NET_CATEGORY_LABEL, REASON_LABEL, THREAT_LABEL } from "./labels";
-import { candidatePresentation, caseDecisionText, casePresentation, reviewReason, threatPresentation } from "./decisionDisplay";
+import { candidatePresentation, caseDecisionText, casePresentation, reputationConflict, reviewParts, reviewReason, threatPresentation } from "./decisionDisplay";
 
 // 조사 대상 페이지에서 온 문자열은 모두 React 기본 이스케이프로만 출력한다(raw HTML 금지).
 
@@ -1609,6 +1610,8 @@ function VerdictBar({
 }) {
   const cur = c?.verdict ?? null;
   const ai = c?.threat?.threat ?? "";
+  // 코드 규칙이 정한 유형은 'AI 추천'이 아니다(링크 정지·단축 경고처럼 내용을 못 본 채 피싱으로 둔 것도 있다)
+  const aiSource = threatPresentation(c?.threat).source;
   const [pick, setPick] = useState<Decision | null>(null);
   const [threat, setThreat] = useState("");
   const [note, setNote] = useState("");
@@ -1620,8 +1623,8 @@ function VerdictBar({
   const choose = (d: Decision) => {
     setMsg("");
     setPick(d);
-    // AI 가 위협 유형을 냈으면 그 유형을 기본값으로 둔다(담당자가 바꿀 수 있음)
-    if (d === "threat" && !threat) setThreat(THREAT_TYPES.includes(ai) ? ai : "");
+    // AI(모델)가 위협 유형을 냈으면 그 유형을 기본값으로 둔다(담당자가 바꿀 수 있음). 규칙이 정한 유형은 담당자가 고른다
+    if (d === "threat" && !threat) setThreat(aiSource === "model" && THREAT_TYPES.includes(ai) ? ai : "");
   };
   // 화살표로 판정 사이를 옮긴다(라디오 그룹 규칙)
   const onKey = (e: React.KeyboardEvent, i: number) => {
@@ -1712,7 +1715,7 @@ function VerdictBar({
                   {THREAT_TYPES.map((t) => (
                     <option key={t} value={t}>
                       {THREAT_LABEL[t]}
-                      {t === ai ? " (AI 추천)" : ""}
+                      {t === ai && aiSource === "model" ? " (AI 추천)" : t === ai && aiSource === "rule" ? " (규칙 판단 유형)" : ""}
                     </option>
                   ))}
                 </select>
@@ -1791,16 +1794,20 @@ function summaryLine(c: CaseOut | null, running: boolean): { tone: Tone; head: R
     return { tone: review ? "review" : "idle", head: review ? "판단할 수 없습니다" : `판단할 수 없습니다 · ${why}`, prob: null };
   }
   const name = p.typeLabel;
+  // 조사는 정상으로 봤지만 이 사건의 주소가 Safe Browsing 위험 일치: '위험 근거 없음'으로 읽히지 않게 평판을 먼저 적는다
+  const sbFirst = reputationConflict(c) ? <><span className="tone-text">Safe Browsing 위험 일치</span> · </> : null;
   if (p.source === "rule") {
     return {
       tone: review || t.hold ? "review" : t.threat === "benign" ? "safe" : "threat",
-      head: <><span className="tone-text">{name}</span>{t.threat !== "benign" ? " 의심" : ""} · {p.ruleLabel}</>,
+      head: <>{sbFirst}<span className="tone-text">{name}</span>{t.threat !== "benign" ? " 의심" : ""} · {p.ruleLabel}</>,
       prob: null,
     };
   }
   // 검토 사유는 확신 부족·평판 충돌·기술 오류를 구분해 별도 줄에서 설명한다.
   if (t.threat === "benign")
-    return { tone: review || t.hold ? "review" : "safe", head: "위험 근거를 찾지 못했습니다", prob: p.probability };
+    return sbFirst
+      ? { tone: "review", head: <>{sbFirst}AI 는 위험 근거를 찾지 못했습니다</>, prob: null }
+      : { tone: review || t.hold ? "review" : "safe", head: "위험 근거를 찾지 못했습니다", prob: p.probability };
   if (review || t.hold) return { tone: "review", head: <><span className="tone-text">{name}</span> 의심</>, prob: p.probability };
   return { tone: "threat", head: <>이 사이트는 <span className="tone-text">{name}</span>일 가능성이 높습니다</>, prob: p.probability };
 }
@@ -1809,8 +1816,12 @@ function Summary({ c, running, reasons, picked, onPick }: { c: CaseOut | null; r
   const line = summaryLine(c, running);
   const t = c?.threat;
   const p = casePresentation(c);
-  const review = !running ? reviewReason(c) : null;
-  const reviewText = p.source === "rule" && review === `${p.ruleLabel} · 담당자 검토 필요` ? "담당자 검토 필요" : review;
+  // 규칙 이름·평판 충돌은 제목에 이미 있으니 검토 줄에서는 뺀다(목록 줄은 제목이 없어 그대로 둔다)
+  const conflict = reputationConflict(c);
+  const review = !running
+    ? reviewParts(c)?.filter((x) => !(p.source === "rule" && x === p.ruleLabel) && !(conflict && x.endsWith("Safe Browsing 위험 평판 불일치")))
+    : null;
+  const reviewText = review ? [...review, "담당자 검토 필요"].join(" · ") : null;
   const next = t && p.probability !== null
     ? Object.entries(t.probabilities).sort((a, b) => b[1] - a[1]).filter(([k, v]) => k !== t.threat && v >= 0.01).slice(0, 2)
     : [];
@@ -2010,8 +2021,10 @@ function CaseTabs({
 }
 
 // 사건 요약 한 줄(연결된 사건)
-function BriefRow({ b, onOpen, note }: { b: { id: string; url: string; status: string; threat: string | null; verdict: string | null }; onOpen: (id: string) => void; note?: string }) {
+function BriefRow({ b, onOpen, note }: { b: CaseBrief; onOpen: (id: string) => void; note?: string }) {
   const verdict = b.verdict === "threat" ? "위협 확정" : b.verdict === "benign" ? "정상 확정" : b.verdict === "hold" ? "보류" : "";
+  // 판단 출처는 서버가 판단 기록에서 정한다(코드 규칙 판단을 'AI' 로 부르지 않는다, 예전 서버는 출처 없음)
+  const by = b.source === "model" ? "AI " : b.source === "rule" ? "규칙 판단 " : "";
   return (
     <li className="rel-row">
       <span className="rel-site">
@@ -2019,7 +2032,7 @@ function BriefRow({ b, onOpen, note }: { b: { id: string; url: string; status: s
         <span className="muted small">
           {note ? `${note} · ` : ""}
           {STATUS_LABEL[b.status] ?? b.status}
-          {b.threat ? ` · AI ${THREAT_LABEL[b.threat] ?? b.threat}` : ""}
+          {b.threat ? ` · ${by}${THREAT_LABEL[b.threat] ?? b.threat}` : ""}
           {verdict ? ` · ${verdict}` : ""}
         </span>
       </span>
@@ -2164,7 +2177,7 @@ function DashboardPane() {
         <>
           <div className="dash-kpis">
             <Kpi label="접수" value={k.received} sub={`끝남 ${k.finished} · 조사 중 ${k.pending}${k.other ? ` · 기타 ${k.other}` : ""}`} />
-            <Kpi label="AI 가 위협으로 봄" value={k.aiThreat} sub={`끝난 사건의 ${pctOf(k.aiThreat, k.finished)}`} />
+            <Kpi label="조사에서 위협으로 봄" value={k.aiThreat} sub={`끝난 사건의 ${pctOf(k.aiThreat, k.finished)} · AI·코드 규칙`} />
             <Kpi label="담당자 위협 확정" value={k.confirmed} />
             <Kpi label="판정 대기" value={k.waiting} sub={s.timing.waitingH.max != null ? `가장 오래 ${fmtHours(s.timing.waitingH.max)}` : undefined} tone={k.waiting ? "review" : undefined} />
           </div>
@@ -2174,7 +2187,7 @@ function DashboardPane() {
           </div>
           <div className="dash-grid">
             <div className="dash-card">
-              <h3>AI 판단 유형(끝난 사건)</h3>
+              <h3>조사 판단 유형(끝난 사건 · AI·코드 규칙)</h3>
               <BarList items={s.ai} label={AI_LABEL} />
             </div>
             <div className="dash-card">
@@ -2210,7 +2223,7 @@ function DashboardPane() {
               </table>
             </div>
             <div className="dash-card">
-              <h3>AI 와 담당자 판정</h3>
+              <h3>조사 판단과 담당자 판정</h3>
               <table className="dash-table">
                 <tbody>
                   <tr>
@@ -2226,16 +2239,16 @@ function DashboardPane() {
                     </td>
                   </tr>
                   <tr>
-                    <th>AI 위협 → 담당자 정상</th>
+                    <th>조사 위협 → 담당자 정상</th>
                     <td>{a.aiThreatReviewerBenign}건</td>
                   </tr>
                   <tr>
-                    <th>AI 정상 → 담당자 위협</th>
+                    <th>조사 정상 → 담당자 위협</th>
                     <td>{a.aiBenignReviewerThreat}건</td>
                   </tr>
                 </tbody>
               </table>
-              <p className="small muted dash-note">판정할 때의 AI 의견과 비교(판단 불가는 뺌)</p>
+              <p className="small muted dash-note">판정할 때의 조사 판단(AI·코드 규칙)과 비교(판단 불가는 뺌)</p>
             </div>
             <div className="dash-card">
               <h3>코드 규칙이 담당자 검토로 보낸 사건</h3>
@@ -2261,7 +2274,7 @@ function DashboardPane() {
                   <tr>
                     <th>자동으로 만든 사건</th>
                     <td>
-                      {s.related.auto}건 · AI 위협 {s.related.autoAiThreat} · 위협 확정 {s.related.autoConfirmed}
+                      {s.related.auto}건 · 조사 위협 {s.related.autoAiThreat} · 위협 확정 {s.related.autoConfirmed}
                     </td>
                   </tr>
                   <tr>
@@ -2272,7 +2285,7 @@ function DashboardPane() {
               </table>
             </div>
           </div>
-          <p className="small muted">위협 사건: 담당자 판정이 있으면 그 판정(위협 확정), 없으면 AI 판단. 날짜는 한국 시각.</p>
+          <p className="small muted">위협 사건: 담당자 판정이 있으면 그 판정(위협 확정), 없으면 조사 판단(AI·코드 규칙). 날짜는 한국 시각.</p>
         </>
       )}
     </section>
@@ -2316,7 +2329,7 @@ function BarList({ items, label, note }: { items: Pair[]; label?: Record<string,
   );
 }
 
-// 날짜별 접수: 쌓은 세로 막대(아래 AI 가 위협으로 본 사건, 위 그 외). 막대에 마우스를 올리면 그날 수, 표로도 둔다
+// 날짜별 접수: 쌓은 세로 막대(아래 조사에서 위협으로 본 사건 — AI·코드 규칙, 위 그 외). 막대에 마우스를 올리면 그날 수, 표로도 둔다
 function DailyChart({ rows }: { rows: Stats["daily"] }) {
   const [hover, setHover] = useState<number | null>(null);
   // 그림 좌표 1 = 화면 1px(viewBox 를 늘이면 글자가 화면 폭만큼 커진다): 칸 폭을 재서 쓴다
@@ -2345,7 +2358,7 @@ function DailyChart({ rows }: { rows: Stats["daily"] }) {
     <div className="daily" ref={box}>
       <div className="daily-legend small">
         <span>
-          <i style={{ background: SERIES_THREAT }} /> AI 가 위협으로 봄
+          <i style={{ background: SERIES_THREAT }} /> 조사에서 위협으로 봄
         </span>
         <span>
           <i style={{ background: SERIES_OTHER }} /> 그 외 접수
@@ -2379,7 +2392,7 @@ function DailyChart({ rows }: { rows: Stats["daily"] }) {
         })}
       </svg>
       <p className="daily-tip small" aria-live="polite">
-        {h ? `${h.date} · 접수 ${h.received} · AI 위협 ${h.aiThreat} · 담당자 위협 확정 ${h.confirmed}` : "막대에 마우스를 올리면 그날 수를 봅니다"}
+        {h ? `${h.date} · 접수 ${h.received} · 조사 위협 ${h.aiThreat} · 담당자 위협 확정 ${h.confirmed}` : "막대에 마우스를 올리면 그날 수를 봅니다"}
       </p>
       <table className="sr">
         <caption>날짜별 접수</caption>
@@ -2387,7 +2400,7 @@ function DailyChart({ rows }: { rows: Stats["daily"] }) {
           <tr>
             <th>날짜</th>
             <th>접수</th>
-            <th>AI 위협</th>
+            <th>조사 위협</th>
             <th>위협 확정</th>
           </tr>
         </thead>

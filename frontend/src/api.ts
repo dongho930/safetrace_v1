@@ -204,11 +204,13 @@ export const createCase = (url: string, source: string) =>
     headers: { "Idempotency-Key": crypto.randomUUID() },
   });
 // 사건 간 연결(related-sites PR 5). 값은 조사 대상 페이지에서 온 글자라 정해진 모양만 남긴다
-export type CaseBrief = { id: string; url: string; status: string; threat: string | null; verdict: string | null };
+// source: 위협 판단을 낸 쪽(model = AI, rule = 코드 규칙, null = 알 수 없음·예전 서버)
+export type CaseBrief = { id: string; url: string; status: string; threat: string | null; source: "model" | "rule" | null; verdict: string | null };
 export type CaseLinks = { parent: CaseBrief | null; children: (CaseBrief & { auto: boolean })[]; shared: { site: string; hosts: string[]; roles: string[]; cases: CaseBrief[] }[] };
 const brief = (x: unknown): CaseBrief[] =>
   isObj(x) && typeof x.id === "string" && typeof x.url === "string" && typeof x.status === "string"
-    ? [{ id: x.id.slice(0, 36), url: x.url.slice(0, 2000), status: x.status.slice(0, 24), threat: strOr(x.threat)?.slice(0, 32) ?? null, verdict: strOr(x.verdict)?.slice(0, 16) ?? null }]
+    ? [{ id: x.id.slice(0, 36), url: x.url.slice(0, 2000), status: x.status.slice(0, 24), threat: strOr(x.threat)?.slice(0, 32) ?? null,
+         source: x.source === "model" || x.source === "rule" ? x.source : null, verdict: strOr(x.verdict)?.slice(0, 16) ?? null }]
     : [];
 export const getLinks = async (id: string): Promise<CaseLinks> => {
   const v = await req<unknown>(`/api/cases/${encodeURIComponent(id)}/links`);

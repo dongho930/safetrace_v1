@@ -352,7 +352,7 @@ def test_malformed_signed_records_do_not_break_exports(tmp_path, client, case_id
 
 @pytest.mark.parametrize("override, label", [
     ({"reason": "link_takedown", "original": {"threat": "benign", "probability": 0.65, "provider": "jev_typesafe"}},
-     "단축·호스팅 서비스가 불법·약관 위반으로 링크를 정지 → 담당자 검토 · 모델 원래 판단 정상 65%"),
+     "단축·호스팅 서비스의 링크 정지 안내 → 담당자 검토 · 모델 원래 판단 정상 65%"),
     ({"reason": "brand_lookalike", "brand": "kbank", "destination": "g.kbank.mywire.org",
       "original": {"threat": "unknown", "probability": 0.5, "provider": "jev_typesafe"}},
      "열리지 않은 목적지가 브랜드 사칭 도메인(kbank · g.kbank.mywire.org) → 담당자 검토 · 모델 원래 판단 판단 불가 50%"),
@@ -364,7 +364,7 @@ def test_malformed_signed_records_do_not_break_exports(tmp_path, client, case_id
      "브랜드를 내세운 화면인데 도메인이 그 이름의 오타(trezor · web-trzerwallet.gitbook.io) → 담당자 검토 · 모델 원래 판단 정상 55%"),
     ({"reason": "brand_login_shared_hosting", "brand": "steam", "destination": "x.netlify.app",
       "original": {"threat": "benign", "probability": 0.49, "provider": "jev_typesafe"}},
-     "공용 호스팅에서 브랜드를 내세운 로그인 화면(steam · x.netlify.app) → 담당자 검토 · 모델 원래 판단 정상 49%"),
+     "공용 호스팅의 브랜드·로그인 표지(steam · x.netlify.app) → 담당자 검토 · 모델 원래 판단 정상 49%"),
     ({"reason": "brand_clone_title", "brand": "steam", "destination": "sample-clone-42.dev",
       "original": {"threat": "benign", "probability": 0.83, "provider": "jev_typesafe"}},
      "공식 도메인 밖에서 브랜드 공식 화면 제목을 그대로 쓴 로그인 화면(steam · sample-clone-42.dev) → 담당자 검토"

@@ -32,6 +32,7 @@ from sqlalchemy.exc import IntegrityError
 from .. import accounts, caselist, intake, ioc, package, related, report, stats, verdicts
 from ..accounts import ROLES, AccountError
 from ..config import get_settings
+from ..decision.schema import threat_source
 from ..evidence import Head, Signer, VerifyResult, iter_evidence, open_evidence, verify_case
 from ..live import CHANNEL as LIVE_CHANNEL
 from ..live import END as LIVE_END
@@ -956,7 +957,7 @@ GROUP_SITES_MAX = 5000  # 연결된 사건을 찾을 때 읽는 호스트 줄 �
 
 
 def _briefs(ids: list[str]) -> dict[str, dict]:
-    """사건 요약(id·신고 URL·상태·AI 위협 유형·담당자 판정). 연결 목록·묶음에 쓴다."""
+    """사건 요약(id·신고 URL·상태·위협 유형과 그 출처(AI·코드 규칙)·담당자 판정). 연결 목록·묶음에 쓴다."""
     if not ids:
         return {}
     with store.session() as s:
@@ -964,6 +965,7 @@ def _briefs(ids: list[str]) -> dict[str, dict]:
     latest = verdicts.latest_for(store, ids)
     return {c.id: {"id": c.id, "url": c.url, "status": c.status,
                    "threat": c.threat.get("threat") if isinstance(c.threat, dict) else None,
+                   "source": threat_source(c.threat),
                    "verdict": latest[c.id].decision if c.id in latest else None} for c in cases}
 
 
