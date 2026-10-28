@@ -2,7 +2,7 @@
 // 문장은 고정 문구 + 기록 값으로만 만든다(AI 가 새로 쓰는 문장 없음). 페이지에서 온 글자는 잘라서 글자로만 쓴다.
 import { type Candidate, type CaseOut, type EvidenceEvent, clickables, strs, text as str } from "./api";
 import { ACTION_LABEL, overrideLabel } from "./labels";
-import { candidatePresentation } from "./decisionDisplay";
+import { BENIGN_SURE, candidatePresentation, holdLabel, threatPresentation } from "./decisionDisplay";
 
 export type Tone = "threat" | "review" | "safe" | "idle";
 export const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -53,11 +53,14 @@ export type Reason = {
 // 위험 근거처럼 보이지 않게 회색으로 낮추고, 정상 사이트에는 드문 비밀번호 입력 칸·다운로드 요소만 '확인 권장'(주황)으로 남긴다.
 // 로그인·결제 글자 링크는 정상 사이트에도 흔해(로컬 정상 사건 중 금지 요소가 있는 44건의 23·19건) 회색으로 둔다.
 // Safe Browsing 위험 일치면 서버는 AI 의견(정상·보류 아님)을 그대로 두고 사건만 검토 필요로 바꾸므로 사건 상태·평판·담당자 판정도 본다
-// (연관 사이트 조사 중이면 원래 결과 상태 main_status)
+// (연관 사이트 조사 중이면 원래 결과 상태 main_status). AI 확신이 낮은 정상(0.9 미만, 평가에서 자주 틀림)은 '위험 근거 아님'으로
+// 낮추지 않는다 — 담당자가 정상으로 확정했거나 규칙(공식 사행사업자 도메인)이 정한 정상은 낮춘다
 export const calmCase = (c: CaseOut | null) => {
   if (!c || c.threat?.threat !== "benign" || c.threat.hold) return false;
   const status = c.phase === "related" ? c.main_status : c.status;
-  return status === "COMPLETED" && c.safebrowsing?.status !== "match" && (!c.verdict || c.verdict.decision === "benign");
+  const p = threatPresentation(c.threat);
+  const sure = c.verdict?.decision === "benign" || p.source === "rule" || (p.probability !== null && p.probability >= BENIGN_SURE);
+  return sure && status === "COMPLETED" && c.safebrowsing?.status !== "match" && (!c.verdict || c.verdict.decision === "benign");
 };
 // AI 판단과 따로 확인된 보안 사건(내부 주소로 가려 함, 고른 버튼이 바뀜)은 정상 판단 사건에서도 낮추지 않는다.
 // 낮추는 것은 안전 규칙이 작동한 기록만: 금지 요소 클릭(forbidden:)·사라진 요소·후보 아닌 요소, POST 이동(method:)
@@ -168,7 +171,7 @@ export function buildReasons(events: EvidenceEvent[], c: CaseOut): Reason[] {
     } else {
       push({
         key: "candidate", title: sus.hold || sus.threat === "unknown" ? "연관 사이트 검토 필요" : "연관 사이트도 의심",
-        text: `${where} ${host} · 조사 결과 ${opinion}${sus.hold ? "(보류)" : ""}`,
+        text: `${where} ${host} · 조사 결과 ${opinion}${holdLabel(p, sus.hold) ? ` · ${holdLabel(p, sus.hold)}` : ""}`,
         ev: `하위 조사 ${sus.sub}`, tone: sus.hold ? "review" : "threat", shot: png(first), shotSeq: first?.seq ?? null,
       });
     }
@@ -268,7 +271,9 @@ export function buildPath(c: CaseOut, events: EvidenceEvent[]): PathMap {
       const tone: Tone = x.reputation_match ? "threat" : !th || th === "benign" ? (x.hold ? "review" : "idle") : x.hold ? "review" : "threat";
       const p = candidatePresentation(x, events);
       const source = p.source === "rule" ? " · 규칙 판단" : p.source === "model" ? " · AI 판단" : "";
-      const verdict = th ? `${p.typeLabel}${x.hold ? "(보류)" : ""}${source}` : "판단 없음";
+      // '보류'는 담당자 판정에만 쓴다: AI 가 넘긴 것은 '확신 낮음', 규칙·판단 불가가 넘긴 것은 '검토 필요'
+      const held = holdLabel(p, x.hold);
+      const verdict = th ? `${p.typeLabel}${held ? `(${held})` : ""}${source}` : "판단 없음";
       branches[lastIdx].push({ kind: "cand", title: `${where} 후보 · ${verdict}${repNote}`, sub: clip(str(x.host ?? x.url), 24), tone, dashed: false });
     } else {
       branches[lastIdx].push({ kind: "cand-record", title: `${where} 후보 · 기록만${repNote}`, sub: clip(str(x.host ?? x.url), 24), tone: x.reputation_match ? "threat" : "idle", dashed: true });

@@ -59,7 +59,10 @@ import {
   SCREEN_W, segStarts, type Activity, type ClickPoint, type Overlay, type Reason, type RecItem, type Screen, type Tone,
 } from "./evidence";
 import { ACTION_LABEL, NET_CATEGORY_LABEL, REASON_LABEL, THREAT_LABEL } from "./labels";
-import { candidatePresentation, caseDecisionText, casePresentation, reputationConflict, reviewParts, reviewReason, threatPresentation } from "./decisionDisplay";
+import {
+  candidatePresentation, caseDecisionText, casePresentation, exploreNote, holdLabel, lowBenign, lowConfidenceBenign, reputationConflict, reviewParts,
+  reviewReason, threatPresentation,
+} from "./decisionDisplay";
 
 // 조사 대상 페이지에서 온 문자열은 모두 React 기본 이스케이프로만 출력한다(raw HTML 금지).
 
@@ -1121,14 +1124,18 @@ function StatusChip({ c }: { c: CaseOut }) {
   );
 }
 
+// AI 가 정상으로 봤지만 확신이 낮은(0.9 미만) 사건: 초록으로 보이지 않게 따로 알린다(판단·상태는 그대로)
+const LOW_BENIGN_NOTE = "AI 확신 낮음(정상 0.9 미만) · 화면 확인 권장";
+
 function caseSummary(raw: CaseOut): string {
   const c = asMain(raw);
   if (c.status === "RUNNING" || c.status === "QUEUED") return "에이전트가 조사하는 중";
   const parts: string[] = [];
   if (c.verdict?.decision === "hold") parts.push("담당자 보류");
-  if (c.threat) parts.push(caseDecisionText(c));
+  if (c.threat) parts.push(caseDecisionText(c, true));
   const review = reviewReason(raw);
   if (review) parts.push(review);
+  else if (lowConfidenceBenign(raw)) parts.push(LOW_BENIGN_NOTE);
   else if (c.finish_reason) parts.push(REASON_LABEL[c.finish_reason] ?? c.finish_reason);
   return parts.join(" · ") || "-";
 }
@@ -1526,9 +1533,11 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
       lines.push({ seq: e.seq, icon: "alert", tone: "orange", text: <span className="warn">담당자 검토로 전환 · {why}</span> });
     } else if (e.kind === "threat") {
       const p = threatPresentation(d);
+      // AI 가 확신이 낮아 넘긴 판단은 그렇게 적는다(규칙이 넘긴 것은 규칙 설명이 '→ 담당자 검토'를 말한다)
+      const low = p.source === "model" ? holdLabel(p, d.hold) : null;
       lines.push({
         seq: e.seq, icon: "flag", tone: d.threat === "benign" ? "teal" : "orange",
-        text: <>{p.sourceLabel} · {p.typeLabel}{p.ruleDescription ? ` · ${p.ruleDescription}` : ""}{p.originalOpinion ? <span className="muted"> · {p.originalOpinion}</span> : null}</>,
+        text: <>{p.sourceLabel} · {p.typeLabel}{low ? ` · ${low}` : ""}{p.ruleDescription ? ` · ${p.ruleDescription}` : ""}{p.originalOpinion ? <span className="muted"> · {p.originalOpinion}</span> : null}</>,
         end: p.probability !== null ? pct(p.probability) : p.sourceLabel,
       });
     } else if (e.kind === "safebrowsing") {
@@ -1791,7 +1800,9 @@ function summaryLine(c: CaseOut | null, running: boolean): { tone: Tone; head: R
   if (running || !c) return { tone: "idle", head: "조사 중 · 조사가 끝나면 판단이 표시됩니다", prob: null };
   if (!t || t.threat === "unknown") {
     const why = c.finish_reason ? (REASON_LABEL[c.finish_reason] ?? c.finish_reason) : (STATUS_LABEL[c.status] ?? c.status);
-    return { tone: review ? "review" : "idle", head: review ? "판단할 수 없습니다" : `판단할 수 없습니다 · ${why}`, prob: null };
+    // 검토 사건은 검토 줄이 까닭을 말하므로, 제목에는 판단하지 못한 사정(탐색이 일찍 끝난 까닭)만 남긴다
+    const note = exploreNote(c);
+    return { tone: review ? "review" : "idle", head: review ? `판단할 수 없습니다${note ? ` · ${note}` : ""}` : `판단할 수 없습니다 · ${why}`, prob: null };
   }
   const name = p.typeLabel;
   // 조사는 정상으로 봤지만 이 사건의 주소가 Safe Browsing 위험 일치: '위험 근거 없음'으로 읽히지 않게 평판을 먼저 적는다
@@ -1807,7 +1818,7 @@ function summaryLine(c: CaseOut | null, running: boolean): { tone: Tone; head: R
   if (t.threat === "benign")
     return sbFirst
       ? { tone: "review", head: <>{sbFirst}AI 는 위험 근거를 찾지 못했습니다</>, prob: null }
-      : { tone: review || t.hold ? "review" : "safe", head: "위험 근거를 찾지 못했습니다", prob: p.probability };
+      : { tone: review || t.hold || lowConfidenceBenign(c) ? "review" : "safe", head: "위험 근거를 찾지 못했습니다", prob: p.probability };
   if (review || t.hold) return { tone: "review", head: <><span className="tone-text">{name}</span> 의심</>, prob: p.probability };
   return { tone: "threat", head: <>이 사이트는 <span className="tone-text">{name}</span>일 가능성이 높습니다</>, prob: p.probability };
 }
@@ -1821,7 +1832,7 @@ function Summary({ c, running, reasons, picked, onPick }: { c: CaseOut | null; r
   const review = !running
     ? reviewParts(c)?.filter((x) => !(p.source === "rule" && x === p.ruleLabel) && !(conflict && x.endsWith("Safe Browsing 위험 평판 불일치")))
     : null;
-  const reviewText = review ? [...review, "담당자 검토 필요"].join(" · ") : null;
+  const reviewText = review ? [...review, "담당자 검토 필요"].join(" · ") : !running && lowConfidenceBenign(c) ? LOW_BENIGN_NOTE : null;
   const next = t && p.probability !== null
     ? Object.entries(t.probabilities).sort((a, b) => b[1] - a[1]).filter(([k, v]) => k !== t.threat && v >= 0.01).slice(0, 2)
     : [];
@@ -1847,7 +1858,7 @@ function Summary({ c, running, reasons, picked, onPick }: { c: CaseOut | null; r
       )}
       {calmCase(c) && reasons.some((r) => r.rule) && (
         <p className="small muted reasons-note">
-          정상으로 판단했습니다. 회색 카드는 위험 근거가 아니라 조사 중 안전 규칙이 작동한 기록입니다.
+          AI 는 정상으로 봤습니다. 회색 카드는 위험 근거가 아니라 조사 중 안전 규칙이 작동한 기록입니다.
           {reasons.some((r) => r.tone === "review") && " 주황 카드는 AI 판단과 별개로 확인을 권하는 화면입니다."}
         </p>
       )}
@@ -2022,7 +2033,7 @@ function CaseTabs({
 
 // 사건 요약 한 줄(연결된 사건)
 function BriefRow({ b, onOpen, note }: { b: CaseBrief; onOpen: (id: string) => void; note?: string }) {
-  const verdict = b.verdict === "threat" ? "위협 확정" : b.verdict === "benign" ? "정상 확정" : b.verdict === "hold" ? "보류" : "";
+  const verdict = b.verdict === "threat" ? "위협 확정" : b.verdict === "benign" ? "정상 확정" : b.verdict === "hold" ? "담당자 보류" : "";
   // 판단 출처는 서버가 판단 기록에서 정한다(코드 규칙 판단을 'AI' 로 부르지 않는다, 예전 서버는 출처 없음)
   const by = b.source === "model" ? "AI " : b.source === "rule" ? "규칙 판단 " : "";
   return (
@@ -2442,10 +2453,14 @@ function candStateBase(x: Candidate, pending: boolean, events: EvidenceEvent[]):
   const th = x.threat ?? "";
   const p = candidatePresentation(x, events);
   const source = p.source === "rule" ? ` · 규칙 판단${p.ruleLabel ? ` · ${p.ruleLabel}` : ""}` : p.probability !== null ? ` · ${pct(p.probability)}` : "";
+  // '보류'는 담당자 판정에만 쓴다. AI 가 넘긴 것은 '확신 낮음', 규칙·판단 불가가 넘긴 것은 '검토 필요'
+  const held = holdLabel(p, x.hold);
   if (th && th !== "benign" && th !== "unknown") {
-    return { label: `${x.hold ? "보류" : "위협 의심"} · ${p.typeLabel}${source}`, tone: x.hold ? "st-REVIEW_REQUIRED" : "st-threat" };
+    return { label: `위협 의심 · ${p.typeLabel}${source}${held ? ` · ${held}` : ""}`, tone: x.hold ? "st-REVIEW_REQUIRED" : "st-threat" };
   }
-  if (x.hold) return { label: `${p.typeLabel} · 검토 필요${source}`, tone: "st-REVIEW_REQUIRED" };
+  if (held) return { label: `${p.typeLabel} · ${held}${source}`, tone: "st-REVIEW_REQUIRED" };
+  // 확신이 낮은 정상(0.9 미만)은 초록으로 보이지 않게
+  if (th === "benign" && lowBenign(p, x.hold)) return { label: `정상 · 확신 낮음${source}`, tone: "" };
   return th === "benign" ? { label: `정상${source}`, tone: "st-COMPLETED" } : { label: th === "unknown" ? "판단 불가" : "판단 없음", tone: "" };
 }
 
@@ -2664,8 +2679,9 @@ function PathTab({ c, events }: { c: CaseOut; events: EvidenceEvent[] }) {
   const m = useMemo(() => buildPath(c, events), [c, events]);
   const th = c.threat;
   const review = reviewReason(c);
-  const thTone: Tone = review || th?.hold ? "review" : !th || th.threat === "unknown" ? "idle" : th.threat === "benign" ? "safe" : "threat";
-  const decision = th ? `${caseDecisionText(c)}${review ? " · 검토 필요" : ""}` : review;
+  const low = lowConfidenceBenign(c); // 확신이 낮은 정상은 초록으로 보이지 않게
+  const thTone: Tone = review || th?.hold || low ? "review" : !th || th.threat === "unknown" ? "idle" : th.threat === "benign" ? "safe" : "threat";
+  const decision = th ? `${caseDecisionText(c)}${review ? " · 검토 필요" : low ? " · 확신 낮음" : ""}` : review;
   if (m.nodes.length === 1 && m.branches[0].length === 0) {
     return (
       <div className="floor pathfloor">

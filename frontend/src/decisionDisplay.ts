@@ -88,24 +88,52 @@ export function reputationConflict(c: CaseOut | null): boolean {
   return c?.threat?.threat === "benign" && reputationHit(c) === "own";
 }
 
+// 원래 조사의 종료 사유(연관 사이트를 조사하는 중이면 원래 결과의 사유)
+const mainReason = (c: CaseOut | null): string | null =>
+  c?.status === "RUNNING" && c.phase === "related" && c.main_status ? c.main_reason ?? c.finish_reason : c?.finish_reason ?? null;
+
 export function casePresentation(c: CaseOut | null): ThreatPresentation {
   const p = threatPresentation(c?.threat);
-  const reason = c?.status === "RUNNING" && c.phase === "related" && c.main_status
-    ? c.main_reason ?? c.finish_reason : c?.finish_reason;
   // 평판과 모델 의견이 충돌한 사건은 큰 숫자보다 검토 사유를 먼저 보여 준다.
-  return reason === "reputation_match" || reputationConflict(c) ? { ...p, probability: null } : p;
+  return mainReason(c) === "reputation_match" || reputationConflict(c) ? { ...p, probability: null } : p;
+}
+
+// 판단의 hold 는 담당자의 '보류' 판정과 다르다: AI(모델)는 확신이 낮아서, 코드 규칙·판단 불가는 담당자가 보라고 넘긴 것이다
+export function holdLabel(p: ThreatPresentation, hold: unknown): string | null {
+  if (hold !== true) return null;
+  return p.source === "model" && p.threat !== "unknown" ? "확신 낮음" : "검토 필요";
+}
+
+// 정상 판단을 '안전'(초록)으로 보이는 AI 확신의 하한. 평가 기록(모델 판단, 단계형 시험 페이지 제외)에서 보류 아닌 정상
+// 0.9 이상은 1,953/1,960 이 실제 정상이었지만 0.6~0.7 은 14/62, 0.7~0.8 은 62/88 뿐이었다(2026-10-28). 판단·상태는 그대로다
+export const BENIGN_SURE = 0.9;
+export function lowBenign(p: ThreatPresentation, hold: unknown): boolean {
+  return p.source === "model" && p.threat === "benign" && hold !== true && p.probability !== null && p.probability < BENIGN_SURE;
+}
+// 사건 단위: 담당자가 확정했거나 이미 검토 사유가 있으면(그쪽이 말한다) 따로 알리지 않는다
+export function lowConfidenceBenign(c: CaseOut | null): boolean {
+  if (!c || reviewParts(c) !== null || c.verdict?.decision === "threat" || c.verdict?.decision === "benign") return false;
+  return lowBenign(casePresentation(c), c.threat?.hold);
+}
+
+// 판단하지 못한 까닭이 될 수 있는 탐색 종료(검토 사유가 아니라 사정 설명). '에이전트가 조사 완료 판단'은 설명이 안 돼 뺀다
+const EXPLORE_END = new Set(["low_confidence_action", "loop_detected", "dead_end", "step_budget", "time_budget", "goto_failed"]);
+export function exploreNote(c: CaseOut | null): string | null {
+  const reason = mainReason(c);
+  return reason && EXPLORE_END.has(reason) ? REASON_LABEL[reason] ?? null : null;
 }
 
 const SB_REASONS = new Set(["reputation_match", "candidate_reputation_match", "unreachable_reputation_match"]);
 
-// 검토가 필요한 까닭(앞에서부터 중요한 순서). 검토할 것이 없으면 null
+// 검토가 필요한 까닭(앞에서부터 중요한 순서). 검토할 것이 없으면 null, 따로 댈 까닭이 없으면 빈 목록.
+// 판단 불가는 유형 문구('판단 불가'·'판단할 수 없습니다')가 이미 말하고, 탐색 종료 까닭은 검토의 원인이 아니라서 여기 넣지 않는다
 export function reviewParts(c: CaseOut | null): string[] | null {
   if (!c) return null;
   if (c.verdict?.decision === "threat" || c.verdict?.decision === "benign") return null;
   const related = c.status === "RUNNING" && c.phase === "related" && !!c.main_status;
   const status = related ? c.main_status : c.status;
   if (status !== "REVIEW_REQUIRED" && !c.threat?.hold) return null;
-  const reason = related ? c.main_reason ?? c.finish_reason : c.finish_reason;
+  const reason = mainReason(c);
   const p = threatPresentation(c.threat);
   const conflict = `${p.source === "rule" ? "규칙 판단" : "AI 의견"}과 Safe Browsing 위험 평판 불일치`;
   const reasons = dict({
@@ -123,22 +151,23 @@ export function reviewParts(c: CaseOut | null): string[] | null {
     : hit === "candidate" ? "연관 후보의 Safe Browsing 위험 일치" : null;
   const base = (reason && reasons[reason])
     || (p.source === "rule" && p.ruleLabel)
-    || (p.threat === "unknown" && "유형을 판단하지 못했습니다")
-    || (c.threat?.hold && p.source === "model" && "AI 판단 불확실")
+    || (c.threat?.hold && p.source === "model" && p.threat !== "unknown" && "AI 판단 불확실")
     || null;
-  const parts = [sb, base].filter((x): x is string => !!x);
-  return parts.length ? parts : [(reason && REASON_LABEL[reason]) || "조사 결과 확인"];
+  return [sb, base].filter((x): x is string => !!x);
 }
 
 export function reviewReason(c: CaseOut | null): string | null {
   const parts = reviewParts(c);
-  return parts ? `${parts.join(" · ")} · 담당자 검토 필요` : null;
+  return parts ? [...parts, "담당자 검토 필요"].join(" · ") : null;
 }
 
 // 목록과 경로 지도의 짧은 판단 문구. 규칙 점수나 출처가 없는 값은 붙이지 않는다.
-export function caseDecisionText(c: CaseOut): string {
+// explain: 판단 불가면 판단하지 못한 사정(탐색 종료 까닭)을 괄호로 붙인다(목록 줄)
+export function caseDecisionText(c: CaseOut, explain = false): string {
   const p = casePresentation(c);
   if (!p.threat) return "판단 없음";
+  const note = explain && p.threat === "unknown" ? exploreNote(c) : null;
+  if (note) return `${p.typeLabel}(${note})`;
   const suspect = !["benign", "unknown"].includes(p.threat);
   const label = `${p.typeLabel}${suspect && (c.threat?.hold || p.source === "rule") ? " 의심" : ""}`;
   if (p.source === "rule") return `${label} · 규칙 판단`;

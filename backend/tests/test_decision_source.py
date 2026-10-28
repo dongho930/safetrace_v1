@@ -80,11 +80,11 @@ def test_report_does_not_write_rule_type_as_ai_probability(tmp_path):
     ai = rep["assessment"]["ai"]
     assert ai["source"] == "rule"
     line = report.assessment_line(ai)
-    assert line == "피싱 · 코드 규칙 판단 · 보류(담당자 검토)" and "100%" not in line and "AI" not in line
+    assert line == "피싱 · 코드 규칙 판단 · 담당자 검토" and "100%" not in line and "AI" not in line
     assert ai["override"].endswith("모델 원래 판단 판단 불가 50%")  # 모델의 원래 의견은 '코드 규칙' 줄에 남는다
     rows = rep["related"]["investigated"]
     assert [r["source"] for r in rows] == ["rule", "model"]
-    assert [report.related_opinion(r) for r in rows] == ["피싱 · 코드 규칙 판단 · 보류", "피싱 (AI 확률 62%)"]
+    assert [report.related_opinion(r) for r in rows] == ["피싱 · 코드 규칙 판단 · 담당자 검토", "피싱 (AI 확률 62%)"]
     assert report.render_pdf(rep, ev).startswith(b"%PDF")
 
 
@@ -92,7 +92,7 @@ def test_report_model_and_unknown_lines(tmp_path):
     rep, _ = _chain(tmp_path, {**MODEL, "probability": 0.87})
     assert report.assessment_line(rep["assessment"]["ai"]) == "피싱 (AI 확률 87%)"
     rep, _ = _chain(tmp_path, {"threat": "unknown", "probability": 0.4, "hold": True, "provider": "jev_typesafe"})
-    assert report.assessment_line(rep["assessment"]["ai"]) == "판단 불가 · 보류(담당자 검토)"  # 판단 불가의 확률은 안 적는다
+    assert report.assessment_line(rep["assessment"]["ai"]) == "판단 불가 · 담당자 검토"  # 판단 불가의 확률은 안 적는다
     rep, _ = _chain(tmp_path, {**MODEL, "provider": "someone_else"})
     assert report.assessment_line(rep["assessment"]["ai"]) == "피싱"  # 출처를 모르면 AI 확률로 적지 않는다
     assert report.assessment_line(None) == "판단 없음" and report.assessment_line(None, True).startswith("판단 서비스 장애")
@@ -114,3 +114,15 @@ def test_referral_does_not_write_fallback_rule_score_as_ai(tmp_path):
     assert r["applicable"] and "코드 규칙 · 담당자 판정 전" in r["text"] and "75%" not in r["text"]
     rep, _ = _chain(tmp_path, {**MODEL, "probability": 0.87})
     assert "AI 판단 87%" in referral.build(rep)["text"]
+
+
+def test_report_hold_is_not_written_as_reviewer_hold(tmp_path):
+    """'보류'는 담당자 판정에만 쓴다(콘솔 holdLabel 과 같은 기준): AI 가 넘긴 판단은 '확신 낮음', 규칙·판단 불가는 '담당자 검토'."""
+    rep, _ = _chain(tmp_path, {**MODEL, "probability": 0.51, "hold": True},
+                    subs=[("https://other.example/", {**MODEL, "probability": 0.55, "hold": True})])
+    assert report.assessment_line(rep["assessment"]["ai"]) == "피싱 (AI 확률 51%) · 확신 낮음(담당자 검토)"
+    assert report.related_opinion(rep["related"]["investigated"][0]) == "피싱 (AI 확률 55%) · 확신 낮음"
+    rep, _ = _chain(tmp_path, {**MODEL, "threat": "benign", "probability": 0.48, "hold": True})
+    assert report.assessment_line(rep["assessment"]["ai"]) == "정상 (AI 확률 48%) · 확신 낮음(담당자 검토)"
+    assert report.hold_ko({"hold": True, "source": None, "threat": "phishing"}) == "담당자 검토"
+    assert report.hold_ko({"hold": False, "source": "model"}) is None
