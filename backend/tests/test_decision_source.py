@@ -172,3 +172,20 @@ def test_report_reputation_line_shows_type_and_candidate(tmp_path):
     assert report.reputation_line(sb) == ("Google Safe Browsing: 위험 목록 일치 · SOCIAL_ENGINEERING https://reported.example/"
                                           " · MALWARE https://cand.example/ (연관 후보)")
     assert report.reputation_line(None) == "조회 기록 없음"
+
+
+def test_threat_type_names_match_console_report_and_ioc():
+    """유형 이름이 콘솔('악성 앱'·'불법 도박')과 보고서('악성코드'·'불법 도박 의심')에서 달랐다(2026-10-28). 한 표로 맞춘다.
+    '의심'은 이름에 넣지 않는다 — 콘솔은 확신이 낮으면 ' 의심'을 붙이고, PDF 칸 이름이 '의심 유형'이며, 확정 판정 줄은
+    '위협 확정 — 불법 도박 의심'처럼 엇갈렸다."""
+    from safetrace import ioc
+    from safetrace.decision.schema import THREAT_LABELS_KO
+
+    console = (ROOT / "frontend/src/labels.ts").read_text(encoding="utf-8")
+    block = console.split("export const THREAT_LABEL", 1)[1].split("});", 1)[0]
+    labels = dict(re.findall(r'^\s*([a-z_]+):\s*"([^"]+)"', block, re.M))
+    server = {t.value: name for t, name in THREAT_LABELS_KO.items()}
+    assert labels == server == report.THREAT_KO
+    assert all(server[k] == v for k, v in ioc.THREAT_KO.items())
+    assert not any("의심" in v for v in server.values())
+    assert server["malware"] == "악성코드" and server["illegal_gambling"] == "불법 도박"
