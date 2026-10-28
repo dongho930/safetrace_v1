@@ -113,6 +113,14 @@ docker compose exec api python -m safetrace.accounts add <아이디> --role admi
 cd backend && ../.venv/Scripts/python -m pytest -q          # 171개 (단위 + 실제 Chromium 통합)
 ```
 
+콘솔 판단 출처·검토 사유 표시 회귀 시험(Node.js 24, 새 의존성 없음):
+
+```bash
+cd frontend && npm ci && npm test && npm run build
+```
+
+표시 기준과 전후 측정은 [콘솔 판단 표시](docs/decision-source-display.md)를 참고한다.
+
 ## 품질 평가 (Docker 스택에서, 실제 Jev 판단)
 
 정답을 붙인 URL 목록(`data/eval_set.csv`: 시험 페이지·정상 사이트·KISA 피싱 URL)을 여러 번 조사해

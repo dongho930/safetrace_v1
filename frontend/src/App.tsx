@@ -51,14 +51,14 @@ import {
   streamEvents,
   strs,
   text,
-  type Threat,
   verifyCase,
 } from "./api";
 import {
   buildOverlay, buildPath, buildReasons, buildScreens, calmCase, clip, CURSOR_IN, cursorTravel, hostOrFile, hostPath, jpegSize, liveActivity, liveClick, locateSeg, MAX_RECORDINGS, recCursor, recordingClicks, recordings, SCREEN_H,
   SCREEN_W, segStarts, type Activity, type ClickPoint, type Overlay, type Reason, type RecItem, type Screen, type Tone,
 } from "./evidence";
-import { ACTION_LABEL, NET_CATEGORY_LABEL, overrideLabel, REASON_LABEL, THREAT_LABEL } from "./labels";
+import { ACTION_LABEL, NET_CATEGORY_LABEL, REASON_LABEL, THREAT_LABEL } from "./labels";
+import { candidatePresentation, caseDecisionText, casePresentation, reviewReason, threatPresentation } from "./decisionDisplay";
 
 // 조사 대상 페이지에서 온 문자열은 모두 React 기본 이스케이프로만 출력한다(raw HTML 금지).
 
@@ -142,7 +142,7 @@ const pct = (v: number) => (typeof v === "number" && Number.isFinite(v) ? v.toFi
 const isSuspect = (c: CaseOut) => !!c.threat && !["benign", "unknown"].includes(c.threat.threat);
 // 원래 결과가 나왔고 연관 사이트를 조사하는 중인 사건은 원래 결과의 상태로 분류한다(조사 중 폴더에 넣지 않는다)
 const relatedRunning = (c: CaseOut) => c.phase === "related" && c.status === "RUNNING" && !!c.main_status;
-const asMain = (c: CaseOut): CaseOut => (relatedRunning(c) ? { ...c, status: c.main_status as string } : c);
+const asMain = (c: CaseOut): CaseOut => (relatedRunning(c) ? { ...c, status: c.main_status as string, finish_reason: c.main_reason ?? c.finish_reason } : c);
 // 폴더 기준(어느 사건이 어느 폴더인지)과 건수는 서버가 전체 사건으로 계산한다(safetrace/caselist.py — 예전에 여기 있던 기준과 같다)
 const FOLDERS: { id: FolderId; label: string; color: string }[] = [
   { id: "review", label: "검토 필요", color: "var(--review)" },
@@ -1109,7 +1109,7 @@ function StatusChip({ c }: { c: CaseOut }) {
   if (c.status === "COMPLETED" && c.threat && !["benign", "unknown"].includes(c.threat.threat)) {
     return (
       <span className="chip st-threat">
-        ■ {THREAT_LABEL[c.threat.threat] ?? c.threat.threat} {pct(c.threat.probability)}
+        ■ {caseDecisionText(c)}
       </span>
     );
   }
@@ -1125,8 +1125,10 @@ function caseSummary(raw: CaseOut): string {
   if (c.status === "RUNNING" || c.status === "QUEUED") return "에이전트가 조사하는 중";
   const parts: string[] = [];
   if (c.verdict?.decision === "hold") parts.push("담당자 보류");
-  if (c.threat) parts.push(`${THREAT_LABEL[c.threat.threat] ?? c.threat.threat} ${pct(c.threat.probability)}`);
-  if (c.finish_reason) parts.push(REASON_LABEL[c.finish_reason] ?? c.finish_reason);
+  if (c.threat) parts.push(caseDecisionText(c));
+  const review = reviewReason(raw);
+  if (review) parts.push(review);
+  else if (c.finish_reason) parts.push(REASON_LABEL[c.finish_reason] ?? c.finish_reason);
   return parts.join(" · ") || "-";
 }
 
@@ -1522,7 +1524,12 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
         : `Safe Browsing ${strs(d.threat_types).join(", ")}`;
       lines.push({ seq: e.seq, icon: "alert", tone: "orange", text: <span className="warn">담당자 검토로 전환 · {why}</span> });
     } else if (e.kind === "threat") {
-      lines.push({ seq: e.seq, icon: "flag", tone: d.threat === "benign" ? "teal" : "orange", text: <>위협 판단 · {THREAT_LABEL[text(d.threat)] ?? text(d.threat)}{d.override ? ` (${overrideLabel(d.override as Threat["override"])})` : ""}</>, end: pct(num(d.probability)) });
+      const p = threatPresentation(d);
+      lines.push({
+        seq: e.seq, icon: "flag", tone: d.threat === "benign" ? "teal" : "orange",
+        text: <>{p.sourceLabel} · {p.typeLabel}{p.ruleDescription ? ` · ${p.ruleDescription}` : ""}{p.originalOpinion ? <span className="muted"> · {p.originalOpinion}</span> : null}</>,
+        end: p.probability !== null ? pct(p.probability) : p.sourceLabel,
+      });
     } else if (e.kind === "safebrowsing") {
       lines.push({ seq: e.seq, icon: "shieldCheck", tone: d.status === "match" ? "red" : "", text: <>Safe Browsing · {text(d.status)}</> });
     } else if (e.kind === "finish") {
@@ -1773,33 +1780,44 @@ function VerdictBar({
   );
 }
 
-// ── AI 요약 + 근거 카드(고정 문구 + 기록 값) ───────────────────────
+// ── 조사 판단 + 근거 카드(고정 문구 + 기록 값) ───────────────────────
 function summaryLine(c: CaseOut | null, running: boolean): { tone: Tone; head: React.ReactNode; prob: number | null } {
   const t = c?.threat;
+  const p = casePresentation(c);
+  const review = reviewReason(c);
   if (running || !c) return { tone: "idle", head: "조사 중 · 조사가 끝나면 판단이 표시됩니다", prob: null };
   if (!t || t.threat === "unknown") {
     const why = c.finish_reason ? (REASON_LABEL[c.finish_reason] ?? c.finish_reason) : (STATUS_LABEL[c.status] ?? c.status);
-    return { tone: "idle", head: `판단할 수 없습니다 · ${why}`, prob: null };
+    return { tone: review ? "review" : "idle", head: review ? "판단할 수 없습니다" : `판단할 수 없습니다 · ${why}`, prob: null };
   }
-  // 정상 단정 문구는 쓰지 않는다. 확신이 부족한 정상은 담당자 검토로 보인다
+  const name = p.typeLabel;
+  if (p.source === "rule") {
+    return {
+      tone: review || t.hold ? "review" : t.threat === "benign" ? "safe" : "threat",
+      head: <><span className="tone-text">{name}</span>{t.threat !== "benign" ? " 의심" : ""} · {p.ruleLabel}</>,
+      prob: null,
+    };
+  }
+  // 검토 사유는 확신 부족·평판 충돌·기술 오류를 구분해 별도 줄에서 설명한다.
   if (t.threat === "benign")
-    return t.hold
-      ? { tone: "review", head: "위험 근거를 찾지 못했습니다 · 확신이 부족해 담당자 검토가 필요합니다", prob: t.probability }
-      : { tone: "safe", head: "위험 근거를 찾지 못했습니다", prob: t.probability };
-  const name = THREAT_LABEL[t.threat] ?? t.threat;
-  if (t.hold) return { tone: "review", head: <><span className="tone-text">{name}</span> 의심 · 확신이 부족해 담당자 검토가 필요합니다</>, prob: t.probability };
-  return { tone: "threat", head: <>이 사이트는 <span className="tone-text">{name}</span>일 가능성이 높습니다</>, prob: t.probability };
+    return { tone: review || t.hold ? "review" : "safe", head: "위험 근거를 찾지 못했습니다", prob: p.probability };
+  if (review || t.hold) return { tone: "review", head: <><span className="tone-text">{name}</span> 의심</>, prob: p.probability };
+  return { tone: "threat", head: <>이 사이트는 <span className="tone-text">{name}</span>일 가능성이 높습니다</>, prob: p.probability };
 }
 
 function Summary({ c, running, reasons, picked, onPick }: { c: CaseOut | null; running: boolean; reasons: Reason[]; picked: string | null; onPick: (r: Reason) => void }) {
   const line = summaryLine(c, running);
   const t = c?.threat;
-  const next = t
+  const p = casePresentation(c);
+  const review = !running ? reviewReason(c) : null;
+  const reviewText = p.source === "rule" && review === `${p.ruleLabel} · 담당자 검토 필요` ? "담당자 검토 필요" : review;
+  const next = t && p.probability !== null
     ? Object.entries(t.probabilities).sort((a, b) => b[1] - a[1]).filter(([k, v]) => k !== t.threat && v >= 0.01).slice(0, 2)
     : [];
   return (
-    <section className={`panel summary tone-${line.tone}`} aria-label="AI 요약">
+    <section className={`panel summary tone-${line.tone}`} aria-label="조사 판단">
       <div className="summary-head">
+        {t && !running && <span className="chip summary-source">{p.sourceLabel}</span>}
         <h1 className="summary-title">{line.head}</h1>
         {line.prob != null && <span className="summary-prob tone-text">{pct(line.prob)}</span>}
         <div className="spacer" />
@@ -1809,10 +1827,12 @@ function Summary({ c, running, reasons, picked, onPick }: { c: CaseOut | null; r
           </span>
         )}
       </div>
-      {t?.override && (
-        <span className="small summary-override">
-          {overrideLabel(t.override)} · 모델 원래 판단 {THREAT_LABEL[t.override.original.threat] ?? t.override.original.threat} {pct(t.override.original.probability)}
-        </span>
+      {reviewText && <p className="small summary-review">{reviewText}</p>}
+      {t && !running && (p.ruleDescription || p.originalOpinion) && (
+        <div className="small summary-override">
+          {p.ruleDescription && <span>{p.ruleDescription}</span>}
+          {p.originalOpinion && <span>{p.originalOpinion}</span>}
+        </div>
       )}
       {calmCase(c) && reasons.some((r) => r.rule) && (
         <p className="small muted reasons-note">
@@ -1849,7 +1869,7 @@ function Summary({ c, running, reasons, picked, onPick }: { c: CaseOut | null; r
       )}
       <span className="summary-foot">
         {next.length > 0 && `다음 후보 ${next.map(([k, v]) => `${THREAT_LABEL[k] ?? k} ${pct(v)}`).join(" · ")} · `}
-        {t ? `${t.model} · ` : ""}기술적 의심 유형이며 법적 판단이 아닙니다
+        {t && p.source === "model" ? `${t.model} · ` : ""}기술적 의심 유형이며 법적 판단이 아닙니다
       </span>
     </section>
   );
@@ -2397,21 +2417,23 @@ const AUTO_SKIP_LABEL: Record<string, string> = dict({
 });
 
 // 연관 후보 상태(근거 카드·경로 지도와 같은 기준). pending: 지금 하위 조사 중인 후보
-function candState(x: Candidate, pending: boolean): { label: string; tone: string } {
-  const base = candStateBase(x, pending);
+function candState(x: Candidate, pending: boolean, events: EvidenceEvent[]): { label: string; tone: string } {
+  const base = candStateBase(x, pending, events);
   // 회선 차단은 조사 대상 서버가 흉내 낼 수 있는 추정이라 위협 표시를 가리지 않고 덧붙인다
   return x.blocked && !pending ? { ...base, label: `${base.label} · 회선 차단 추정` } : base;
 }
-function candStateBase(x: Candidate, pending: boolean): { label: string; tone: string } {
+function candStateBase(x: Candidate, pending: boolean, events: EvidenceEvent[]): { label: string; tone: string } {
   if (pending) return { label: "조사 중", tone: "st-RUNNING" };
   if (x.reputation_match) return { label: "평판 위험", tone: "st-threat" };
   if (!x.sub) return { label: "기록만", tone: "" };
   const th = x.threat ?? "";
+  const p = candidatePresentation(x, events);
+  const source = p.source === "rule" ? ` · 규칙 판단${p.ruleLabel ? ` · ${p.ruleLabel}` : ""}` : p.probability !== null ? ` · ${pct(p.probability)}` : "";
   if (th && th !== "benign" && th !== "unknown") {
-    return { label: `${x.hold ? "보류" : "위협 의심"} · ${THREAT_LABEL[th] ?? th}${x.probability != null ? ` ${pct(x.probability)}` : ""}`, tone: x.hold ? "st-REVIEW_REQUIRED" : "st-threat" };
+    return { label: `${x.hold ? "보류" : "위협 의심"} · ${p.typeLabel}${source}`, tone: x.hold ? "st-REVIEW_REQUIRED" : "st-threat" };
   }
-  if (x.hold) return { label: "보류", tone: "st-REVIEW_REQUIRED" };
-  return th === "benign" ? { label: "정상", tone: "st-COMPLETED" } : { label: "판단 없음", tone: "" };
+  if (x.hold) return { label: `${p.typeLabel} · 검토 필요${source}`, tone: "st-REVIEW_REQUIRED" };
+  return th === "benign" ? { label: `정상${source}`, tone: "st-COMPLETED" } : { label: th === "unknown" ? "판단 불가" : "판단 없음", tone: "" };
 }
 
 // 연관 사이트: 이 신고에서 찾은 다른 사이트(같은 조직이 운영할 수 있는 곳). 하위 조사는 원래 판정을 바꾸지 않는다.
@@ -2452,7 +2474,7 @@ function RelatedTab({
       <ul className="rel-list">
         {cands.map((x, i) => {
           const kid = kids.get(x.url);
-          const st = candState(x, related && !x.sub && Number.isFinite(planned) && i < planned);
+          const st = candState(x, related && !x.sub && Number.isFinite(planned) && i < planned, events);
           return (
             <li key={x.url} className="rel-row">
               <span className="rel-site">
@@ -2628,13 +2650,15 @@ function Thumb({ caseId, name }: { caseId: string; name: string }) {
 function PathTab({ c, events }: { c: CaseOut; events: EvidenceEvent[] }) {
   const m = useMemo(() => buildPath(c, events), [c, events]);
   const th = c.threat;
-  const thTone: Tone = !th || th.threat === "unknown" ? "idle" : th.threat === "benign" ? "safe" : th.hold ? "review" : "threat";
+  const review = reviewReason(c);
+  const thTone: Tone = review || th?.hold ? "review" : !th || th.threat === "unknown" ? "idle" : th.threat === "benign" ? "safe" : "threat";
+  const decision = th ? `${caseDecisionText(c)}${review ? " · 검토 필요" : ""}` : review;
   if (m.nodes.length === 1 && m.branches[0].length === 0) {
     return (
       <div className="floor pathfloor">
         <p className="muted small">거쳐 간 주소가 1곳뿐입니다</p>
         <div className="path">
-          <PathNodeBox n={m.nodes[0]} i={0} tone={thTone} threat={th?.threat ?? null} prob={th?.probability ?? null} hold={!!th?.hold} />
+          <PathNodeBox n={m.nodes[0]} i={0} tone={thTone} decision={decision} />
         </div>
       </div>
     );
@@ -2658,7 +2682,7 @@ function PathTab({ c, events }: { c: CaseOut; events: EvidenceEvent[] }) {
                 {n.fold ? (
                   <div className="path-node path-fold">… {n.fold}곳</div>
                 ) : (
-                  <PathNodeBox n={n} i={num - 1} tone={thTone} threat={n.last ? (th?.threat ?? null) : null} prob={n.last ? (th?.probability ?? null) : null} hold={!!th?.hold} />
+                  <PathNodeBox n={n} i={num - 1} tone={thTone} decision={n.last ? decision : null} />
                 )}
                 {m.branches[i].map((b, j) => (
                   <div key={j} className="path-branch">
@@ -2679,7 +2703,7 @@ function PathTab({ c, events }: { c: CaseOut; events: EvidenceEvent[] }) {
   );
 }
 
-function PathNodeBox({ n, i, tone, threat, prob, hold }: { n: { url: string; label: string; newWindow: boolean; last: boolean }; i: number; tone: Tone; threat: string | null; prob: number | null; hold: boolean }) {
+function PathNodeBox({ n, i, tone, decision }: { n: { url: string; label: string; newWindow: boolean; last: boolean }; i: number; tone: Tone; decision: string | null }) {
   return (
     <div className={`path-node ${n.last ? `last tone-${tone}` : ""}`} title={n.url}>
       <span className="muted">
@@ -2687,10 +2711,9 @@ function PathNodeBox({ n, i, tone, threat, prob, hold }: { n: { url: string; lab
         {n.newWindow ? " · 새 창" : ""}
       </span>
       <b>{clip(hostPath(n.url), 24)}</b>
-      {n.last && threat && (
+      {n.last && decision && (
         <span className="tone-text path-verdict">
-          {THREAT_LABEL[threat] ?? threat}
-          {hold ? "(보류)" : ""} {prob != null ? pct(prob) : ""}
+          {decision}
         </span>
       )}
     </div>

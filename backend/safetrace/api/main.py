@@ -558,6 +558,7 @@ class CaseOut(BaseModel):
     # 원래 결과가 나온 뒤 연관 사이트를 조사하는 중이면 "related"(조사 중일 때만). main_status: 원래 결과의 상태
     phase: str | None = None
     main_status: str | None = None
+    main_reason: str | None = None  # 표시용: 연관 조사 중 원래 결과의 검토 사유
     main_head_seq: int | None = None  # 원래 조사의 증거 끝(조사 중 판정은 여기에 묶는다)
     # 연관 사건(source=related)이면 그 후보가 나온 부모 사건. children: 이 사건의 후보로 만든 사건(상세에만)
     parent_id: str | None = None
@@ -575,6 +576,7 @@ class CaseOut(BaseModel):
                    head_seq=c.head_seq, created_at=c.created_at.isoformat(), verdict=VerdictOut.of(v) if v else None,
                    phase=ph.phase if ph and c.status == "RUNNING" else None,
                    main_status=ph.main_status if ph else None, main_head_seq=ph.main_head_seq if ph else None,
+                   main_reason=ph.main_reason if ph else None,
                    parent_id=parent[0].parent_id if parent else None, parent_url=parent[1] if parent else None,
                    auto=parent[0].auto if parent else None, children=children)
 

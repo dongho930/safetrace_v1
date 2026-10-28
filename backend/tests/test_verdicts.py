@@ -248,7 +248,11 @@ def test_main_status_and_reputation_come_from_signed_records(client, store):
     _main_result(cid, w.head.seq, main={"status": "COMPLETED", "reason": "agent_finished"},
                  safebrowsing={"status": "no_match", "matches": []})
     c = client.get(f"/api/cases/{cid}", headers=h(VIEWER)).json()
-    assert (c["phase"], c["main_status"], c["safebrowsing"]["status"]) == ("related", "REVIEW_REQUIRED", "match")
+    assert (c["phase"], c["main_status"], c["main_reason"], c["safebrowsing"]["status"]) == (
+        "related", "REVIEW_REQUIRED", "reputation_match", "match")
+    # 목록에서도 연관 조사 중의 임시 사유 대신 원래 결과의 검토 사유를 받는다.
+    listed = {x["id"]: x for x in client.get("/api/cases?limit=200", headers=h(VIEWER)).json()}
+    assert listed[cid]["main_reason"] == "reputation_match"
     record_event(cid, {"type": "status", "status": "COMPLETED", "reason": "agent_finished"})
     c = client.get(f"/api/cases/{cid}", headers=h(VIEWER)).json()
     assert (c["status"], c["finish_reason"], c["safebrowsing"]["status"]) == ("REVIEW_REQUIRED", "reputation_match", "match")
