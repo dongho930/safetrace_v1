@@ -86,7 +86,7 @@ def test_report_does_not_write_rule_type_as_ai_probability(tmp_path):
     assert ai["source"] == "rule"
     line = report.assessment_line(ai)
     assert line == "피싱 · 코드 규칙 판단 · 담당자 검토" and "100%" not in line and "AI" not in line
-    assert ai["override"].endswith("모델 원래 판단 판단 불가 50%")  # 모델의 원래 의견은 '코드 규칙' 줄에 남는다
+    assert ai["override"].endswith("모델은 원래 판단 불가")  # 모델의 원래 의견은 '코드 규칙' 줄에 남는다(판단 불가는 숫자 없이)
     rows = rep["related"]["investigated"]
     assert [r["source"] for r in rows] == ["rule", "model"]
     assert [report.related_opinion(r) for r in rows] == ["피싱 · 코드 규칙 판단 · 담당자 검토", "피싱 (AI 확률 62%)"]
