@@ -47,7 +47,7 @@ def check(decision: str, threat: str | None) -> None:
     if decision not in DECISIONS:
         raise VerdictError("알 수 없는 판정입니다")
     if decision == "threat" and threat not in THREATS:
-        raise VerdictError("위협 확정에는 유형(피싱·사기·불법 도박·악성 앱)이 필요합니다")
+        raise VerdictError("위협 확정에는 유형(피싱·사기·불법 도박·악성코드)이 필요합니다")
     if decision != "threat" and threat is not None:
         raise VerdictError("유형은 위협 확정에만 붙입니다")
 

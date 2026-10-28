@@ -371,7 +371,7 @@ def test_malformed_signed_records_do_not_break_exports(tmp_path, client, case_id
      " · 모델 원래 판단 정상 83%"),
     ({"reason": "official_betting_domain", "operators": ["betman"],
       "original": {"threat": "illegal_gambling", "probability": 0.9, "provider": "jev_typesafe"}},
-     "공식 사행사업자 도메인 · betman · 모델 원래 판단 불법 도박 의심 90%"),
+     "공식 사행사업자 도메인 · betman · 모델 원래 판단 불법 도박 90%"),
     ({"reason": ["x"], "original": "y"}, "코드 규칙"),  # 자료형이 어긋난 값은 글자로만, 지어내지 않는다
 ])
 def test_code_rule_override_kept_in_package_and_report(tmp_path, override, label):

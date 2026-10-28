@@ -20,7 +20,7 @@ from PIL import Image as PILImage
 
 from . import preview as _preview  # noqa: F401  Image.MAX_IMAGE_PIXELS 제한을 함께 쓴다
 from . import referral
-from .decision.schema import FALLBACK_PROVIDERS, MODEL_PROVIDERS, threat_source
+from .decision.schema import FALLBACK_PROVIDERS, MODEL_PROVIDERS, THREAT_LABELS_KO, threat_source
 from .evidence import _SAFE_NAME, read_evidence, sha256_bytes
 from .package import clean_records
 
@@ -32,8 +32,7 @@ except ImportError:  # pragma: no cover
 FORMAT = "safetrace.report/1"
 KST = timezone(timedelta(hours=9), "KST")
 
-THREAT_KO = {"phishing": "피싱", "scam": "사기", "illegal_gambling": "불법 도박 의심", "malware": "악성코드",
-             "benign": "정상", "unknown": "판단 불가"}
+THREAT_KO = {t.value: name for t, name in THREAT_LABELS_KO.items()}  # 콘솔과 같은 유형 이름
 STATUS_KO = {"COMPLETED": "조사 완료", "REVIEW_REQUIRED": "검토 필요", "FAILED": "실패", "UNREACHABLE": "접속 불가",
              "BLOCKED": "차단(정책)"}
 DECISION_KO = {"threat": "위협 확정", "benign": "정상", "hold": "보류"}

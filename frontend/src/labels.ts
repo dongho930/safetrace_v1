@@ -5,7 +5,7 @@ export const THREAT_LABEL: Record<string, string> = dict({
   phishing: "피싱",
   scam: "사기",
   illegal_gambling: "불법 도박",
-  malware: "악성 앱",
+  malware: "악성코드", // 판단 기준이 앱 설치 파일·실행 파일 다운로드라 '앱'보다 넓다(서버 THREAT_LABELS_KO 와 같은 이름)
   benign: "정상",
   unknown: "판단 불가",
 });

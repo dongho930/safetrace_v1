@@ -28,10 +28,12 @@ class Threat(StrEnum):
     UNKNOWN = "unknown"
 
 
+# 화면·보고서에 쓰는 유형 이름(콘솔 labels.ts THREAT_LABEL·보고서 THREAT_KO·IOC 와 같다, 시험이 맞춰 본다). Jev 에는 보내지
+# 않는다(판단 기준은 THREAT_CRITERIA). '의심'은 이름에 넣지 않는다 — 화면이 판단 확신·담당자 확정에 따라 붙이거나 뺀다
 THREAT_LABELS_KO = {
     Threat.PHISHING: "피싱",
     Threat.SCAM: "사기",
-    Threat.ILLEGAL_GAMBLING: "불법 도박 의심",
+    Threat.ILLEGAL_GAMBLING: "불법 도박",
     Threat.MALWARE: "악성코드",
     Threat.BENIGN: "정상",
     Threat.UNKNOWN: "판단 불가",
