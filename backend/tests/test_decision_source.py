@@ -6,7 +6,7 @@ import secrets
 from pathlib import Path
 
 from safetrace import package, referral, report
-from safetrace.decision.schema import MODEL_PROVIDERS, RULE_PROVIDERS, threat_source
+from safetrace.decision.schema import FALLBACK_PROVIDERS, MODEL_PROVIDERS, RULE_PROVIDERS, threat_source
 from safetrace.evidence import EvidenceWriter, Signer, verify_case
 from safetrace.store import Case, now
 
@@ -18,9 +18,12 @@ def test_threat_source():
     assert threat_source({"threat": "phishing", "provider": "jev_openrouter"}) == "model"
     assert threat_source({"threat": "phishing", "provider": "jev_typesafe", "override": {"reason": "x"}}) == "rule"
     assert threat_source({"threat": "phishing", "provider": "link_takedown"}) == "rule"
-    # Jev 가 둘 다 실패했을 때의 대체 판단기(낱말 점수)도 모델 확률이 아니다
-    assert threat_source({"threat": "benign", "provider": "rules", "model": "rules-1"}) == "rule"
-    assert threat_source({"threat": "benign", "model": "rules-1"}) == "rule"
+    # Jev 가 둘 다 실패했을 때의 대체 판단기(낱말 점수)는 모델 확률도 코드 규칙도 아니다
+    assert threat_source({"threat": "benign", "provider": "rules", "model": "rules-1"}) == "fallback"
+    assert threat_source({"threat": "benign", "model": "rules-1"}) == "fallback"
+    # 대체 판단 결과에 코드 규칙이 덧씌워지면 규칙이다(override 의 원래 판단 출처가 rules)
+    assert threat_source({"threat": "phishing", "provider": "link_takedown", "model": "rules-1",
+                          "override": {"reason": "link_takedown"}}) == "rule"
     # 출처를 모르면 AI 로 보지 않는다
     assert threat_source({"threat": "phishing"}) is None
     assert threat_source({"threat": "phishing", "provider": ["jev_typesafe"]}) is None
@@ -39,6 +42,8 @@ def test_provider_lists_match_engine_and_console():
     assert set(re.findall(r"^\s*([a-z_]+):", block, re.M)) == RULE_PROVIDERS
     models = re.search(r"const modelProvider = .*?\[([^\]]*)\]", console).group(1)
     assert set(re.findall(r'"([a-z_]+)"', models)) == MODEL_PROVIDERS
+    fallback = re.search(r"const FALLBACK_PROVIDERS = \[([^\]]*)\]", console).group(1)
+    assert set(re.findall(r'"([a-z_]+)"', fallback)) == FALLBACK_PROVIDERS
 
 
 def _chain(tmp_path, main_threat, subs=()):
@@ -111,7 +116,7 @@ def test_referral_does_not_write_fallback_rule_score_as_ai(tmp_path):
     rep, _ = _chain(tmp_path, {"threat": "phishing", "probability": 0.75, "hold": False, "provider": "rules",
                                "model": "rules-1"})
     r = referral.build(rep)
-    assert r["applicable"] and "코드 규칙 · 담당자 판정 전" in r["text"] and "75%" not in r["text"]
+    assert r["applicable"] and "대체 판단(Jev 장애) · 담당자 판정 전" in r["text"] and "75%" not in r["text"]
     rep, _ = _chain(tmp_path, {**MODEL, "probability": 0.87})
     assert "AI 판단 87%" in referral.build(rep)["text"]
 
@@ -126,3 +131,44 @@ def test_report_hold_is_not_written_as_reviewer_hold(tmp_path):
     assert report.assessment_line(rep["assessment"]["ai"]) == "정상 (AI 확률 48%) · 확신 낮음(담당자 검토)"
     assert report.hold_ko({"hold": True, "source": None, "threat": "phishing"}) == "담당자 검토"
     assert report.hold_ko({"hold": False, "source": "model"}) is None
+
+
+def test_report_fallback_decision_is_not_ai_or_code_rule(tmp_path):
+    """Jev 장애 때의 대체 판단기는 'AI 확률'도 '코드 규칙'도 아니다(콘솔 '대체 판단'과 같은 기준)."""
+    rep, ev = _chain(tmp_path, {"threat": "benign", "probability": 0.75, "hold": False, "provider": "rules", "model": "rules-1"})
+    ai = rep["assessment"]["ai"]
+    assert ai["source"] == "fallback"
+    assert report.assessment_line(ai) == "정상 · 대체 판단(Jev 장애)"
+    assert report.basis_ko("fallback") == "대체 판단(Jev 장애)" and report.basis_ko("rule") == "코드 규칙 판단"
+    assert report.basis_ko("model") == "AI 판단" and report.basis_ko(None) == "조사 판단"
+    assert report.render_pdf(rep, ev).startswith(b"%PDF")
+    # 대체 판단 위에 코드 규칙이 덧씌워지면, 원래 판단은 모델 확률로 적지 않는다
+    o = {"reason": "link_takedown", "original": {"threat": "benign", "probability": 0.75, "provider": "rules"}}
+    assert report._override_ko(o) == "단축·호스팅 서비스의 링크 정지 안내 → 담당자 검토 · 규칙 적용 전 대체 판단 정상"
+    o["original"]["provider"] = "legacy_unknown"
+    assert report._override_ko(o) == "단축·호스팅 서비스의 링크 정지 안내 → 담당자 검토"
+
+
+def test_report_reputation_line_shows_type_and_candidate(tmp_path):
+    """예전 PDF 는 일치 항목의 유형 칸을 threatType 으로 읽어(증거는 threat_type) 늘 비었고, 연관 후보 주소의 일치도
+    신고 주소의 일치처럼 보였다."""
+    signer = Signer(secrets.token_bytes(32), "k1")
+    cid = f"dddddddd-0000-0000-0001-{secrets.token_hex(6)}"
+    w = EvidenceWriter(tmp_path / "ev", cid, signer)
+    w.append("start", {"url": "https://reported.example/"})
+    w.append("threat", {"threat": "benign", "probability": 0.5, "probabilities": {"benign": 0.5}, "hold": True,
+                        "provider": "jev_typesafe", "model": "jev", "evidence_seqs": []})
+    w.append("safebrowsing", {"status": "match", "matches": [
+        {"url": "https://reported.example/", "threat_type": "SOCIAL_ENGINEERING"},
+        {"url": "https://cand.example/", "threat_type": "MALWARE"}]})
+    w.append("candidates", {"found": [{"url": "https://cand.example/", "host": "cand.example", "source": "link"}],
+                            "followup": False, "investigated": 0})
+    case = Case(id=cid, url="https://reported.example/", source="test", status="REVIEW_REQUIRED", created_by="t",
+                created_at=now())
+    records = package.read_chain(tmp_path / "ev", cid)
+    pkg = package.build(case, records, verify_case(tmp_path / "ev", cid, signer, None), [], [], generated_by="t", key_id="k1")
+    sb = report.build(pkg, records)["assessment"]["safebrowsing"]
+    assert [(m["type"], m["candidate"]) for m in sb["matches"]] == [("SOCIAL_ENGINEERING", False), ("MALWARE", True)]
+    assert report.reputation_line(sb) == ("Google Safe Browsing: 위험 목록 일치 · SOCIAL_ENGINEERING https://reported.example/"
+                                          " · MALWARE https://cand.example/ (연관 후보)")
+    assert report.reputation_line(None) == "조회 기록 없음"

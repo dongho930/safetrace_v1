@@ -92,24 +92,28 @@ class Decision(BaseModel):
     latency_ms: int
 
 
-# 위협 판단을 낸 쪽. 코드 규칙(override)·대체 규칙 판단기(rules, Jev 장애 때)가 정한 유형의 확률(1.0 등)은
-# 모델 확률이 아니다. 콘솔 decisionDisplay.ts 의 RULE_LABEL·modelProvider 와 같은 목록이다(시험이 맞춰 본다)
+# 위협 판단을 낸 쪽. 코드 규칙(override)이 정한 유형의 확률(1.0)과 대체 판단기(rules — Jev 가 응답하지 않을 때(장애·미설정)
+# 화면 글자의 낱말 점수로 고른다)의 점수는 모델 확률이 아니다. 콘솔 decisionDisplay.ts 의 RULE_LABEL·FALLBACK_PROVIDERS·
+# modelProvider 와 같은 목록이다(시험이 맞춰 본다)
 MODEL_PROVIDERS = frozenset({"jev_typesafe", "jev_openrouter"})
 RULE_PROVIDERS = frozenset({
     "shortener_warning", "link_takedown", "official_redirect", "brand_lookalike", "brand_name_domain",
     "brand_typo_domain", "brand_login_shared_hosting", "brand_clone_title", "official_betting_domain",
-    "official_domain", "rules",
+    "official_domain",
 })
+FALLBACK_PROVIDERS = frozenset({"rules"})
 
 
 def threat_source(t: object) -> str | None:
-    """위협 판단 기록의 출처: 'rule'(코드 규칙·대체 규칙 판단기) · 'model'(Jev) · None(판단 없음·알 수 없는 출처).
-    조사 컨테이너가 쓴 기록이라 모양을 믿지 않는다."""
+    """위협 판단 기록의 출처: 'rule'(코드 규칙) · 'fallback'(Jev 장애 때 대체 판단기) · 'model'(Jev) · None(판단 없음·
+    알 수 없는 출처). 조사 컨테이너가 쓴 기록이라 모양을 믿지 않는다."""
     if not isinstance(t, dict) or not isinstance(t.get("threat"), str):
         return None
     provider = t.get("provider") if isinstance(t.get("provider"), str) else ""
-    if isinstance(t.get("override"), dict) or provider in RULE_PROVIDERS or t.get("model") == "rules-1":
+    if isinstance(t.get("override"), dict) or provider in RULE_PROVIDERS:
         return "rule"
+    if provider in FALLBACK_PROVIDERS or t.get("model") == "rules-1":
+        return "fallback"
     return "model" if provider in MODEL_PROVIDERS else None
 
 

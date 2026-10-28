@@ -58,7 +58,7 @@ try {
   throw error;
 }
 const { threatPresentation, casePresentation, reviewReason, reviewParts, caseDecisionText, candidatePresentation, reputationHit, reputationConflict,
-  holdLabel, lowBenign, lowConfidenceBenign, exploreNote, BENIGN_SURE } = presentation;
+  holdLabel, lowBenign, lowConfidenceBenign, exploreNote, BENIGN_SURE, attentionNote, decisionActor } = presentation;
 
 function modelThreat(patch = {}) {
   return {
@@ -246,7 +246,8 @@ test("fallback rules and legacy rule providers are never labelled with model pro
     modelThreat({ provider: "brand_name_domain" }),
   ]) {
     const p = threatPresentation(t);
-    assert.equal(p.source, "rule");
+    // 대체 판단기(rules)는 코드 규칙과도 따로 보인다
+    assert.equal(p.source, t.provider === "brand_name_domain" ? "rule" : "fallback");
     assert.equal(p.probability, null);
   }
 });
@@ -300,7 +301,7 @@ test("an original fallback rule opinion is labelled as a rule without its numeri
   const t = ruleThreat();
   t.override.original = { threat: "benign", probability: 0.72, provider: "rules" };
   const original = threatPresentation(t).originalOpinion;
-  assert.equal(original, "규칙 적용 전 의견: 정상 · 규칙 판단");
+  assert.equal(original, "규칙 적용 전 의견: 정상 · 대체 판단");
   assert.doesNotMatch(original, /모델|0\.72/);
 });
 
@@ -564,4 +565,54 @@ test("path and reason labels say low confidence or review instead of the reviewe
   const card = cards.find((r) => r.key === "candidate");
   assert.match(card.text, /확신 낮음/);
   assert.doesNotMatch(card.text, /보류/);
+});
+
+// ── 대체 판단기(⑧)·행동 선택 주체·검토 전환 문구(2026-10-28) ──
+
+test("a fallback decision (Jev unavailable) is neither an AI probability nor a code rule", () => {
+  const t = modelThreat({ threat: "benign", probability: 0.75, probabilities: { benign: 0.75 }, hold: false, provider: "rules", model: "rules-1" });
+  const p = threatPresentation(t);
+  assert.equal(p.source, "fallback");
+  assert.equal(p.sourceLabel, "대체 판단");
+  assert.equal(p.ruleLabel, "대체 판단(Jev 장애)");
+  assert.match(p.ruleDescription, /AI 확률이 아닙니다/);
+  assert.equal(p.probability, null);
+  const c = caseOut({ threat: t });
+  assert.equal(caseDecisionText(c), "정상 · 대체 판단");
+  assert.equal(caseDecisionText(caseOut({ threat: { ...t, threat: "phishing" } })), "피싱 의심 · 대체 판단");
+  // 검토 요청은 없지만 초록으로 보이지 않게 확인을 권한다, 안전 규칙 카드도 회색으로 낮추지 않는다
+  assert.equal(reviewReason(c), null);
+  assert.equal(attentionNote(c), "대체 판단(Jev 장애) · 화면 확인 권장");
+  assert.equal(lowConfidenceBenign(c), false);
+  assert.equal(evidence.calmCase(c), false);
+  // 담당자가 확정하면 따로 알리지 않는다
+  assert.equal(attentionNote({ ...c, verdict: { rev: 1, decision: "benign", threat: null } }), null);
+  // 보류된 대체 판단은 '확신 낮음'이 아니라 검토 사유로
+  const held = caseOut({ status: "REVIEW_REQUIRED", threat: { ...t, threat: "unknown", hold: true } });
+  assert.deepEqual(reviewParts(held), ["대체 판단(Jev 장애)"]);
+  assert.equal(holdLabel(threatPresentation(held.threat), true), "검토 필요");
+});
+
+test("attention note covers low-confidence benign and nothing else", () => {
+  assert.equal(attentionNote(caseOut({ threat: modelThreat({ threat: "benign", probability: 0.7 }) })), "AI 확신 낮음(정상 0.9 미만) · 화면 확인 권장");
+  assert.equal(attentionNote(caseOut({ threat: modelThreat({ threat: "benign", probability: 0.95 }) })), null);
+  assert.equal(attentionNote(caseOut()), null);
+  assert.equal(attentionNote(caseOut({ threat: null })), null);
+});
+
+test("only Jev action choices show a probability", () => {
+  assert.deepEqual(decisionActor({ provider: "jev_typesafe", probability: 0.62 }), { label: "Jev 선택", probability: 0.62 });
+  assert.deepEqual(decisionActor({ provider: "jev_openrouter", probability: 0.5 }), { label: "Jev 선택", probability: 0.5 });
+  // 남은 행동이 없어 코드가 끝낸 것(1.0 으로 남음)과 대체 판단기의 점수는 모델 확률이 아니다
+  assert.deepEqual(decisionActor({ provider: "exhausted", probability: 1 }), { label: "남은 행동 없음", probability: null });
+  assert.deepEqual(decisionActor({ provider: "rules", probability: 0.9 }), { label: "대체 판단 선택(Jev 장애)", probability: null });
+  assert.deepEqual(decisionActor({ provider: ["jev_typesafe"], probability: 0.9 }), { label: "행동 선택", probability: null });
+  assert.deepEqual(decisionActor(null), { label: "행동 선택", probability: null });
+});
+
+test("a network-filter escalation is shown as an estimate, not a detection", () => {
+  const events = [{ type: "evidence", seq: 3, kind: "escalation", data: { reason: "unreachable_network_filtered", threat_types: [] }, files: [], hash: "h" }];
+  const cards = evidence.buildReasons(events, caseOut({ status: "REVIEW_REQUIRED", finish_reason: "unreachable_network_filtered", threat: null }));
+  const card = cards.find((r) => r.key === "escalation");
+  assert.equal(card.text, "회선 차단 추정");
 });

@@ -2,7 +2,7 @@
 // 문장은 고정 문구 + 기록 값으로만 만든다(AI 가 새로 쓰는 문장 없음). 페이지에서 온 글자는 잘라서 글자로만 쓴다.
 import { type Candidate, type CaseOut, type EvidenceEvent, clickables, strs, text as str } from "./api";
 import { ACTION_LABEL, overrideLabel } from "./labels";
-import { BENIGN_SURE, candidatePresentation, holdLabel, threatPresentation } from "./decisionDisplay";
+import { BENIGN_SURE, candidatePresentation, decisionActor, holdLabel, threatPresentation } from "./decisionDisplay";
 
 export type Tone = "threat" | "review" | "safe" | "idle";
 export const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -144,7 +144,7 @@ export function buildReasons(events: EvidenceEvent[], c: CaseOut): Reason[] {
   // ④ 담당자 검토 전환(행동 기록과 같은 문구)
   const esc = last((e) => e.kind === "escalation");
   if (esc) {
-    const why = esc.data.reason === "unreachable_network_filtered" ? "회선의 도메인 차단 감지" : `Safe Browsing ${strs(esc.data.threat_types).join(", ")}`;
+    const why = esc.data.reason === "unreachable_network_filtered" ? "회선 차단 추정" : `Safe Browsing ${strs(esc.data.threat_types).join(", ")}`;
     push({ key: "escalation", title: "담당자 검토 전환", text: why, ev: `EV-${esc.seq}`, tone: "review", shot: null, shotSeq: null });
   }
   // ⑤ 연관 사이트도 의심: Safe Browsing 위험 일치(AI 유형과 무관하게 먼저), 없으면 하위 조사에서 AI 가 위협으로 본 후보.
@@ -159,7 +159,7 @@ export function buildReasons(events: EvidenceEvent[], c: CaseOut): Reason[] {
     const host = clip(sus.host ?? sus.url, 40) + (sus.blocked ? "(회선 차단 추정)" : "");
     const p = candidatePresentation(sus, events);
     const opinion = sus.threat
-      ? `${p.typeLabel}${p.source === "rule" ? ` · 규칙 판단${p.ruleLabel ? ` (${p.ruleLabel})` : ""}` : p.probability !== null ? ` · ${pct(p.probability)}` : ""}`
+      ? `${p.typeLabel}${p.source === "rule" ? ` · 규칙 판단${p.ruleLabel ? ` (${p.ruleLabel})` : ""}` : p.source === "fallback" ? ` · ${p.ruleLabel}` : p.probability !== null ? ` · ${pct(p.probability)}` : ""}`
       : "";
     if (rep) {
       const sb = last((e) => e.kind === "candidate_safebrowsing");
@@ -270,7 +270,7 @@ export function buildPath(c: CaseOut, events: EvidenceEvent[]): PathMap {
       const th = x.threat ?? "";
       const tone: Tone = x.reputation_match ? "threat" : !th || th === "benign" ? (x.hold ? "review" : "idle") : x.hold ? "review" : "threat";
       const p = candidatePresentation(x, events);
-      const source = p.source === "rule" ? " · 규칙 판단" : p.source === "model" ? " · AI 판단" : "";
+      const source = p.source === "rule" ? " · 규칙 판단" : p.source === "fallback" ? " · 대체 판단" : p.source === "model" ? " · AI 판단" : "";
       // '보류'는 담당자 판정에만 쓴다: AI 가 넘긴 것은 '확신 낮음', 규칙·판단 불가가 넘긴 것은 '검토 필요'
       const held = holdLabel(p, x.hold);
       const verdict = th ? `${p.typeLabel}${held ? `(${held})` : ""}${source}` : "판단 없음";
@@ -343,7 +343,9 @@ export function buildOverlay(events: EvidenceEvent[], seq: number | null): Overl
       // 요소 ID 는 관찰마다 다시 쓰이므로 같은 조사(sub)·같은 단계(step)의 게이트만 본다
       const gate = events.find((e) => e.kind === "gate" && e.seq > dec.seq && e.data.sub === obs.data.sub && e.data.step === dec.data.step && str(e.data.element) === id);
       const blocked = gate?.data.allowed === false;
-      const label = `${blocked ? "안전 게이트가 막은 클릭" : "Jev 가 고른 버튼"} · “${clip(candidateText(obs, id), 40)}”`;
+      const actor = decisionActor(dec.data).label;
+      const by = actor === "Jev 선택" ? "Jev 가 고른 버튼" : actor.startsWith("대체 판단") ? "대체 판단이 고른 버튼" : "고른 버튼";
+      const label = `${blocked ? "안전 게이트가 막은 클릭" : by} · “${clip(candidateText(obs, id), 40)}”`;
       marks.push({ kind: blocked ? "blocked" : "picked", x: r[0], y: r[1], w: r[2], h: r[3], label });
     }
   }

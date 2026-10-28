@@ -58,10 +58,10 @@ import {
   buildOverlay, buildPath, buildReasons, buildScreens, calmCase, clip, CURSOR_IN, cursorTravel, hostOrFile, hostPath, jpegSize, liveActivity, liveClick, locateSeg, MAX_RECORDINGS, recCursor, recordingClicks, recordings, SCREEN_H,
   SCREEN_W, segStarts, type Activity, type ClickPoint, type Overlay, type Reason, type RecItem, type Screen, type Tone,
 } from "./evidence";
-import { ACTION_LABEL, NET_CATEGORY_LABEL, REASON_LABEL, THREAT_LABEL } from "./labels";
+import { ACTION_LABEL, NET_CATEGORY_LABEL, REASON_LABEL, SB_STATUS_LABEL, THREAT_LABEL } from "./labels";
 import {
-  candidatePresentation, caseDecisionText, casePresentation, exploreNote, holdLabel, lowBenign, lowConfidenceBenign, reputationConflict, reviewParts,
-  reviewReason, threatPresentation,
+  attentionNote, candidatePresentation, caseDecisionText, casePresentation, decisionActor, exploreNote, holdLabel, lowBenign, lowConfidenceBenign,
+  reputationConflict, reviewParts, reviewReason, threatPresentation,
 } from "./decisionDisplay";
 
 // 조사 대상 페이지에서 온 문자열은 모두 React 기본 이스케이프로만 출력한다(raw HTML 금지).
@@ -960,7 +960,7 @@ type MonitorView = {
   subTotal: number;
   subHost: string;
 };
-type Act = { what: string; prob: number; running: boolean };
+type Act = { what: string; by: string; prob: number | null; running: boolean };
 const EMPTY_VIEW: MonitorView = { maxSeq: -1, steps: 0, shot: null, cands: new Map(), act: null, sub: 0, subTotal: 0, subHost: "" };
 
 function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) => void; onEnded: () => void }) {
@@ -1040,12 +1040,12 @@ function MonitorCase({ c, onOpen, onEnded }: { c: CaseOut; onOpen: (id: string) 
       <div className="monitor-foot">
         {act ? (
           <>
-            <span className="monitor-jev">Jev 선택</span>
+            <span className="monitor-jev">{act.by}</span>
             <span className="monitor-act">
               {act.what}
               {act.running ? " → 실행 중" : ""}
             </span>
-            <span className="monitor-prob">{pct(act.prob)}</span>
+            {act.prob !== null && <span className="monitor-prob">{pct(act.prob)}</span>}
           </>
         ) : (
           <span className="muted">첫 관찰을 기다리는 중</span>
@@ -1089,7 +1089,8 @@ function step(v: MonitorView, e: EvidenceEvent): MonitorView {
   } else if (e.kind === "decision") {
     const choice = text(d.choice, 60);
     const eid = choice.startsWith("click_") ? choice.slice(6) : "";
-    next.act = { what: eid ? `“${clip(v.cands.get(eid) ?? eid, 40)}” 클릭` : (ACTION_LABEL[choice] ?? choice), prob: num(d.probability), running: true };
+    const by = decisionActor(d);
+    next.act = { what: eid ? `“${clip(v.cands.get(eid) ?? eid, 40)}” 클릭` : (ACTION_LABEL[choice] ?? choice), by: by.label, prob: by.probability, running: true };
   } else if (v.act && (e.kind === "action" || (e.kind === "gate" && d.allowed === false) || e.kind === "action_error")) {
     next.act = { ...v.act, running: false };
   }
@@ -1124,9 +1125,6 @@ function StatusChip({ c }: { c: CaseOut }) {
   );
 }
 
-// AI 가 정상으로 봤지만 확신이 낮은(0.9 미만) 사건: 초록으로 보이지 않게 따로 알린다(판단·상태는 그대로)
-const LOW_BENIGN_NOTE = "AI 확신 낮음(정상 0.9 미만) · 화면 확인 권장";
-
 function caseSummary(raw: CaseOut): string {
   const c = asMain(raw);
   if (c.status === "RUNNING" || c.status === "QUEUED") return "에이전트가 조사하는 중";
@@ -1135,7 +1133,8 @@ function caseSummary(raw: CaseOut): string {
   if (c.threat) parts.push(caseDecisionText(c, true));
   const review = reviewReason(raw);
   if (review) parts.push(review);
-  else if (lowConfidenceBenign(raw)) parts.push(LOW_BENIGN_NOTE);
+  // 검토 요청은 없지만 화면 확인을 권할 사건(대체 판단·확신 낮은 정상): 초록으로 보이지 않게(판단·상태는 그대로)
+  else if (attentionNote(raw)) parts.push(attentionNote(raw) as string);
   else if (c.finish_reason) parts.push(REASON_LABEL[c.finish_reason] ?? c.finish_reason);
   return parts.join(" · ") || "-";
 }
@@ -1393,7 +1392,7 @@ function Investigation({
   const dec = obs ? events.find((e) => e.kind === "decision" && e.data.observe_seq === obs.seq) : undefined;
   const choice = dec ? text(dec.data.choice) : "";
   // 표시할 상자가 없는 선택(스크롤·팝업 닫기·뒤로, 상자를 못 잰 클릭)은 글자로만
-  const decText = !dec ? "Jev 가 고르는 중…" : `Jev 선택 · ${choice.startsWith("click_") ? "버튼 클릭(화면 위치 없음)" : (ACTION_LABEL[choice] ?? choice)}`;
+  const decText = !dec ? "Jev 가 고르는 중…" : `${decisionActor(dec.data).label} · ${choice.startsWith("click_") ? "버튼 클릭(화면 위치 없음)" : (ACTION_LABEL[choice] ?? choice)}`;
   const [marksOn, setMarksOn] = useState(true);
   const browser = events.find((e) => e.kind === "browser")?.data as { version?: string } | undefined;
   const lastUrl = [...events].reverse().find((e) => e.kind === "observe")?.data.url as string | undefined;
@@ -1507,7 +1506,9 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
       const choice = text(d.choice);
       const eid = choice.startsWith("click_") ? choice.slice(6) : "";
       const what = eid ? `“${candidates.get(eid) ?? eid}” 클릭` : ACTION_LABEL[choice] ?? choice;
-      lines.push({ seq: e.seq, icon: "brain", tone: "", text: <>Jev 선택 · {what}</>, end: pct(num(d.probability)), endTone: "var(--primary)" });
+      // 확률은 Jev 가 고른 것만(대체 판단기의 점수·남은 행동이 없어 끝낸 1.0 은 모델 확률이 아니다)
+      const by = decisionActor(d);
+      lines.push({ seq: e.seq, icon: "brain", tone: "", text: <>{by.label} · {what}</>, end: by.probability !== null ? pct(by.probability) : undefined, endTone: "var(--primary)" });
     } else if (e.kind === "gate") {
       if (!d.allowed) lines.push({ seq: e.seq, icon: "ban", tone: "red", text: <span className="bad">안전 게이트 차단 · {text(d.reason)}</span>, end: "차단", endTone: "var(--threat)" });
     } else if (e.kind === "action") {
@@ -1528,7 +1529,7 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
       lines.push({ seq: e.seq, icon: "ban", tone: "red", text: <span className="bad">접속 불가 · {NET_CATEGORY_LABEL[text(d.category)] ?? text(d.error)}{d.net_error ? ` (${text(d.net_error)})` : ""}</span> });
     } else if (e.kind === "escalation") {
       const why = d.reason === "unreachable_network_filtered"
-        ? "회선의 도메인 차단 감지"
+        ? "회선 차단 추정"
         : `Safe Browsing ${strs(d.threat_types).join(", ")}`;
       lines.push({ seq: e.seq, icon: "alert", tone: "orange", text: <span className="warn">담당자 검토로 전환 · {why}</span> });
     } else if (e.kind === "threat") {
@@ -1541,7 +1542,7 @@ function EventLog({ events }: { events: EvidenceEvent[] }) {
         end: p.probability !== null ? pct(p.probability) : p.sourceLabel,
       });
     } else if (e.kind === "safebrowsing") {
-      lines.push({ seq: e.seq, icon: "shieldCheck", tone: d.status === "match" ? "red" : "", text: <>Safe Browsing · {text(d.status)}</> });
+      lines.push({ seq: e.seq, icon: "shieldCheck", tone: d.status === "match" ? "red" : "", text: <>Safe Browsing · {SB_STATUS_LABEL[text(d.status)] ?? text(d.status)}</> });
     } else if (e.kind === "finish") {
       lines.push({ seq: e.seq, icon: "check", tone: "teal", text: <>탐색 종료 · {REASON_LABEL[text(d.reason)] ?? text(d.reason)}</> });
     } else if (e.kind === "action_error" || e.kind === "decision_error" || e.kind === "threat_error" || e.kind === "candidate_error") {
@@ -1724,7 +1725,7 @@ function VerdictBar({
                   {THREAT_TYPES.map((t) => (
                     <option key={t} value={t}>
                       {THREAT_LABEL[t]}
-                      {t === ai && aiSource === "model" ? " (AI 추천)" : t === ai && aiSource === "rule" ? " (규칙 판단 유형)" : ""}
+                      {t !== ai ? "" : aiSource === "model" ? " (AI 추천)" : aiSource === "rule" ? " (규칙 판단 유형)" : aiSource === "fallback" ? " (대체 판단 유형)" : ""}
                     </option>
                   ))}
                 </select>
@@ -1807,9 +1808,10 @@ function summaryLine(c: CaseOut | null, running: boolean): { tone: Tone; head: R
   const name = p.typeLabel;
   // 조사는 정상으로 봤지만 이 사건의 주소가 Safe Browsing 위험 일치: '위험 근거 없음'으로 읽히지 않게 평판을 먼저 적는다
   const sbFirst = reputationConflict(c) ? <><span className="tone-text">Safe Browsing 위험 일치</span> · </> : null;
-  if (p.source === "rule") {
+  // 코드 규칙·대체 판단(Jev 장애)은 숫자 대신 이름을 보인다. 대체 판단은 검토 요청이 없어도 초록·빨강으로 단정하지 않는다
+  if (p.source === "rule" || p.source === "fallback") {
     return {
-      tone: review || t.hold ? "review" : t.threat === "benign" ? "safe" : "threat",
+      tone: review || t.hold || p.source === "fallback" ? "review" : t.threat === "benign" ? "safe" : "threat",
       head: <>{sbFirst}<span className="tone-text">{name}</span>{t.threat !== "benign" ? " 의심" : ""} · {p.ruleLabel}</>,
       prob: null,
     };
@@ -1830,9 +1832,9 @@ function Summary({ c, running, reasons, picked, onPick }: { c: CaseOut | null; r
   // 규칙 이름·평판 충돌은 제목에 이미 있으니 검토 줄에서는 뺀다(목록 줄은 제목이 없어 그대로 둔다)
   const conflict = reputationConflict(c);
   const review = !running
-    ? reviewParts(c)?.filter((x) => !(p.source === "rule" && x === p.ruleLabel) && !(conflict && x.endsWith("Safe Browsing 위험 평판 불일치")))
+    ? reviewParts(c)?.filter((x) => !(x === p.ruleLabel && p.source !== "model") && !(conflict && x.endsWith("Safe Browsing 위험 평판 불일치")))
     : null;
-  const reviewText = review ? [...review, "담당자 검토 필요"].join(" · ") : !running && lowConfidenceBenign(c) ? LOW_BENIGN_NOTE : null;
+  const reviewText = review ? [...review, "담당자 검토 필요"].join(" · ") : !running ? attentionNote(c) : null;
   const next = t && p.probability !== null
     ? Object.entries(t.probabilities).sort((a, b) => b[1] - a[1]).filter(([k, v]) => k !== t.threat && v >= 0.01).slice(0, 2)
     : [];
@@ -2035,7 +2037,7 @@ function CaseTabs({
 function BriefRow({ b, onOpen, note }: { b: CaseBrief; onOpen: (id: string) => void; note?: string }) {
   const verdict = b.verdict === "threat" ? "위협 확정" : b.verdict === "benign" ? "정상 확정" : b.verdict === "hold" ? "담당자 보류" : "";
   // 판단 출처는 서버가 판단 기록에서 정한다(코드 규칙 판단을 'AI' 로 부르지 않는다, 예전 서버는 출처 없음)
-  const by = b.source === "model" ? "AI " : b.source === "rule" ? "규칙 판단 " : "";
+  const by = b.source === "model" ? "AI " : b.source === "rule" ? "규칙 판단 " : b.source === "fallback" ? "대체 판단 " : "";
   return (
     <li className="rel-row">
       <span className="rel-site">
@@ -2452,7 +2454,7 @@ function candStateBase(x: Candidate, pending: boolean, events: EvidenceEvent[]):
   if (!x.sub) return { label: "기록만", tone: "" };
   const th = x.threat ?? "";
   const p = candidatePresentation(x, events);
-  const source = p.source === "rule" ? ` · 규칙 판단${p.ruleLabel ? ` · ${p.ruleLabel}` : ""}` : p.probability !== null ? ` · ${pct(p.probability)}` : "";
+  const source = p.source === "rule" ? ` · 규칙 판단${p.ruleLabel ? ` · ${p.ruleLabel}` : ""}` : p.source === "fallback" ? ` · ${p.ruleLabel}` : p.probability !== null ? ` · ${pct(p.probability)}` : "";
   // '보류'는 담당자 판정에만 쓴다. AI 가 넘긴 것은 '확신 낮음', 규칙·판단 불가가 넘긴 것은 '검토 필요'
   const held = holdLabel(p, x.hold);
   if (th && th !== "benign" && th !== "unknown") {
@@ -2679,8 +2681,8 @@ function PathTab({ c, events }: { c: CaseOut; events: EvidenceEvent[] }) {
   const m = useMemo(() => buildPath(c, events), [c, events]);
   const th = c.threat;
   const review = reviewReason(c);
-  const low = lowConfidenceBenign(c); // 확신이 낮은 정상은 초록으로 보이지 않게
-  const thTone: Tone = review || th?.hold || low ? "review" : !th || th.threat === "unknown" ? "idle" : th.threat === "benign" ? "safe" : "threat";
+  const low = lowConfidenceBenign(c); // 확신이 낮은 정상·대체 판단은 초록으로 보이지 않게
+  const thTone: Tone = review || th?.hold || attentionNote(c) ? "review" : !th || th.threat === "unknown" ? "idle" : th.threat === "benign" ? "safe" : "threat";
   const decision = th ? `${caseDecisionText(c)}${review ? " · 검토 필요" : low ? " · 확신 낮음" : ""}` : review;
   if (m.nodes.length === 1 && m.branches[0].length === 0) {
     return (
@@ -2776,9 +2778,9 @@ function CaseFooterBar({
       ? sb.matches.map((m) => m.threat_type).join(", ")
       : sb?.status === "no_match"
         ? "일치 없음"
-        : sb?.status === "not_configured"
-          ? "키 없음"
-          : (sb?.status ?? "-");
+        : sb?.status
+          ? (SB_STATUS_LABEL[sb.status] ?? sb.status)
+          : "-";
   return (
     <div className="footbar">
       <span>
