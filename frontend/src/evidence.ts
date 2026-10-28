@@ -1,7 +1,8 @@
 // 근거 카드·근거 화면·경로 지도: 콘솔이 이미 받은 사건(CaseOut)과 서명된 기록(/events)으로만 계산한다.
 // 문장은 고정 문구 + 기록 값으로만 만든다(AI 가 새로 쓰는 문장 없음). 페이지에서 온 글자는 잘라서 글자로만 쓴다.
 import { type Candidate, type CaseOut, type EvidenceEvent, clickables, strs, text as str } from "./api";
-import { ACTION_LABEL, overrideLabel, THREAT_LABEL } from "./labels";
+import { ACTION_LABEL, overrideLabel } from "./labels";
+import { candidatePresentation } from "./decisionDisplay";
 
 export type Tone = "threat" | "review" | "safe" | "idle";
 export const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -153,18 +154,21 @@ export function buildReasons(events: EvidenceEvent[], c: CaseOut): Reason[] {
     const first = sus.sub ? events.find((e) => e.kind === "observe" && e.data.sub === sus.sub && png(e)?.startsWith(`c${sus.sub}_`)) : undefined;
     const where = sus.source === "via" ? "경유" : "링크";
     const host = clip(sus.host ?? sus.url, 40) + (sus.blocked ? "(회선 차단 추정)" : "");
-    const ai = sus.threat ? `${THREAT_LABEL[sus.threat] ?? sus.threat}${sus.probability != null ? ` ${pct(sus.probability)}` : ""}` : "";
+    const p = candidatePresentation(sus, events);
+    const opinion = sus.threat
+      ? `${p.typeLabel}${p.source === "rule" ? ` · 규칙 판단${p.ruleLabel ? ` (${p.ruleLabel})` : ""}` : p.probability !== null ? ` · ${pct(p.probability)}` : ""}`
+      : "";
     if (rep) {
       const sb = last((e) => e.kind === "candidate_safebrowsing");
       push({
         key: "candidate", title: "연관 사이트 평판 위험",
-        text: `${where} ${host}(또는 그 이동 주소)이 Safe Browsing 위험 일치${ai ? ` · AI 판단 ${ai}` : ""}`,
+        text: `${where} ${host}(또는 그 이동 주소)이 Safe Browsing 위험 일치${opinion ? ` · 조사 결과 ${opinion}` : ""}`,
         ev: sb ? `EV-${sb.seq}` : sus.sub ? `하위 조사 ${sus.sub}` : "평판", tone: "threat", shot: png(first), shotSeq: first?.seq ?? null,
       });
     } else {
       push({
-        key: "candidate", title: "연관 사이트도 의심",
-        text: `${where} ${host}도 ${ai}${sus.hold ? "(보류)" : ""}`,
+        key: "candidate", title: sus.hold || sus.threat === "unknown" ? "연관 사이트 검토 필요" : "연관 사이트도 의심",
+        text: `${where} ${host} · 조사 결과 ${opinion}${sus.hold ? "(보류)" : ""}`,
         ev: `하위 조사 ${sus.sub}`, tone: sus.hold ? "review" : "threat", shot: png(first), shotSeq: first?.seq ?? null,
       });
     }
@@ -262,7 +266,9 @@ export function buildPath(c: CaseOut, events: EvidenceEvent[]): PathMap {
     if (x.sub) {
       const th = x.threat ?? "";
       const tone: Tone = x.reputation_match ? "threat" : !th || th === "benign" ? (x.hold ? "review" : "idle") : x.hold ? "review" : "threat";
-      const verdict = th ? `${THREAT_LABEL[th] ?? th}${x.hold ? "(보류)" : ""}` : "판단 없음";
+      const p = candidatePresentation(x, events);
+      const source = p.source === "rule" ? " · 규칙 판단" : p.source === "model" ? " · AI 판단" : "";
+      const verdict = th ? `${p.typeLabel}${x.hold ? "(보류)" : ""}${source}` : "판단 없음";
       branches[lastIdx].push({ kind: "cand", title: `${where} 후보 · ${verdict}${repNote}`, sub: clip(str(x.host ?? x.url), 24), tone, dashed: false });
     } else {
       branches[lastIdx].push({ kind: "cand-record", title: `${where} 후보 · 기록만${repNote}`, sub: clip(str(x.host ?? x.url), 24), tone: x.reputation_match ? "threat" : "idle", dashed: true });

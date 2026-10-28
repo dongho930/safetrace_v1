@@ -16,15 +16,15 @@ export function overrideLabel(o: Threat["override"]): string {
   const brand = text(o.brand);
   const dest = text(o.destination);
   if (o.reason === "shortener_warning") return "단축 URL 서비스의 위험 경고 → 담당자 검토";
-  if (o.reason === "link_takedown") return "단축·호스팅 서비스가 불법·약관 위반으로 링크를 정지 → 담당자 검토";
-  if (o.reason === "official_redirect") return `조사 전에 공식 사이트(${brand} · ${dest})로 바로 넘김(봇 회피 흔적) → 담당자 검토`;
+  if (o.reason === "link_takedown") return "단축·호스팅 서비스의 링크 정지 안내 → 담당자 검토";
+  if (o.reason === "official_redirect") return `조사 전에 공식 사이트(${brand} · ${dest})로 바로 이동 → 원래 주소 담당자 검토`;
   if (o.reason === "brand_lookalike")
     return dest
       ? `열리지 않은 목적지가 브랜드 사칭 도메인(${brand} · ${dest}) → 담당자 검토`
       : `브랜드 사칭 도메인(${brand}), 화면 내용 없음 → 담당자 검토`;
   if (o.reason === "brand_name_domain") return `브랜드 이름 그대로의 다른 도메인(${brand} · ${dest}) → 담당자 검토`;
   if (o.reason === "brand_typo_domain") return `브랜드를 내세운 화면인데 도메인이 그 이름의 오타(${brand} · ${dest}) → 담당자 검토`;
-  if (o.reason === "brand_login_shared_hosting") return `공용 호스팅에서 브랜드를 내세운 로그인 화면(${brand} · ${dest}) → 담당자 검토`;
+  if (o.reason === "brand_login_shared_hosting") return `공용 호스팅의 브랜드·로그인 표지(${brand} · ${dest}) → 담당자 검토`;
   if (o.reason === "brand_clone_title") return `공식 도메인 밖에서 브랜드 공식 화면 제목을 그대로 쓴 로그인 화면(${brand} · ${dest}) → 담당자 검토`;
   if (o.reason === "official_betting_domain") {
     const ops = strs(o.operators);
@@ -36,7 +36,7 @@ export const REASON_LABEL: Record<string, string> = dict({
   reputation_match: "Safe Browsing 위험 일치(AI 는 정상으로 봄)",
   candidate_reputation_match: "연관 후보가 Safe Browsing 위험 일치(AI 는 정상으로 봄)",
   unreachable_reputation_match: "접속 불가 · Safe Browsing 위험 일치",
-  unreachable_network_filtered: "접속 불가 · 회선이 도메인 이름을 보고 차단(이미 차단 목록에 오른 사이트)",
+  unreachable_network_filtered: "접속 불가 · 회선 차단 추정",
   goto_failed: "최초 접속 실패",
   low_confidence_action: "다음 행동 확신 부족으로 탐색 종료",
   loop_detected: "같은 화면 반복으로 탐색 종료",
@@ -46,6 +46,7 @@ export const REASON_LABEL: Record<string, string> = dict({
   time_budget: "최대 시간 도달",
   page_unresponsive: "페이지가 응답하지 않아 시간 예산에서 강제 종료(무한 스크립트 등)",
   threat_decision_unavailable: "위협 판단 불가(판단 서비스 장애)",
+  decision_unavailable: "행동 판단 불가(판단 서비스 장애)",
   "ssrf:dns_failure": "도메인 없음(DNS)",
   "ssrf:non_public_ip": "내부 주소라 접속하지 않음(정책)",
   "ssrf:port_not_allowed": "허용하지 않는 포트(정책)",

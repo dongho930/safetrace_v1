@@ -49,6 +49,7 @@ export type CaseOut = {
   verdict: Verdict | null; // 담당자의 현재 판정(없으면 null)
   phase: "related" | null; // 원래 결과가 나왔고 연관 사이트를 조사하는 중
   main_status: string | null; // 원래 결과의 상태(phase 가 related 일 때 폴더·판정에 쓴다)
+  main_reason?: string | null; // 연관 조사 중에도 원래 결과의 검토 사유를 표시한다(이전 서버는 없을 수 있음)
   parent_id: string | null; // 연관 사건이면 그 후보가 나온 부모 사건
   parent_url: string | null;
   auto: boolean | null; // 자동으로 만든 연관 사건인지(PR 4b)
@@ -416,16 +417,18 @@ export const dict = <T,>(o: Record<string, T>): Record<string, T> => Object.assi
 
 // 사건의 위협 판단·후보는 워커가 보낸 값을 API 가 저장한 것이다. 화면이 쓰는 모양으로만 받는다(목록 한 줄 때문에 콘솔 전체가 멈추지 않게)
 const strOr = (v: unknown, d: string | null = null) => (typeof v === "string" ? v : d);
-const numOr = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+// 누락·비정상 확률은 실제 0.00으로 보이지 않도록 표시 불가값으로 남긴다.
+const probabilityOrNaN = (v: unknown) =>
+  typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1 ? v : NaN;
 function cleanThreat(v: unknown): Threat | null {
   if (!isObj(v) || typeof v.threat !== "string") return null;
   const probs: Record<string, number> = {};
-  if (isObj(v.probabilities)) for (const [k, p] of Object.entries(v.probabilities).slice(0, 20)) if (typeof p === "number" && Number.isFinite(p)) probs[k] = p;
+  if (isObj(v.probabilities)) for (const [k, p] of Object.entries(v.probabilities).slice(0, 20)) if (Number.isFinite(probabilityOrNaN(p))) probs[k] = p as number;
   const o = v.override;
   const original = isObj(o) && isObj(o.original) ? o.original : null;
   return {
     threat: v.threat.slice(0, 32),
-    probability: numOr(v.probability),
+    probability: probabilityOrNaN(v.probability),
     probabilities: probs,
     hold: v.hold === true,
     provider: strOr(v.provider, "") as string,
@@ -438,7 +441,7 @@ function cleanThreat(v: unknown): Threat | null {
             operators: strs(o.operators),
             brand: strOr(o.brand) ?? undefined,
             destination: strOr(o.destination) ?? undefined,
-            original: { threat: strOr(original?.threat, "") as string, probability: numOr(original?.probability), provider: strOr(original?.provider, "") as string },
+            original: { threat: strOr(original?.threat, "") as string, probability: probabilityOrNaN(original?.probability), provider: strOr(original?.provider, "") as string },
           }
         : undefined,
   };
@@ -498,6 +501,7 @@ export function cleanCase(v: unknown): CaseOut | null {
     verdict: ver,
     phase: v.phase === "related" ? "related" : null,
     main_status: strOr(v.main_status)?.slice(0, 24) ?? null,
+    main_reason: strOr(v.main_reason)?.slice(0, 200) ?? null,
     parent_id: strOr(v.parent_id)?.slice(0, 36) ?? null,
     parent_url: strOr(v.parent_url)?.slice(0, 2000) ?? null,
     auto: typeof v.auto === "boolean" ? v.auto : null,
