@@ -122,16 +122,26 @@ def assessment_line(ai: dict | None, error: bool = False) -> str:
     (모델 원래 판단은 바로 아래 '코드 규칙' 줄에 있다)."""
     if not ai:
         return "판단 서비스 장애로 판단 없음" if error else "판단 없음"
+    held = hold_ko(ai)
     return (opinion_ko(ai.get("threat"), ai.get("threat_ko"), ai.get("probability"), ai.get("source"))
-            + (" · 보류(담당자 검토)" if ai.get("hold") else ""))
+            + (f" · {held}(담당자 검토)" if held == "확신 낮음" else f" · {held}" if held else ""))
+
+
+def hold_ko(t: dict) -> str | None:
+    """판단의 hold 는 담당자의 '보류' 판정과 다르다(콘솔 holdLabel 과 같은 기준): AI(모델)는 확신이 낮아서,
+    코드 규칙·판단 불가는 담당자가 보라고 넘긴 것이다."""
+    if not t.get("hold"):
+        return None
+    return "확신 낮음" if t.get("source") == "model" and t.get("threat") != "unknown" else "담당자 검토"
 
 
 def related_opinion(r: dict) -> str:
     """연관 사이트 표의 조사 판단 칸."""
     if r.get("error"):
         return "조사 실패"
+    held = hold_ko(r)
     return (opinion_ko(r.get("threat"), r.get("threat_ko"), r.get("probability"), r.get("source"))
-            + (" · 보류" if r.get("hold") else "") + (f" · {BLOCKED_KO}" if r.get("blocked") else ""))
+            + (f" · {held}" if held else "") + (f" · {BLOCKED_KO}" if r.get("blocked") else ""))
 
 
 def _override_ko(o: object) -> str | None:

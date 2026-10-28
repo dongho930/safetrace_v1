@@ -23,8 +23,9 @@ after(cleanup);
 
 let presentation;
 let cleanCase;
+let evidence;
 try {
-  const program = ts.createProgram([join(frontend, "src", "decisionDisplay.ts")], {
+  const program = ts.createProgram([join(frontend, "src", "decisionDisplay.ts"), join(frontend, "src", "evidence.ts")], {
     target: ts.ScriptTarget.ES2022,
     module: ts.ModuleKind.CommonJS,
     moduleResolution: ts.ModuleResolutionKind.Node10,
@@ -51,11 +52,13 @@ try {
   const requireCompiled = createRequire(join(scratch, "package.json"));
   presentation = requireCompiled(join(scratch, "decisionDisplay.js"));
   cleanCase = requireCompiled(join(scratch, "api.js")).cleanCase;
+  evidence = requireCompiled(join(scratch, "evidence.js"));
 } catch (error) {
   cleanup();
   throw error;
 }
-const { threatPresentation, casePresentation, reviewReason, reviewParts, caseDecisionText, candidatePresentation, reputationHit, reputationConflict } = presentation;
+const { threatPresentation, casePresentation, reviewReason, reviewParts, caseDecisionText, candidatePresentation, reputationHit, reputationConflict,
+  holdLabel, lowBenign, lowConfidenceBenign, exploreNote, BENIGN_SURE } = presentation;
 
 function modelThreat(patch = {}) {
   return {
@@ -174,7 +177,8 @@ test("model uncertainty is the review reason only when that is the actual basis"
 test("unknown with a one-hot distribution remains an inability to classify", () => {
   const c = caseOut({ status: "REVIEW_REQUIRED", threat: modelThreat({ threat: "unknown", probability: 1, hold: true }) });
   assert.equal(threatPresentation(c.threat).probability, null);
-  assert.match(reviewReason(c), /판단.*(불가|못)|유형.*(불가|못)/);
+  assert.match(caseDecisionText(c), /^판단 불가/);
+  assert.doesNotMatch(reviewReason(c), /AI 판단 불확실/);
   assert.doesNotMatch(caseDecisionText(c), /1\.00/);
 });
 
@@ -374,6 +378,8 @@ test("legacy benign records are not described as a low-confidence threat judgmen
   const reason = reviewReason(c);
   assert.ok(reason);
   assert.doesNotMatch(reason, /AI 판단 불확실|위협.*확신이 부족/);
+  // 탐색 종료 까닭을 검토 원인처럼 붙이지 않는다
+  assert.equal(reason, "담당자 검토 필요");
 });
 
 test("candidate source comes from the matching final sub-investigation evidence", () => {
@@ -455,7 +461,7 @@ test("a held threat opinion with its own Safe Browsing match keeps its number an
 
 test("an unknown opinion with its own Safe Browsing match names the match", () => {
   const c = caseOut({ status: "REVIEW_REQUIRED", threat: modelThreat({ threat: "unknown", probability: 0.4, hold: true }), safebrowsing: ownMatch });
-  assert.deepEqual(reviewParts(c), ["Safe Browsing 위험 일치", "유형을 판단하지 못했습니다"]);
+  assert.deepEqual(reviewParts(c), ["Safe Browsing 위험 일치"]);
 });
 
 test("a match only on related candidates is not a conflict about the reported address", () => {
@@ -493,4 +499,69 @@ test("an agreeing completed threat with a Safe Browsing match asks for no review
   const c = caseOut({ threat: modelThreat({ probability: 0.9 }), safebrowsing: ownMatch });
   assert.equal(reviewReason(c), null);
   assert.equal(casePresentation(c).probability, 0.9);
+});
+
+// ── 판단 문구 정리(2026-10-28): '보류'는 담당자 판정에만, 확신 낮은 정상은 초록이 아니게, 판단 불가는 사정을 함께 ──
+
+test("a model hold is low confidence while a rule or unknown hold asks for review, never 'hold'", () => {
+  assert.equal(holdLabel(threatPresentation(modelThreat({ probability: 0.5, hold: true })), true), "확신 낮음");
+  assert.equal(holdLabel(threatPresentation(modelThreat({ threat: "benign", probability: 0.5, hold: true })), true), "확신 낮음");
+  assert.equal(holdLabel(threatPresentation(modelThreat({ threat: "unknown", hold: true })), true), "검토 필요");
+  assert.equal(holdLabel(threatPresentation(ruleThreat()), true), "검토 필요");
+  assert.equal(holdLabel(threatPresentation(modelThreat()), false), null);
+});
+
+test("a confident-looking but sub-0.9 benign model opinion is flagged as low confidence without changing the case", () => {
+  const c = caseOut({ threat: modelThreat({ threat: "benign", probability: 0.65, hold: false }) });
+  assert.equal(BENIGN_SURE, 0.9);
+  assert.equal(lowConfidenceBenign(c), true);
+  assert.equal(reviewReason(c), null); // 상태·검토 요청은 그대로
+  assert.equal(casePresentation(c).probability, 0.65); // 숫자도 그대로
+  assert.equal(lowConfidenceBenign(caseOut({ threat: modelThreat({ threat: "benign", probability: 0.9 }) })), false);
+  assert.equal(lowConfidenceBenign(caseOut({ threat: modelThreat({ threat: "benign", probability: 0.97 }) })), false);
+  // 담당자 확정·규칙 정상·이미 검토 사유가 있는 사건은 따로 알리지 않는다
+  assert.equal(lowConfidenceBenign({ ...c, verdict: { rev: 1, decision: "benign", threat: null } }), false);
+  assert.equal(lowConfidenceBenign(caseOut({ threat: ruleThreat("official_betting_domain", { threat: "benign", hold: false, provider: "official_domain" }) })), false);
+  assert.equal(lowConfidenceBenign(caseOut({ status: "REVIEW_REQUIRED", finish_reason: "page_unresponsive", threat: modelThreat({ threat: "benign", probability: 0.7 }) })), false);
+  assert.equal(lowConfidenceBenign(caseOut({ threat: modelThreat({ threat: "benign", probability: 0.65, provider: "legacy_unknown_provider" }) })), false);
+  assert.equal(lowBenign(threatPresentation(modelThreat({ threat: "benign", probability: 0.65 })), true), false); // 보류는 '확신 낮음'이 말한다
+});
+
+test("an unknown case explains why it could not be judged instead of repeating it", () => {
+  const c = caseOut({ status: "REVIEW_REQUIRED", finish_reason: "low_confidence_action", threat: modelThreat({ threat: "unknown", probability: 0.4, hold: true }) });
+  assert.equal(exploreNote(c), "다음 행동 확신 부족으로 탐색 종료");
+  assert.equal(caseDecisionText(c, true), "판단 불가(다음 행동 확신 부족으로 탐색 종료)");
+  assert.equal(caseDecisionText(c), "판단 불가"); // 경로 지도는 짧게
+  assert.deepEqual(reviewParts(c), []);
+  assert.equal(reviewReason(c), "담당자 검토 필요");
+  const done = { ...c, finish_reason: "agent_finished" };
+  assert.equal(exploreNote(done), null);
+  assert.equal(caseDecisionText(done, true), "판단 불가");
+  // 판단 불가가 아니면 사정을 붙이지 않는다
+  assert.equal(caseDecisionText(caseOut({ finish_reason: "low_confidence_action" }), true), "피싱 · 0.80");
+});
+
+test("calm (gray safety-rule) treatment needs a confident or confirmed benign", () => {
+  const benign = (probability, patch = {}) => caseOut({ threat: modelThreat({ threat: "benign", probability, hold: false }), ...patch });
+  assert.equal(evidence.calmCase(benign(0.95)), true);
+  assert.equal(evidence.calmCase(benign(0.65)), false);
+  assert.equal(evidence.calmCase(benign(0.65, { verdict: { rev: 1, decision: "benign", threat: null } })), true);
+  assert.equal(evidence.calmCase(caseOut({ threat: ruleThreat("official_betting_domain", { threat: "benign", hold: false, provider: "official_domain" }) })), true);
+});
+
+test("path and reason labels say low confidence or review instead of the reviewer's 'hold'", () => {
+  const sub = [
+    { type: "evidence", seq: 9, kind: "threat", data: { sub: 2, ...modelThreat({ probability: 0.55, hold: true }) }, files: [], hash: "h" },
+    { type: "evidence", seq: 10, kind: "threat", data: { sub: 3, ...ruleThreat() }, files: [], hash: "h" },
+  ];
+  const cands = [candidate({ probability: 0.55, hold: true }), candidate({ url: "https://rule.example/", host: "rule.example", sub: 3 })];
+  const path = evidence.buildPath(caseOut({ candidates: cands }), sub);
+  const titles = path.branches.flat().map((b) => b.title);
+  assert.ok(titles.some((t) => t.includes("피싱(확신 낮음) · AI 판단")), titles.join(" / "));
+  assert.ok(titles.some((t) => t.includes("피싱(검토 필요) · 규칙 판단")), titles.join(" / "));
+  assert.ok(titles.every((t) => !t.includes("보류")));
+  const cards = evidence.buildReasons(sub, caseOut({ candidates: [cands[0]] }));
+  const card = cards.find((r) => r.key === "candidate");
+  assert.match(card.text, /확신 낮음/);
+  assert.doesNotMatch(card.text, /보류/);
 });
