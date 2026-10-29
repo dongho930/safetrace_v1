@@ -60,8 +60,8 @@ def main():
     r = redis.Redis.from_url(s.redis_url, decode_responses=True, socket_timeout=30)  # XREADGROUP block(5초)보다 길게
     try:
         r.xgroup_create(JOBS, GROUP, id="0", mkstream=True)
-    except redis.ResponseError:
-        pass
+    except redis.ResponseError as e:
+        log.debug("jobs group create skipped: %s", type(e).__name__)
     consumer = socket.gethostname()
     live = RedisLivePublisher(s.redis_url)  # 콘솔 실시간 화면(시청 중일 때만 발행)
     # 최대 조사 시간(원래 조사 + 연관 후보 하위 조사, 후보마다 브라우저를 새로 띄우는 시간 포함)보다 길게

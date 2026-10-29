@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import io
 import itertools
+import logging
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
@@ -32,6 +33,7 @@ from .decision.brands import SHARED_HOSTING, on_domain, site_of
 from .netguard import BlockedURL, parse_url
 from .store import Case, FeedFetch, FeedItem, IntakeState, Store, now
 
+log = logging.getLogger("safetrace.intake")
 INTAKE_ACTOR = "system:intake"  # 사람 계정·토큰 이름 규칙과 겹치지 않는 내부 주체
 INTERVAL_H = {"openphish": 12, "phishtank": 6}  # 출처 갱신 주기(OpenPhish 12시간, PhishTank 는 키 없이 하루 몇 번까지)
 RETRY_FAILED = timedelta(hours=1)  # 받기에 실패한 출처를 다시 시도할 간격
@@ -81,8 +83,8 @@ def parse(source: str, text: str, truncated: bool) -> list[str]:
                     break
                 if row[4] == "yes" and row[6] == "yes":
                     out.append(row[1].strip())
-        except csv.Error:
-            pass
+        except csv.Error as e:
+            log.debug("feed csv parse stopped: %s", type(e).__name__)
         return out
     return []
 
@@ -265,7 +267,8 @@ def recent_hosts(store: Store, days: int, at: datetime | None = None) -> set[str
         for u in s.scalars(select(Case.url).where(Case.created_at >= since)):
             try:
                 h = (urlsplit(u).hostname or "").lower().rstrip(".")
-            except ValueError:
+            except ValueError as e:
+                log.debug("case host unparsable: %s", type(e).__name__)
                 continue
             if h:
                 hosts.add(h)

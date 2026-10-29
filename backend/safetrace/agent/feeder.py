@@ -83,8 +83,8 @@ def main():
         # 처음 만들 때는 새 요청부터(예전 받기 요청을 다시 받지 않게 — PhishTank 는 키 없이 하루 몇 번까지).
         # 꺼져 있던 동안 들어온 요청은 API 가 10분 뒤 만료시키고 1시간 뒤 다시 요청한다
         r.xgroup_create(STREAM, GROUP, id="$", mkstream=True)
-    except redis.ResponseError:
-        pass
+    except redis.ResponseError as e:
+        log.debug("feed group create skipped: %s", type(e).__name__)
     consumer = socket.gethostname()
     state = State()
     while True:

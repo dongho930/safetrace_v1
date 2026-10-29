@@ -50,8 +50,8 @@ async def _pipe(r: asyncio.StreamReader, w: asyncio.StreamWriter):
                 break
             w.write(data)
             await w.drain()
-    except (TimeoutError, ConnectionError, asyncio.IncompleteReadError):
-        pass
+    except (TimeoutError, ConnectionError, asyncio.IncompleteReadError) as e:
+        log.debug("relay ended: %s", type(e).__name__)
     finally:
         try:
             w.close()
