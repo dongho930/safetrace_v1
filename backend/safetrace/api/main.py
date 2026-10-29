@@ -669,8 +669,8 @@ def _trusted_proxy_ips(refresh: bool = False) -> frozenset[str]:
         for name in settings.trusted_proxies:
             try:
                 found |= {ai[4][0] for ai in socket.getaddrinfo(name, None)}
-            except OSError:
-                pass
+            except OSError as e:
+                log.debug("trusted proxy name unresolved: %s", type(e).__name__)
         _proxy_ips = (time.monotonic(), frozenset(found))
     return _proxy_ips[1]
 
@@ -683,8 +683,8 @@ def _client_ip(request: Request) -> str:
     if fwd and settings.trusted_proxies and (peer in _trusted_proxy_ips() or peer in _trusted_proxy_ips(refresh=True)):
         try:
             return str(ipaddress.ip_address(fwd.rsplit(",", 1)[-1].strip()))
-        except ValueError:
-            pass
+        except ValueError as e:
+            log.debug("forwarded address not an ip: %s", type(e).__name__)
     return peer[:64] or "-"
 
 
@@ -1188,8 +1188,8 @@ async def case_live(ws: WebSocket, case_id: str):
         t.cancel()
     try:
         await ws.close()
-    except RuntimeError:
-        pass
+    except RuntimeError as e:
+        log.debug("live socket close skipped: %s", type(e).__name__)
 
 
 def _evidence_head(c: Case) -> Head | None:

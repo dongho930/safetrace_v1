@@ -187,8 +187,8 @@ class ScreencastRecorder:
     async def _ack(cdp: CDPSession, session_id: int):
         try:
             await cdp.send("Page.screencastFrameAck", {"sessionId": session_id})
-        except PWError:
-            pass
+        except PWError as e:
+            log.debug("screencast ack failed: %s", type(e).__name__)
 
     def _on_frame(self, cdp: CDPSession, ev: dict):
         if cdp is not self._cdp or self._pauses:
@@ -211,8 +211,8 @@ class ScreencastRecorder:
         try:
             await cdp.send("Page.stopScreencast")
             await cdp.detach()
-        except PWError:
-            pass
+        except PWError as e:
+            log.debug("screencast stop failed: %s", type(e).__name__)
 
     async def switch(self, page: Page):
         """에이전트가 새 창을 채택하면 같은 영상에 이어서 담는다."""
@@ -258,8 +258,8 @@ class ScreencastRecorder:
                 self._proc.stdin.close()
             try:
                 self._proc.kill()
-            except ProcessLookupError:
-                pass
+            except ProcessLookupError as e:
+                log.debug("ffmpeg already exited: %s", type(e).__name__)
 
     async def stop(self, end_ts: float | None = None) -> dict | None:
         """녹화를 끝내고 영상 정보를 돌려준다. 프레임이 하나도 없으면 None.
@@ -277,8 +277,8 @@ class ScreencastRecorder:
             self._ticker.cancel()
             try:
                 await self._ticker
-            except asyncio.CancelledError:
-                pass
+            except asyncio.CancelledError as e:
+                log.debug("ticker stopped: %s", type(e).__name__)
         await self._detach()
         if not self._proc:
             return None
@@ -293,8 +293,8 @@ class ScreencastRecorder:
         if self._proc.stdin:
             try:
                 self._proc.stdin.close()
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            except (BrokenPipeError, ConnectionResetError) as e:
+                log.debug("ffmpeg stdin close failed: %s", type(e).__name__)
         try:
             _, err = await asyncio.wait_for(self._proc.communicate(), 60)
         except TimeoutError:

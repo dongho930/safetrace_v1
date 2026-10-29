@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,6 +31,7 @@ from .evidence import (
 )
 from .store import AuditLog, Case, Verdict
 
+log = logging.getLogger("safetrace.package")
 FORMAT = "safetrace.review-package/1"
 _STEP_KINDS = {"observe", "decision", "gate", "action", "action_error", "new_window", "wait_redirect", "wait_controls", "dead_end",
                "decision_error", "escalation"}
@@ -343,7 +345,8 @@ def export_zip(pkg: dict, evidence_dir: Path, case_id: str, signer: Signer,
             continue
         try:
             data = read_evidence(evidence_dir, case_id, "files", f["name"], max_bytes=FILE_MAX_BYTES)
-        except FileNotFoundError:
+        except FileNotFoundError as e:
+            log.debug("evidence file missing at export: %s", type(e).__name__)
             continue
         except UnsafeEvidence:
             changed.append(f["name"])

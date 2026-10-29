@@ -99,7 +99,8 @@ class LocalOCR:
                 try:
                     if len(r) >= 3 and float(r[2]) >= 0.5:
                         words.append((str(r[1]), float(r[2])))
-                except (TypeError, ValueError):
+                except (TypeError, ValueError) as e:
+                    log.debug("ocr result skipped: %s", type(e).__name__)
                     continue
             if words:
                 found.append((sum(sc for _, sc in words) / len(words), " ".join(t for t, _ in words)))
@@ -158,7 +159,8 @@ class LocalOCR:
         for r in result or []:
             try:
                 poly, txt, score = r[0], str(r[1]), float(r[2])
-            except (TypeError, ValueError, IndexError):
+            except (TypeError, ValueError, IndexError) as e:
+                log.debug("ocr result skipped: %s", type(e).__name__)
                 continue
             if score < 0.5:
                 continue
@@ -230,7 +232,8 @@ def _join(result) -> str:
         try:
             if len(r) >= 3 and float(r[2]) >= 0.5:  # rapidocr 은 점수를 문자열로 줄 때가 있다
                 words.append(str(r[1]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as e:
+            log.debug("ocr result skipped: %s", type(e).__name__)
             continue
     return " ".join(words)
 
@@ -250,8 +253,8 @@ def ocr_threads(cpu_max: Path = _CGROUP_CPU_MAX) -> int:
         quota, period = cpu_max.read_text().split()[:2]  # cgroup v2: "200000 100000" | "max 100000"
         if quota != "max":
             cpus = min(cpus, max(1, int(quota) // int(period)))
-    except (OSError, ValueError):
-        pass
+    except (OSError, ValueError) as e:
+        log.debug("cpu quota unreadable: %s", type(e).__name__)
     return max(1, min(cpus, 4))
 
 

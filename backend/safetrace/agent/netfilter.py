@@ -66,12 +66,13 @@ def _attempt(host: str, port: int, tls: bool, name: str, proxy: str | None, allo
     try:
         s.settimeout(_TIMEOUT)
         if tls:
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
+            ctx = ssl.create_default_context()  # 인증서·이름 검증을 끄지 않는다
             try:
                 with ctx.wrap_socket(s, server_hostname=name):
                     return "responded"  # 핸드셰이크 완료
+            except ssl.SSLCertVerificationError:
+                # 서버가 인증서를 보냈다는 뜻이라 답한 것이다(무관한 이름은 늘 이름 검증에서 떨어진다)
+                return "responded"
             except (ssl.SSLEOFError, ConnectionError):
                 return "dropped"
             except ssl.SSLError as e:

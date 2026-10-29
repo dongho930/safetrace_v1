@@ -149,8 +149,8 @@ async def full_layout(page: Page, mark: str):
     if ok:  # 펼친 배치가 화면에 한 번 그려진 뒤 재고 찍는다(바로 찍으면 fixed 요소가 이전 자리에 그려질 때가 있다)
         try:
             await asyncio.wait_for(page.evaluate(_TWO_FRAMES_JS), 1.0)
-        except (PWError, asyncio.TimeoutError):
-            pass
+        except (PWError, asyncio.TimeoutError) as e:
+            log.debug("frame wait failed: %s", type(e).__name__)
     try:
         yield ok
     finally:
@@ -158,8 +158,8 @@ async def full_layout(page: Page, mark: str):
         if ok or timed_out:
             try:
                 await asyncio.wait_for(page.evaluate(_RESTORE_JS, [mark, saved if ok else None]), _LAYOUT_TIMEOUT_S)
-            except (PWError, asyncio.TimeoutError):
-                pass
+            except (PWError, asyncio.TimeoutError) as e:
+                log.debug("layout restore failed: %s", type(e).__name__)
 
 
 _PNG_SIG = bytes([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])  # PNG 파일 서명
@@ -677,14 +677,14 @@ class AgentRun:
                         out[k] = "one"
                     break
                 await page.evaluate(_SCROLL_TO_JS, target)
-        except (PWError, PWTimeout, OSError, KeyError, TypeError, ValueError):
-            pass  # 남은 것은 아래에서 요소별로
+        except (PWError, PWTimeout, OSError, KeyError, TypeError, ValueError) as e:
+            log.debug("batch measure stopped: %s", type(e).__name__)  # 남은 것은 아래에서 요소별로
         finally:
             if start_y is not None:
                 try:
                     await page.evaluate(_SCROLL_TO_JS, start_y)
-                except PWError:
-                    pass
+                except PWError as e:
+                    log.debug("scroll restore failed: %s", type(e).__name__)
         for k, (_, eid, info) in enumerate(need):
             if out[k] in ("far", "one"):
                 out[k] = "skip" if time.monotonic() >= until else await self._capture_element(page, eid, info)
@@ -736,14 +736,14 @@ class AgentRun:
                 await self.rec.switch(back_to)
             try:
                 await page.close()
-            except PWError:
-                pass
+            except PWError as e:
+                log.debug("dead-end page close failed: %s", type(e).__name__)
             page = back_to
         if page.url != url:
             try:
                 await page.go_back(timeout=self.s.nav_timeout_ms)
-            except (PWError, PWTimeout):
-                pass
+            except (PWError, PWTimeout) as e:
+                log.debug("go back failed: %s", type(e).__name__)
             await self._settle(page)
         return page if page.url == url else None
 
@@ -823,8 +823,8 @@ class AgentRun:
         try:
             await page.wait_for_load_state("domcontentloaded", timeout=5000)
             await page.wait_for_load_state("networkidle", timeout=3000)
-        except (PWError, PWTimeout):
-            pass
+        except (PWError, PWTimeout) as e:
+            log.debug("load wait ended: %s", type(e).__name__)
 
     async def _click_point(self, page: Page, eid: str) -> tuple[list[int] | None, bool]:
         """누를 요소를 창 안으로 옮기고(Playwright 클릭도 누르기 전에 하는 일) 창 기준 상자 [x, y, 폭, 높이]를 잰다.
@@ -847,8 +847,8 @@ class AgentRun:
             return None, False
         try:  # 스크롤 이벤트는 다음 화면에 전달된다: 그 처리가 끝난 뒤 재고 검사한다(응답하지 않는 페이지는 1초까지만)
             await asyncio.wait_for(page.evaluate(_TWO_FRAMES_JS), 1.0)
-        except (PWError, asyncio.TimeoutError):
-            pass
+        except (PWError, asyncio.TimeoutError) as e:
+            log.debug("frame wait failed: %s", type(e).__name__)
         try:
             bb = await loc.bounding_box(timeout=_BOX_TIMEOUT_MS)
         except (PWError, PWTimeout):
@@ -1228,16 +1228,16 @@ class AgentRun:
                 url0 = page.url
                 try:
                     await page.go_back(timeout=self.s.nav_timeout_ms)
-                except (PWError, PWTimeout):
-                    pass
+                except (PWError, PWTimeout) as e:
+                    log.debug("go back failed: %s", type(e).__name__)
                 await self._settle(page)
                 outcome = "back"
                 if not page.url.startswith(("http://", "https://")):
                     # 시작 페이지에서 뒤로 가면 about:blank 로 사이트를 벗어난다: 되돌리고 효과 없음으로 기록
                     try:
                         await page.go_forward(timeout=self.s.nav_timeout_ms)
-                    except (PWError, PWTimeout):
-                        pass
+                    except (PWError, PWTimeout) as e:
+                        log.debug("go forward failed: %s", type(e).__name__)
                     await self._settle(page)
                     outcome = "back_no_effect"
                 elif page.url == url0:
