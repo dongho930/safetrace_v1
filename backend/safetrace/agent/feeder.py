@@ -64,7 +64,10 @@ def run_one(r, s, key: bytes, fields: dict, state: State) -> str:
     state.last[source] = now
     try:
         res = fetch(source, s.egress_proxy, set(s.test_allowlist))
-    except Exception as e:  # noqa: BLE001
+    except (ValueError, RuntimeError, OSError) as e:  # 네트워크 오류는 fetch 가 결과로 바꾼다: 남는 것은 형식·실행 오류
+        log.warning("feed fetch failed: %s", type(e).__name__)
+        res = {"ok": False, "reason": type(e).__name__}
+    except Exception as e:  # 예상하지 못한 실패도 '받기 실패' 결과로 서명해 보낸다
         log.exception("feed fetch failed")
         res = {"ok": False, "reason": type(e).__name__}
     res["mac"] = feed_mac(key, int(fetch_id), source, res)

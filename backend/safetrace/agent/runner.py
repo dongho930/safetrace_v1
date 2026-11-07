@@ -8,6 +8,7 @@ from collections.abc import Callable
 from urllib.parse import unquote
 
 import httpx
+from playwright.async_api import Error as PWError
 
 from .. import related
 from ..config import Settings
@@ -18,7 +19,7 @@ from ..live import LivePublisher, LiveSink
 from ..masking import mask_pii
 from ..netguard import remote_resolver
 from ..safebrowsing import lookup
-from ..signer.client import RemoteSealer
+from ..signer.client import RemoteSealer, SignerError
 from .loop import AgentRun
 
 log = logging.getLogger("safetrace.runner")
@@ -70,7 +71,12 @@ def _investigate_candidates(cands: list[dict], s: Settings, decider: Decider, wr
         res = {**c, "sub": i}
         try:
             r = asyncio.run(AgentRun(c["url"], sub_s, decider, writer, emit, resolver=resolver, live=sink, sub=i).run())
-        except Exception as e:  # 브라우저를 띄우지 못한 경우 등. 원래 조사 결과는 그대로 둔다
+        except (PWError, OSError, TimeoutError, SignerError) as e:  # 브라우저를 띄우지 못함·파일·서명 서비스 오류
+            log.warning("candidate investigation failed: %s", type(e).__name__)
+            _append(writer, emit, "candidate_error", {"sub": i, "url": c["url"], "error": type(e).__name__})
+            out.append({**res, "status": "FAILED", "reason": f"error:{type(e).__name__}", "_urls": [c["url"]]})
+            continue
+        except Exception as e:  # 예상하지 못한 실패도 원래 조사 결과는 그대로 두고 다음 후보로
             log.exception("candidate investigation failed")
             _append(writer, emit, "candidate_error", {"sub": i, "url": c["url"], "error": type(e).__name__})
             out.append({**res, "status": "FAILED", "reason": f"error:{type(e).__name__}", "_urls": [c["url"]]})

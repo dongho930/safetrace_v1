@@ -79,13 +79,15 @@ def open_evidence(root: Path, case_id: str, *parts: str) -> tuple[int, os.stat_r
         if e.errno == errno.ELOOP:
             raise UnsafeEvidence("symlink") from None
         raise
+    ok = False
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             raise UnsafeEvidence("not_regular_file")
-    except BaseException:
-        os.close(fd)
-        raise
+        ok = True
+    finally:
+        if not ok:  # 확인에 실패하면 어떤 예외든 fd 를 닫고 그대로 올려 보낸다
+            os.close(fd)
     return fd, st
 
 

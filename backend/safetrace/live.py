@@ -19,6 +19,8 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Protocol
 
+from redis.exceptions import RedisError
+
 log = logging.getLogger("safetrace.live")
 
 CHANNEL = "st:live:{}"
@@ -149,7 +151,11 @@ class RedisLivePublisher:
         if now - t >= 1.0:
             try:
                 v = bool(self._r.exists(WATCH_KEY.format(case_id)))
-            except Exception:  # noqa: BLE001  라이브는 부가 기능: Redis 오류로 조사를 멈추지 않는다
+            except (RedisError, OSError) as e:  # 라이브는 부가 기능: Redis 오류로 조사를 멈추지 않는다
+                log.debug("live watch check failed: %s", type(e).__name__)
+                v = False
+            except Exception as e:  # 예상하지 못한 실패도 시청자 없음으로 보고 조사는 계속
+                log.warning("live watch check failed (unexpected): %s", type(e).__name__)
                 v = False
             self._checked[case_id] = (now, v)
         return v
@@ -157,8 +163,10 @@ class RedisLivePublisher:
     def publish(self, case_id: str, jpeg: bytes) -> None:
         try:
             self._r.publish(CHANNEL.format(case_id), jpeg)
-        except Exception as e:  # noqa: BLE001  실시간 화면은 증거가 아니다: 못 보내도 조사는 계속한다(녹화는 따로 남는다)
+        except (RedisError, OSError) as e:  # 실시간 화면은 증거가 아니다: 못 보내도 조사는 계속한다(녹화는 따로 남는다)
             log.debug("live publish failed: %s", type(e).__name__)
+        except Exception as e:  # 예상하지 못한 실패도 조사는 계속
+            log.warning("live publish failed (unexpected): %s", type(e).__name__)
 
     def end(self, case_id: str) -> None:
         self.publish(case_id, END)

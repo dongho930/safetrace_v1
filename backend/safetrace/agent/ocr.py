@@ -52,8 +52,10 @@ class LocalOCR:
             # rapidocr 1.2.3 은 det_ 인자를 줄 때 det_model_path 가 있어야 한다("" = 기본 모델)
             self._batch_engine = RapidOCR(**kwargs, det_limit_type="max", det_limit_side_len=4096, det_model_path="")
             self.available = True
-        except Exception as e:  # 모델·런타임이 없으면 OCR 없이 동작
+        except (ImportError, OSError, RuntimeError, ValueError) as e:  # 모델·런타임이 없으면 OCR 없이 동작
             log.warning("local OCR unavailable: %s", type(e).__name__)
+        except Exception as e:  # 예상하지 못한 초기화 실패도 OCR 없이 동작
+            log.warning("local OCR unavailable (unexpected): %s", type(e).__name__)
 
     def read(self, png: bytes, max_len: int = 80) -> str:
         if not self.available or len(png) > 4_000_000:
@@ -66,9 +68,12 @@ class LocalOCR:
                 return self._cache[key][:max_len]
             try:
                 result, _ = self._engine(_pad(png))
-            except Exception as e:
+            except (RuntimeError, ValueError, OSError) as e:  # 추론·이미지 형식 오류
                 log.warning("ocr failed: %s", type(e).__name__)
                 return ""  # 실패는 저장하지 않는다(다음에 다시 시도)
+            except Exception as e:  # 예상하지 못한 실패(조사 대상 페이지가 만든 이미지)도 조사를 멈추지 않게
+                log.warning("ocr failed (unexpected): %s", type(e).__name__)
+                return ""
             text = _join(result) or self._read_retry(png)
             self._remember(key, text)
         return text[:max_len]
@@ -91,8 +96,11 @@ class LocalOCR:
                 v = cv2.resize(v, None, fx=fx, fy=fx, interpolation=cv2.INTER_CUBIC)
             try:
                 result, _ = self._engine(v)
-            except Exception as e:
+            except (RuntimeError, ValueError, OSError) as e:  # 추론·이미지 형식 오류
                 log.warning("ocr retry failed: %s", type(e).__name__)
+                continue
+            except Exception as e:  # 예상하지 못한 실패도 다음 배율로
+                log.warning("ocr retry failed (unexpected): %s", type(e).__name__)
                 continue
             words = []
             for r in result or []:
@@ -152,8 +160,11 @@ class LocalOCR:
             canvas[y:y + img.shape[0], x:x + img.shape[1]] = img
         try:
             result, _ = self._batch_engine(canvas)
-        except Exception as e:
+        except (RuntimeError, ValueError, OSError) as e:  # 추론·이미지 형식 오류: 한 장씩 다시 읽는다
             log.warning("ocr mosaic failed: %s", type(e).__name__)
+            return [""] * len(group)
+        except Exception as e:  # 예상하지 못한 실패도 한 장씩 다시 읽는다
+            log.warning("ocr mosaic failed (unexpected): %s", type(e).__name__)
             return [""] * len(group)
         found: list[list[tuple[float, float, str]]] = [[] for _ in group]
         for r in result or []:

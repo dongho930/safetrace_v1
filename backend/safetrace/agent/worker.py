@@ -16,6 +16,7 @@ import redis
 
 from ..config import get_settings
 from ..live import RedisLivePublisher
+from ..signer.client import SignerError
 from .runner import investigate
 
 log = logging.getLogger("safetrace.worker")
@@ -88,7 +89,10 @@ def main():
 
                 try:
                     investigate(case_id, url, s, emit, live=live)
-                except Exception as e:
+                except (redis.RedisError, OSError, ValueError, SignerError) as e:  # Redis·파일·형식·서명 서비스 오류
+                    log.warning("investigation failed: %s", type(e).__name__)
+                    emit({"type": "status", "status": "FAILED", "reason": f"error:{type(e).__name__}"})
+                except Exception as e:  # 예상하지 못한 실패도 사건을 '실패'로 마무리하고 다음 작업으로
                     log.exception("investigation failed")
                     emit({"type": "status", "status": "FAILED", "reason": f"error:{type(e).__name__}"})
                 finally:
