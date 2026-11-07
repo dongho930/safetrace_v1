@@ -52,6 +52,8 @@ FEED_MAX_AGE_S = 90 * 60  # 확인한 지 이보다 오래된 주소는 버린�
 PHISHTANK_EVERY_S = 60 * 60  # PhishTank 는 키 없이 하루 몇 번까지라 한 시간에 한 번만
 POLL_S = 1.0
 BOX = "/tmp/booth_probe"  # 조사 컨테이너 안 작업 폴더(매일 세트의 접속 확인과 겹치지 않게)
+RESULT_MAX_BYTES = 4 * 1024 * 1024  # 접속 확인 결과 상한(400곳 × 한 줄 수 KB 보다 넉넉히). 넘으면 그 회차를 버린다
+LINE_MAX_BYTES = 16 * 1024  # probe_urls 는 제목·글자를 잘라 한 줄이 몇 KB 다
 
 
 def load_pages(seed: int, sets=SETS) -> list[str]:
@@ -151,23 +153,68 @@ def fetch_feed(source: str) -> list[str]:
     return intake.parse(source, raw[:cap].decode("utf-8", errors="replace"), len(raw) > cap)
 
 
+def read_capped(cmd: list[str], limit: int, timeout: float = 120) -> bytes:
+    """자식 프로세스의 표준 출력을 limit 바이트까지만 받는다. 넘거나 시간이 지나면 프로세스를 끝내고 ValueError."""
+    p = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    timer = threading.Timer(timeout, p.kill)
+    timer.start()
+    buf = bytearray()
+    try:
+        while len(buf) <= limit:
+            chunk = p.stdout.read(65536)
+            if not chunk:
+                break
+            buf += chunk
+    finally:
+        timer.cancel()
+        if len(buf) > limit or p.poll() is None:
+            p.kill()
+        p.stdout.close()
+        p.wait(timeout=10)
+    if len(buf) > limit:
+        raise ValueError("result_too_large")
+    if p.returncode != 0:
+        raise ValueError(f"result_read_failed:{p.returncode}")
+    return bytes(buf)
+
+
+def parse_probe(raw: bytes, asked: set[str]) -> list[dict]:
+    """접속 확인 결과(JSONL)를 검사해 읽는다: 줄 수는 요청한 주소 수까지, 한 줄 길이 상한, 요청한 주소의 결과만.
+    결과는 침해될 수 있는 조사 컨테이너가 쓴 값이라 모양을 믿지 않는다. 어긋나면 ValueError(그 회차를 버린다)."""
+    lines = [ln for ln in raw.split(b"\n") if ln.strip()]
+    if len(lines) > len(asked):
+        raise ValueError("too_many_lines")
+    rows = []
+    for ln in lines:
+        if len(ln) > LINE_MAX_BYTES:
+            raise ValueError("line_too_long")
+        r = json.loads(ln)
+        if not isinstance(r, dict) or not isinstance(r.get("url"), str):
+            raise ValueError("bad_row")
+        if r["url"] in asked:
+            rows.append(r)
+    return rows
+
+
 def probe(urls: list[str], work: Path) -> list[dict]:
-    """조사 컨테이너 안에서 검문 프록시를 거쳐 GET 으로만 확인한다(tools/probe_urls.py 를 넣어 실행, 진행 표시는 받아 둔다)."""
+    """조사 컨테이너 안에서 검문 프록시를 거쳐 GET 으로만 확인한다(tools/probe_urls.py 를 넣어 실행).
+    컨테이너의 출력은 버리고, 결과 파일은 상한까지만 흘려받는다(통째로 복사하면 침해된 컨테이너가 호스트 디스크·메모리를 채운다)."""
     work.mkdir(parents=True, exist_ok=True)
-    src, out = work / "probe.txt", work / "probe.jsonl"
+    src = work / "probe.txt"
     src.write_text("\n".join(urls) + "\n", encoding="utf-8", newline="\n")
     dc = ["docker", "compose"]
     tool, data = f"{BOX}/bin/probe_urls.py", f"{BOX}/data/input.txt"
+    quiet = {"cwd": ROOT, "check": True, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     subprocess.run(dc + ["exec", "-T", "agent", "sh", "-c", f"rm -rf {BOX} && mkdir -p {BOX}/bin {BOX}/data"],
-                   cwd=ROOT, check=True, capture_output=True)
-    subprocess.run(dc + ["cp", str(ROOT / "tools" / "probe_urls.py"), f"agent:{tool}"], cwd=ROOT, check=True,
-                   capture_output=True)
-    subprocess.run(dc + ["cp", str(src), f"agent:{data}"], cwd=ROOT, check=True, capture_output=True)
+                   timeout=60, **quiet)
+    subprocess.run(dc + ["cp", str(ROOT / "tools" / "probe_urls.py"), f"agent:{tool}"], timeout=60, **quiet)
+    subprocess.run(dc + ["cp", str(src), f"agent:{data}"], timeout=60, **quiet)
     subprocess.run(dc + ["exec", "-T", "agent", "python", "-I", "-u", tool, data, "--inside",
-                         "--out", f"{BOX}/data/out.jsonl", "--workers", "16"],
-                   cwd=ROOT, check=True, capture_output=True, timeout=900)
-    subprocess.run(dc + ["cp", f"agent:{BOX}/data/out.jsonl", str(out)], cwd=ROOT, check=True, capture_output=True)
-    return [json.loads(x) for x in out.read_text(encoding="utf-8").splitlines() if x.strip()]
+                         "--out", f"{BOX}/data/out.jsonl", "--workers", "16"], timeout=900, **quiet)
+    raw = read_capped(dc + ["exec", "-T", "agent", "head", "-c", str(RESULT_MAX_BYTES + 1), f"{BOX}/data/out.jsonl"],
+                      RESULT_MAX_BYTES)
+    (work / "probe.jsonl").write_bytes(raw)
+    return parse_probe(raw, set(urls))
 
 
 class FeedQueue:

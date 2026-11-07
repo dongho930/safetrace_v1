@@ -93,6 +93,65 @@ def test_failed_probe_round_does_not_mark_hosts(tmp_path):
     assert q.hosts == set() and not q.ready(now=1.0)
 
 
+def test_probe_refuses_oversized_result_from_container(tmp_path, monkeypatch):
+    """침해된 조사 컨테이너가 접속 확인 결과를 거대하게 만들어도 호스트는 상한까지만 받고 그 회차를 버린다(Codex F1)."""
+    big = (json.dumps({"url": "https://a.example/", "status": 200, "bytes": 999, "text": "x" * (32 * 2**20)})
+           + "\n").encode()
+
+    class _Proc:
+        def __init__(self, *a, **kw):
+            self.stdout, self.returncode = __import__("io").BytesIO(big), None
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            self.returncode = self.returncode if self.returncode is not None else 0
+            return self.returncode
+
+    def fake_run(cmd, **kw):
+        if cmd[-1] != "--inside" and "cp" in cmd and str(cmd[-2]).startswith("agent:"):  # 고치기 전: 결과를 통째로 복사
+            Path(cmd[-1]).write_bytes(big)
+        return __import__("subprocess").CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(booth_feed.subprocess, "run", fake_run)
+    monkeypatch.setattr(booth_feed.subprocess, "Popen", _Proc)
+    try:
+        booth_feed.probe(["https://a.example/"], tmp_path)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("상한을 넘는 결과를 받아들였다")
+
+
+def test_read_capped_stops_a_flooding_child():
+    import sys as _sys
+    flood = [_sys.executable, "-c", "import sys\nwhile True: sys.stdout.buffer.write(b'x' * 65536)"]
+    try:
+        booth_feed.read_capped(flood, 1024 * 1024, timeout=30)
+    except ValueError as e:
+        assert "too_large" in str(e)
+    else:
+        raise AssertionError("끝없이 쓰는 자식 프로세스의 출력을 끊지 않았다")
+    ok = [_sys.executable, "-c", "print('{\"url\": \"u\"}')"]
+    assert booth_feed.read_capped(ok, 1024).strip() == b'{"url": "u"}'
+
+
+def test_parse_probe_checks_lines_and_urls():
+    asked = {"https://a.example/", "https://b.example/"}
+    raw = (b'{"url": "https://a.example/", "status": 200}\n{"url": "https://evil.example/", "status": 200}\n')
+    assert [r["url"] for r in booth_feed.parse_probe(raw, asked)] == ["https://a.example/"]
+    for bad in (b"x" * (booth_feed.LINE_MAX_BYTES + 1) + b"\n", b'{"url": 1}\n' * 10, b"not json\n"):
+        try:
+            booth_feed.parse_probe(bad, asked)
+        except ValueError:
+            continue
+        raise AssertionError(bad[:20])
+
+
 def test_pages_are_only_staged_test_pages():
     pages = booth_feed.load_pages(7)
     assert len(pages) == 300 and len(set(pages)) == 300
