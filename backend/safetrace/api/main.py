@@ -26,8 +26,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from PIL import Image
 from pydantic import BaseModel, Field
+from redis.exceptions import RedisError
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from .. import accounts, caselist, intake, ioc, package, related, report, stats, verdicts
 from ..accounts import ROLES, AccountError
@@ -206,7 +207,10 @@ def record_event(case_id: str, payload: dict) -> None:
     elif payload.get("type") == "status" and payload.get("status") in TERMINAL:
         try:
             store.write_sites(case_id)  # 사건 간 연결(PR 5). 실패해도 원 사건 처리는 계속
-        except Exception as e:
+        except (SQLAlchemyError, ValueError, TypeError) as e:  # DB 오류·기록 형식
+            log.warning("write sites failed: %s", type(e).__name__)
+            store.audit("system", "case.sites_failed", case_id, type(e).__name__)
+        except Exception as e:  # 예상하지 못한 실패도 원 사건 처리를 멈추지 않게
             log.exception("write sites failed")
             store.audit("system", "case.sites_failed", case_id, type(e).__name__)
         _auto_related(case_id, _verified_records(case_id))  # 닫고 검증한 체인
@@ -224,7 +228,11 @@ def _verified_records(case_id: str) -> list[dict] | None:
         if text is None or not _verify_case(c, _signer(), text).ok:
             return None
         return package.clean_records(package.parse_chain(text))[0]
-    except Exception as e:  # 검증 실패가 이벤트 소비를 멈추지 않게
+    except (SQLAlchemyError, OSError, ValueError) as e:  # DB 오류·증거 파일·기록 형식
+        log.warning("verify chain after finish failed: %s", type(e).__name__)
+        store.audit("system", "evidence.verify_failed", case_id, type(e).__name__)
+        return None
+    except Exception as e:  # 예상하지 못한 실패도 이벤트 소비를 멈추지 않게
         log.exception("verify chain after finish failed")
         store.audit("system", "evidence.verify_failed", case_id, type(e).__name__)
         return None
@@ -314,6 +322,9 @@ def _auto_related(case_id: str, recs: list[dict] | None | object = _UNREAD) -> N
                 except BlockedURL as e:
                     store.audit(related.AUTO_ACTOR, "case.create_related_auto_skipped", parent.id,
                                 f"url_rejected:{e.reason} url={cand['url'][:200]}")
+    except (SQLAlchemyError, RedisError, ValueError) as e:  # DB·작업 대기열 오류, 후보 형식
+        log.warning("auto related case failed: %s", type(e).__name__)
+        store.audit(related.AUTO_ACTOR, "case.create_related_auto_failed", case_id, type(e).__name__)
     except Exception as e:  # 자동 생성 실패가 이벤트 소비를 멈추지 않게(원 사건 상태·체인 닫기는 이미 끝났다)
         log.exception("auto related case failed")
         store.audit(related.AUTO_ACTOR, "case.create_related_auto_failed", case_id, type(e).__name__)
@@ -333,7 +344,11 @@ def enqueue_feed(fetch_id: int, source: str) -> None:
     def job():
         try:
             res = fetch(source, settings.egress_proxy, set(settings.test_allowlist))
-        except Exception as e:  # noqa: BLE001
+        except (ValueError, RuntimeError, OSError) as e:  # 네트워크 오류는 fetch 가 결과로 바꾼다: 남는 것은 형식·실행 오류
+            log.warning("feed fetch failed: %s", type(e).__name__)
+            res = {"ok": False, "reason": type(e).__name__}
+        except Exception as e:  # 예상하지 못한 실패도 '받기 실패' 결과로 남긴다
+            log.exception("feed fetch failed")
             res = {"ok": False, "reason": type(e).__name__}
         record_feed(fetch_id, res, trusted=True)  # 같은 프로세스에서 받은 결과(서명 없음)
 
@@ -415,7 +430,9 @@ def _intake_next(case_id: str) -> None:
             c = s.get(Case, case_id)
         if c is not None and c.created_by == intake.INTAKE_ACTOR:
             _intake_drip()  # 켜져 있는지는 잠금 안에서 본다
-    except Exception:  # noqa: BLE001
+    except (SQLAlchemyError, RedisError) as e:  # DB·작업 대기열 오류
+        log.warning("intake next failed: %s", type(e).__name__)
+    except Exception:  # 예상하지 못한 실패도 이벤트 처리는 계속
         log.exception("intake next failed")
 
 
@@ -424,7 +441,9 @@ def _intake_forever():
         time.sleep(settings.intake_tick_s)
         try:
             intake_tick()
-        except Exception:
+        except (SQLAlchemyError, RedisError) as e:  # DB·작업 대기열 오류: 다음 바퀴에 다시
+            log.warning("intake scheduler error: %s", type(e).__name__)
+        except Exception:  # 예상하지 못한 실패도 스케줄러는 멈추지 않는다
             log.exception("intake scheduler error")
 
 
@@ -445,7 +464,10 @@ def enqueue(case_id: str, url: str):
     def job():
         try:
             investigate(case_id, url, settings, lambda ev: record_event(case_id, ev), live=_live_local)
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError, SignerError) as e:  # 브라우저·증거 파일·서명 서비스 오류
+            log.warning("inline investigation failed: %s", type(e).__name__)
+            record_event(case_id, {"type": "status", "status": "FAILED", "reason": f"error:{type(e).__name__}"})
+        except Exception as e:  # 예상하지 못한 실패도 사건을 '실패'로 마무리한다
             log.exception("inline investigation failed")
             record_event(case_id, {"type": "status", "status": "FAILED", "reason": f"error:{type(e).__name__}"})
 
@@ -457,8 +479,10 @@ def _consume_events_forever():
     group = "api"
     try:
         _redis.xgroup_create("st:events", group, id="0", mkstream=True)
-    except Exception as e:  # 이미 있는 묶음(BUSYGROUP)이거나 Redis 가 아직 안 떴다: 아래 반복이 다시 시도한다
+    except RedisError as e:  # 이미 있는 묶음(BUSYGROUP)이거나 Redis 가 아직 안 떴다: 아래 반복이 다시 시도한다
         log.debug("events group create skipped: %s", type(e).__name__)
+    except Exception:  # 예상하지 못한 실패도 이벤트 소비는 시작한다
+        log.exception("events group create failed")
     while True:
         try:
             resp = _redis.xreadgroup(group, "api-1", {"st:events": ">"}, count=50, block=5000)
@@ -470,7 +494,9 @@ def _consume_events_forever():
                     elif str(f.get("feed_id", "")).isdigit():  # 자동 수집: 피드 받기 결과(사건이 아니라 받기 번호)
                         record_feed(int(f["feed_id"]), json.loads(f.get("payload", "{}")))
                     _redis.xack("st:events", group, mid)
-        except Exception:
+        except (RedisError, SQLAlchemyError, ValueError) as e:  # Redis·DB 오류, 깨진 이벤트(JSON): 다음 읽기에서 다시
+            log.warning("event consumer error: %s", type(e).__name__)
+        except Exception:  # 예상하지 못한 실패도 이벤트 소비는 멈추지 않는다
             log.exception("event consumer error")
 
 

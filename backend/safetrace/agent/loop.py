@@ -342,8 +342,11 @@ async def _bounded(aw, what: str):
     """정리 작업이 응답 없는 페이지에 묶이지 않게 제한 시간을 둔다. 실패해도 조사 결과는 그대로 둔다."""
     try:
         return await asyncio.wait_for(aw, _CLEANUP_TIMEOUT_S)
-    except Exception as e:  # noqa: BLE001  정리 실패는 기록만
+    except (TimeoutError, PWError, OSError) as e:  # 제한 시간·브라우저 오류·파일 오류: 정리 실패는 기록만
         log.warning("%s failed: %s", what, type(e).__name__)
+        return None
+    except Exception as e:  # 예상하지 못한 정리 실패도 조사 결과는 그대로 둔다
+        log.warning("%s failed (unexpected): %s", what, type(e).__name__)
         return None
 
 
