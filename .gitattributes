@@ -3,3 +3,4 @@
 *.webm binary
 *.apk binary
 *.bin binary
+*.cmd text eol=crlf
