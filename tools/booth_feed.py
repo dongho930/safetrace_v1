@@ -12,6 +12,7 @@
 
   python tools/booth_feed.py run [--hours 3] [--ratio 0.4] [--refresh-min 30] [--seed N] [--stats]
   python tools/booth_feed.py summary var/booth/<시각>.jsonl
+  더블클릭: tools/booth_start.cmd(3시간 재생, 진행 창) · tools/booth_stop.cmd(멈춤) · tools/booth_status.cmd(지금까지 요약·좀비 수)
 """
 
 from __future__ import annotations
@@ -54,6 +55,22 @@ POLL_S = 1.0
 BOX = "/tmp/booth_probe"  # 조사 컨테이너 안 작업 폴더(매일 세트의 접속 확인과 겹치지 않게)
 RESULT_MAX_BYTES = 4 * 1024 * 1024  # 접속 확인 결과 상한(400곳 × 한 줄 수 KB 보다 넉넉히). 넘으면 그 회차를 버린다
 LINE_MAX_BYTES = 16 * 1024  # probe_urls 는 제목·글자를 잘라 한 줄이 몇 KB 다
+STOP_FILE = ROOT / "var" / "booth" / "STOP"  # tools/booth_stop.cmd 가 만든다: 보이면 요약을 남기고 끝낸다
+
+
+def take_stop(path: Path = STOP_FILE) -> bool:
+    """멈춤 표시 파일이 있으면 지우고 True(다른 창에서는 Ctrl+C 를 보내기 어려워 파일로 알린다)."""
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def default_base(env_text: str) -> str:
+    """콘솔 주소: .env 의 ST_WEB_PORT(없으면 compose 기본 8080). 부스 노트북은 이 PC(8090)와 포트가 다를 수 있다."""
+    m = re.search(r"^ST_WEB_PORT=\s*(\d{2,5})\s*$", env_text, re.M)
+    return f"http://127.0.0.1:{int(m.group(1)) if m else 8080}"
 
 
 def load_pages(seed: int, sets=SETS) -> list[str]:
@@ -331,6 +348,7 @@ def run(args) -> int:
         raise SystemExit(f"API 에 접속하지 못함({st}) — docker compose --profile demo up -d")
     if ik.get("enabled"):
         print("주의: 자동 수집이 켜져 있습니다 — 자동 사건이 끼어들어 비율이 맞지 않으니 콘솔에서 끄세요")
+    take_stop()  # 지난 실행에서 남은 멈춤 표시는 지운다
 
     stamp = f"{datetime.now():%Y%m%d-%H%M}"
     log = Log(ROOT / "var" / "booth" / f"{stamp}.jsonl")
@@ -338,7 +356,7 @@ def run(args) -> int:
               intake_enabled=bool(ik.get("enabled")))
     feed = FeedQueue(log, ROOT / "var" / "booth" / stamp, args.refresh_min * 60)
     threading.Thread(target=feed.run, daemon=True).start()
-    print(f"기록: {log.path}  (Ctrl+C 로 멈춤 — 조사 중인 사건은 그대로 끝난다)")
+    print(f"기록: {log.path}  (Ctrl+C 또는 tools/booth_stop.cmd 로 멈춤 — 조사 중인 사건은 그대로 끝난다)")
     n = {"feed": 0, "ratio": 0, "fill": 0}
     nxt = 0
     mine: dict | None = None  # 지금 대기·조사 중인 스크립트 사건
@@ -346,6 +364,10 @@ def run(args) -> int:
     t_stats = t_print = 0.0
     try:
         while time.monotonic() < t_end:
+            if take_stop():
+                print("멈춤 요청(booth_stop)")
+                log.write("stop_requested")
+                break
             now = time.monotonic()
             if mine is not None:
                 st, c = api.call("GET", f"/api/cases/{mine['id']}")
@@ -425,7 +447,7 @@ def main(argv=None) -> int:
     rp.add_argument("--ratio", type=float, default=0.4, help="시험 페이지 몫(건수, 채움 제외). 0.4 = 피드 6 : 시험 4")
     rp.add_argument("--refresh-min", type=float, default=30.0, help="피드를 다시 받아 확인하는 간격(분)")
     rp.add_argument("--seed", type=int, default=int(datetime.now().strftime("%Y%m%d")))
-    rp.add_argument("--base", default="http://127.0.0.1:8090")
+    rp.add_argument("--base", default=None, help="콘솔 주소(기본: .env 의 ST_WEB_PORT, 없으면 8080)")
     rp.add_argument("--stats", action="store_true", help="5분마다 컨테이너 CPU·메모리와 증거 폴더 크기를 기록")
     sp = sub.add_parser("summary")
     sp.add_argument("path")
@@ -435,6 +457,9 @@ def main(argv=None) -> int:
         return 0
     if not 0 < args.ratio < 1 or not 0 < args.hours <= 12 or not 5 <= args.refresh_min <= 180:
         raise SystemExit("--ratio 는 0~1 사이, --hours 는 12 이하, --refresh-min 은 5~180")
+    if args.base is None:
+        env = ROOT / ".env"
+        args.base = default_base(env.read_text(encoding="utf-8") if env.is_file() else "")
     return run(args)
 
 

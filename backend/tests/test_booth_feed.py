@@ -198,3 +198,20 @@ def test_summary_counts(tmp_path):
     assert (s["feed"], s["tests_ratio"], s["tests_fill"], s["feed_share"]) == (6, 4, 1, 0.6)
     assert (s["feed_done"], s["feed_opened"], s["feed_threat"]) == (2, 1, 1)
     assert (s["tests_done"], s["tests_threat"], s["probed"], s["alive"]) == (1, 1, 100, 40)
+
+
+def test_stop_file_is_taken_once(tmp_path):
+    # tools/booth_stop.cmd 가 만든 멈춤 표시: 한 번 보면 지워서 다음 실행이 바로 멈추지 않는다
+    stop = tmp_path / "STOP"
+    assert booth_feed.take_stop(stop) is False
+    stop.write_text("", encoding="utf-8")
+    assert booth_feed.take_stop(stop) is True
+    assert not stop.exists()
+    assert booth_feed.take_stop(stop) is False
+
+
+def test_default_base_follows_env_web_port():
+    # 부스 노트북은 웹 포트가 다를 수 있다: .env 의 ST_WEB_PORT, 없으면 compose 기본 8080
+    assert booth_feed.default_base("ST_WEB_PORT=8090\n") == "http://127.0.0.1:8090"
+    assert booth_feed.default_base("POSTGRES_PASSWORD=x\n") == "http://127.0.0.1:8080"
+    assert booth_feed.default_base("ST_WEB_PORT=abc\n") == "http://127.0.0.1:8080"
