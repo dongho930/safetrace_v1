@@ -1,16 +1,19 @@
-"""부스 재생 목록: 3라운드 현장 부스(3시간)에서 조사가 쉬지 않게, 살아 있는 실제 피싱 주소와 단계형 시험 페이지를 번갈아 넣는다.
+"""부스 재생 목록: 3라운드 현장 부스(3시간)에서 조사가 쉬지 않게 단계형 시험 페이지(자체 제작 모의 사이트)를 넣는다.
 
-- 실제 피드: 공개 피싱 피드(OpenPhish 전체, PhishTank 최신분)를 받아 같은 호스트·같은 키트를 빼고(자동 수집과 같은 규칙,
+- 기본은 시험 페이지만(--ratio 1): 운영사무국이 실제 피싱·불법 도박 사이트에 접속해 화면을 송출하는 것을 제한했다(2026-11-15 답변).
+  이때는 피드를 받지도, 접속 확인도 하지 않아 실제 사이트에 닿지 않는다. 자동 수집(실제 피드를 조사한다)이 켜져 있으면 시작하지
+  않고, 도중에 켜지면 1분마다 경고한다.
+- 실제 피드를 섞을 때(--ratio 0.4 등, 개발 PC 리허설용): 공개 피싱 피드(OpenPhish 전체, PhishTank 최신분)를 받아 같은 호스트·같은 키트를 빼고(자동 수집과 같은 규칙,
   safetrace.intake.choose·kit_key), 조사 컨테이너 안에서 검문 프록시를 거쳐 GET 으로 살아 있는지 확인한 주소만 넣는다
   (tools/probe_urls.py). 피드를 그대로 넣으면 대부분 이미 사라졌거나 회선에서 막힌 주소라 화면이 열리지 않는다
   (2026-11-07 측정: 자동 수집 상한 300 으로 178건 중 약 8% → 미리 확인한 20건 중 19건이 화면을 엶).
   30분마다 다시 받아 새 주소만 보탠다. 출처는 report(부스 도구의 신고 — '자동 수집' 배지는 수집 컨테이너가 서명한 주소에만 붙는다).
-- 건수로 피드 : 시험 페이지 = 6:4 (스크립트가 둘 다 넣으므로 정확히 맞춘다). 살아 있는 피드가 떨어지면 시험 페이지로 채운다(비율에는 세지 않음).
-  시험 페이지는 평가 목록(data/staged*_set.csv)의 단계형 페이지 300곳을 섞어 쓰고, 출처 test 로 넣는다.
+  건수로 피드 : 시험 페이지 = 6:4 (스크립트가 둘 다 넣으므로 정확히 맞춘다). 살아 있는 피드가 떨어지면 시험 페이지로 채운다(비율에는 세지 않음).
+- 시험 페이지는 평가 목록(data/staged*_set.csv)의 단계형 페이지 300곳을 섞어 쓰고, 출처 test 로 넣는다(시험 서버 안에서만 링크한다).
 - 스크립트가 넣은 사건은 한 번에 1건만 대기시킨다: 관람객 신고는 길어야 한 건 기다린다.
-- 부스 동안 콘솔의 자동 수집은 끈다(켜 두면 자동 사건이 끼어들어 비율이 맞지 않는다). 서비스 코드는 바꾸지 않는다.
+- 부스 동안 콘솔의 자동 수집은 끈다. 서비스 코드는 바꾸지 않는다.
 
-  python tools/booth_feed.py run [--hours 3] [--ratio 0.4] [--refresh-min 30] [--seed N] [--stats]
+  python tools/booth_feed.py run [--hours 3] [--ratio 1] [--refresh-min 30] [--seed N] [--stats]
   python tools/booth_feed.py summary var/booth/<시각>.jsonl
   더블클릭: tools/booth_start.cmd(3시간 재생, 진행 창) · tools/booth_stop.cmd(멈춤) · tools/booth_status.cmd(지금까지 요약·좀비 수)
 """
@@ -94,8 +97,9 @@ def ratio_target(feed_n: int, ratio: float) -> int:
 
 
 def next_kind(feed_n: int, ratio_tests: int, ratio: float, feed_ready: bool) -> str:
-    """다음에 넣을 것: 'ratio'(비율 맞추기 시험 페이지), 'feed'(살아 있는 피드), 'fill'(피드가 없어 시험 페이지로 채움)."""
-    if ratio_tests < ratio_target(feed_n, ratio):
+    """다음에 넣을 것: 'ratio'(비율 맞추기 시험 페이지), 'feed'(살아 있는 피드), 'fill'(피드가 없어 시험 페이지로 채움).
+    ratio 1 은 시험 페이지만."""
+    if ratio >= 1 or ratio_tests < ratio_target(feed_n, ratio):
         return "ratio"
     return "feed" if feed_ready else "fill"
 
@@ -346,16 +350,22 @@ def run(args) -> int:
     st, ik = api.call("GET", "/api/intake")
     if st != 200 or not isinstance(ik, dict):
         raise SystemExit(f"API 에 접속하지 못함({st}) — docker compose --profile demo up -d")
+    tests_only = args.ratio >= 1
     if ik.get("enabled"):
+        if tests_only:
+            raise SystemExit("자동 수집이 켜져 있습니다 — 자동 수집은 실제 피싱 사이트를 조사하니 콘솔 왼쪽 아래에서 끄고 다시 시작하세요")
         print("주의: 자동 수집이 켜져 있습니다 — 자동 사건이 끼어들어 비율이 맞지 않으니 콘솔에서 끄세요")
     take_stop()  # 지난 실행에서 남은 멈춤 표시는 지운다
 
     stamp = f"{datetime.now():%Y%m%d-%H%M}"
     log = Log(ROOT / "var" / "booth" / f"{stamp}.jsonl")
-    log.write("start", hours=args.hours, ratio=args.ratio, seed=args.seed, pages=len(pages), refresh_min=args.refresh_min,
-              intake_enabled=bool(ik.get("enabled")))
+    log.write("start", hours=args.hours, ratio=args.ratio, tests_only=tests_only, seed=args.seed, pages=len(pages),
+              refresh_min=args.refresh_min, intake_enabled=bool(ik.get("enabled")))
     feed = FeedQueue(log, ROOT / "var" / "booth" / stamp, args.refresh_min * 60)
-    threading.Thread(target=feed.run, daemon=True).start()
+    if tests_only:
+        print("시험 페이지만 넣습니다(자체 제작 모의 사이트 — 실제 피드를 받지 않음)")
+    else:
+        threading.Thread(target=feed.run, daemon=True).start()
     print(f"기록: {log.path}  (Ctrl+C 또는 tools/booth_stop.cmd 로 멈춤 — 조사 중인 사건은 그대로 끝난다)")
     n = {"feed": 0, "ratio": 0, "fill": 0}
     nxt = 0
@@ -397,11 +407,18 @@ def run(args) -> int:
                 log.write("stats", **docker_stats())
                 t_stats = now + 300
             if now >= t_print:
-                total = n["feed"] + n["ratio"]
-                share = f"{n['feed'] / total:.0%}" if total else "-"
-                print(f"[{datetime.now():%H:%M}] 피드 {n['feed']} · 시험 {n['ratio'] + n['fill']}"
-                      f"(비율 {n['ratio']}·채움 {n['fill']}) · 피드 몫 {share} · 살아 있는 피드 대기 {len(feed.q)}",
-                      flush=True)
+                if tests_only:
+                    print(f"[{datetime.now():%H:%M}] 시험 페이지 {n['ratio']}건", flush=True)
+                    st, ik = api.call("GET", "/api/intake")
+                    if st == 200 and isinstance(ik, dict) and ik.get("enabled"):
+                        print("경고: 자동 수집이 켜졌습니다 — 실제 피싱 사이트를 조사하니 콘솔에서 바로 끄세요", flush=True)
+                        log.write("intake_on")
+                else:
+                    total = n["feed"] + n["ratio"]
+                    share = f"{n['feed'] / total:.0%}" if total else "-"
+                    print(f"[{datetime.now():%H:%M}] 피드 {n['feed']} · 시험 {n['ratio'] + n['fill']}"
+                          f"(비율 {n['ratio']}·채움 {n['fill']}) · 피드 몫 {share} · 살아 있는 피드 대기 {len(feed.q)}",
+                          flush=True)
                 t_print = now + 60
             time.sleep(POLL_S)
     except KeyboardInterrupt:
@@ -444,7 +461,8 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     rp = sub.add_parser("run")
     rp.add_argument("--hours", type=float, default=3.0)
-    rp.add_argument("--ratio", type=float, default=0.4, help="시험 페이지 몫(건수, 채움 제외). 0.4 = 피드 6 : 시험 4")
+    rp.add_argument("--ratio", type=float, default=1.0,
+                    help="시험 페이지 몫(건수, 채움 제외). 1 = 시험 페이지만(기본, 부스), 0.4 = 실제 피드 6 : 시험 4")
     rp.add_argument("--refresh-min", type=float, default=30.0, help="피드를 다시 받아 확인하는 간격(분)")
     rp.add_argument("--seed", type=int, default=int(datetime.now().strftime("%Y%m%d")))
     rp.add_argument("--base", default=None, help="콘솔 주소(기본: .env 의 ST_WEB_PORT, 없으면 8080)")
@@ -455,8 +473,8 @@ def main(argv=None) -> int:
     if args.cmd == "summary":
         print(json.dumps(summary(Path(args.path)), ensure_ascii=False, indent=1))
         return 0
-    if not 0 < args.ratio < 1 or not 0 < args.hours <= 12 or not 5 <= args.refresh_min <= 180:
-        raise SystemExit("--ratio 는 0~1 사이, --hours 는 12 이하, --refresh-min 은 5~180")
+    if not 0 < args.ratio <= 1 or not 0 < args.hours <= 12 or not 5 <= args.refresh_min <= 180:
+        raise SystemExit("--ratio 는 0 초과 1 이하(1 = 시험 페이지만), --hours 는 12 이하, --refresh-min 은 5~180")
     if args.base is None:
         env = ROOT / ".env"
         args.base = default_base(env.read_text(encoding="utf-8") if env.is_file() else "")

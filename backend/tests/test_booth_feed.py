@@ -1,4 +1,4 @@
-"""부스 재생 목록(tools/booth_feed.py): 살아 있는 피드 : 시험 페이지 = 6:4, 피드가 없으면 채움, 미리 접속 확인한 주소만."""
+"""부스 재생 목록(tools/booth_feed.py): 기본은 시험 페이지만, 섞을 때는 살아 있는 피드 : 시험 페이지 = 6:4, 미리 접속 확인한 주소만."""
 
 import json
 import sys
@@ -215,3 +215,85 @@ def test_default_base_follows_env_web_port():
     assert booth_feed.default_base("ST_WEB_PORT=8090\n") == "http://127.0.0.1:8090"
     assert booth_feed.default_base("POSTGRES_PASSWORD=x\n") == "http://127.0.0.1:8080"
     assert booth_feed.default_base("ST_WEB_PORT=abc\n") == "http://127.0.0.1:8080"
+
+
+def test_tests_only_always_picks_test_pages():
+    # 운영사무국 답변(11/15): 실제 피싱·도박 사이트 접속 화면 송출 제한 → --ratio 1 은 시험 페이지만
+    for feed_n, tests, ready in ((0, 0, True), (5, 0, True), (0, 9, False)):
+        assert booth_feed.next_kind(feed_n, tests, 1.0, feed_ready=ready) == "ratio"
+
+
+class _FakeApi:
+    """콘솔 API 흉내: 자동 수집 상태, 사건 접수(201), 사건 조회(바로 끝남)."""
+
+    def __init__(self, intake_on=False):
+        self.intake_on, self.posts, self.n = intake_on, [], 0
+
+    def __call__(self, base, token):
+        return self
+
+    def call(self, method, path, body=None):
+        if path == "/api/intake":
+            return 200, {"enabled": self.intake_on}
+        if method == "POST" and path == "/api/cases":
+            self.n += 1
+            self.posts.append(body)
+            return 201, {"id": f"c{self.n}"}
+        return 200, {"status": "COMPLETED", "threat": {"threat": "phishing"}}
+
+
+def _run_tests_only(tmp_path, monkeypatch, api, loops=8):
+    (tmp_path / ".env").write_text('ST_API_TOKENS=["a1:admin"]\n', encoding="utf-8")
+    monkeypatch.setattr(booth_feed, "ROOT", tmp_path)
+    monkeypatch.setattr(booth_feed, "Api", api)
+    monkeypatch.setattr(booth_feed, "load_pages", lambda seed: ["http://testpages:8900/staged/s001/",
+                                                                "http://testpages:8900/staged_b/s002/"])
+    left = iter([False] + [False] * loops + [True])  # 시작할 때 한 번 + 반복마다 한 번, 마지막에 멈춤
+    monkeypatch.setattr(booth_feed, "take_stop", lambda *a: next(left))
+    monkeypatch.setattr(booth_feed.time, "sleep", lambda s: None)
+
+    def no_feed(*a, **kw):
+        raise AssertionError("시험 페이지만일 때는 피드를 받거나 접속 확인하지 않는다")
+
+    monkeypatch.setattr(booth_feed, "fetch_feed", no_feed)
+    monkeypatch.setattr(booth_feed, "probe", no_feed)
+    monkeypatch.setattr(booth_feed.FeedQueue, "run", no_feed)
+    return booth_feed.main(["run", "--hours", "1", "--base", "http://127.0.0.1:1"])
+
+
+def test_tests_only_run_never_touches_feeds(tmp_path, monkeypatch):
+    api = _FakeApi()
+    assert _run_tests_only(tmp_path, monkeypatch, api) == 0  # 기본값이 시험 페이지만
+    assert len(api.posts) >= 4
+    assert all(p["source"] == "test" and p["url"].startswith("http://testpages:8900/staged") for p in api.posts)
+    log = next((tmp_path / "var" / "booth").glob("*.jsonl")).read_text(encoding="utf-8")
+    evs = [json.loads(line) for line in log.splitlines()]
+    assert evs[0]["ev"] == "start" and evs[0]["tests_only"] is True
+    assert not any(e["ev"] in ("collect", "collect_failed") for e in evs)
+    assert {e["kind"] for e in evs if e["ev"] == "submit"} == {"ratio"}
+
+
+def test_tests_only_refuses_when_intake_is_on(tmp_path, monkeypatch):
+    # 자동 수집은 실제 피드 주소를 조사한다: 켜져 있으면 부스 재생을 시작하지 않는다
+    api = _FakeApi(intake_on=True)
+    try:
+        _run_tests_only(tmp_path, monkeypatch, api)
+    except SystemExit as e:
+        assert "자동 수집" in str(e)
+    else:
+        raise AssertionError("자동 수집이 켜져 있으면 시작하지 않는다")
+    assert api.posts == []
+
+
+def test_ratio_bounds(monkeypatch):
+    seen = []
+    monkeypatch.setattr(booth_feed, "run", lambda args: seen.append(args.ratio) or 0)
+    assert booth_feed.main(["run", "--base", "http://127.0.0.1:1"]) == 0
+    assert booth_feed.main(["run", "--ratio", "0.4", "--base", "http://127.0.0.1:1"]) == 0
+    assert seen == [1.0, 0.4]
+    for bad in ("0", "1.5", "-1"):
+        try:
+            booth_feed.main(["run", "--ratio", bad, "--base", "http://127.0.0.1:1"])
+        except SystemExit:
+            continue
+        raise AssertionError(bad)
