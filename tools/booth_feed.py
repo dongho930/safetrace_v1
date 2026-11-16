@@ -11,6 +11,13 @@
   건수로 피드 : 시험 페이지 = 6:4 (스크립트가 둘 다 넣으므로 정확히 맞춘다). 살아 있는 피드가 떨어지면 시험 페이지로 채운다(비율에는 세지 않음).
 - 시험 페이지는 평가 목록(data/staged*_set.csv)의 단계형 페이지 300곳을 섞어 쓰고, 출처 test 로 넣는다(시험 서버 안에서만 링크한다).
 - 스크립트가 넣은 사건은 한 번에 1건만 대기시킨다: 관람객 신고는 길어야 한 건 기다린다.
+- 조사 중에 조사 컨테이너가 다시 켜지면(메모리 한도 초과로 워커가 죽는 등, Docker Desktop 재시작) 그 사건은 다시 조사되지 않고
+  약 7분 뒤 '실패'로 정리될 뿐이라, 기다리지 않고 바로 다음 사건을 넣는다(2026-11-15 부스 노트북 30분 시험: 큰 이미지 OCR 로 워커가
+  2GB 한도에 걸려 7분 동안 새 사건이 없었다). 컨테이너는 그대로인데 정상 조사 시간을 넘기면 기다리되 직원에게 다시 켜라고 알린다.
+- 시험 페이지 서버(testpages)는 compose 에 재시작 정책이 없어(compose 는 제출 소스라 바꾸지 않는다) Docker Desktop 이 다시
+  켜지거나 노트북이 대기 모드에서 깨면 꺼진 채, 또는 내부망 IP 없이 '실행 중'으로 남는다(2026-11-16 부스 노트북 리허설: 22:24
+  Docker Desktop 재시작 뒤 3시간 1,670건이 모두 접속 불가). 시작할 때(검문 프록시에서 이름이 풀리는지까지), 1분마다, 시험 페이지
+  사건이 접속 불가로 끝날 때 점검해 이상하면 스스로 다시 켠다(1분에 한 번까지). 진행 줄에 접속 불가 수를 보인다.
 - 부스 동안 콘솔의 자동 수집은 끈다. 서비스 코드는 바꾸지 않는다.
 
   python tools/booth_feed.py run [--hours 3] [--ratio 1] [--refresh-min 30] [--seed N] [--stats]
@@ -59,6 +66,15 @@ BOX = "/tmp/booth_probe"  # 조사 컨테이너 안 작업 폴더(매일 세트�
 RESULT_MAX_BYTES = 4 * 1024 * 1024  # 접속 확인 결과 상한(400곳 × 한 줄 수 KB 보다 넉넉히). 넘으면 그 회차를 버린다
 LINE_MAX_BYTES = 16 * 1024  # probe_urls 는 제목·글자를 잘라 한 줄이 몇 KB 다
 STOP_FILE = ROOT / "var" / "booth" / "STOP"  # tools/booth_stop.cmd 가 만든다: 보이면 요약을 남기고 끝낸다
+AGENT_CONTAINER = "safetrace_v1-agent-1"  # docker_stats 의 safetrace_v1-api-1 과 같은 compose 이름
+# 정상 조사의 최대 시간: 조사 설정 기본값 max_seconds 120 + candidate_max 3 × (candidate_max_seconds 40 + 20)
+# (backend/safetrace/agent/worker.py 의 min_idle_ms 와 같은 식, 워커는 여기에 120초를 더 기다렸다가 '실패'로 정리한다)
+AGENT_MAX_S = 120 + 3 * (40 + 20)
+SLOW_S = AGENT_MAX_S + 30  # 컨테이너는 그대로인데 이보다 오래 '조사 중'이면 직원에게 알린다
+AGENT_CHECK_S = 5.0  # 스크립트 사건이 조사 중일 때 조사 컨테이너가 다시 켜졌는지 보는 간격
+TESTPAGES_CONTAINER = "safetrace_v1-testpages-1"
+TESTPAGES_FIX_GAP_S = 60.0  # 시험 페이지 서버를 다시 켜는 것은 이 간격에 한 번까지(켜도 안 되는 상태에서 되풀이하지 않게)
+HOLD_S = 30.0  # 시험 페이지 서버를 고치지 못했을 때 새 사건을 넣지 않고 기다리는 시간
 
 
 def take_stop(path: Path = STOP_FILE) -> bool:
@@ -323,6 +339,158 @@ class FeedQueue:
             return any(now - at <= FEED_MAX_AGE_S for _, at in self.q)
 
 
+def agent_marker() -> str | None:
+    """조사 컨테이너의 'ID|시작 시각'. 다시 켜지면(재시작) 시작 시각이, 다시 만들면 ID 가 바뀐다.
+    Docker 에 접속하지 못하거나 컨테이너가 없으면(다시 켜지는 중 포함) None — 이때는 다시 켜졌다고 판단하지 않는다."""
+    try:
+        r = subprocess.run(["docker", "inspect", "-f", "{{.Id}}|{{.State.Running}}|{{.State.StartedAt}}", AGENT_CONTAINER],
+                           capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    cid, running, started = (r.stdout.strip().split("|") + ["", ""])[:3]
+    if r.returncode != 0 or running != "true" or not re.fullmatch(r"[0-9a-f]{12,64}", cid) or not started:
+        return None
+    return f"{cid[:12]}|{started}"
+
+
+def stuck_reason(seen: str | None, current: str | None, running_s: float, slow_s: float = SLOW_S) -> str | None:
+    """조사 중(RUNNING)인 스크립트 사건을 어떻게 볼지.
+
+    'agent_restarted': 그 사건을 조사하기 시작할 때의 조사 컨테이너(seen)가 지금(current)과 다르다 — 워커는 끊긴 사건을
+      다시 조사하지 않고(증거 체인을 이어 쓰지 않게) 약 7분 뒤 '실패'로 정리하므로 더 기다리지 않는다.
+    'slow': 컨테이너는 그대로인데 정상 조사 시간을 넘겼다 — 워커가 아직 그 사건을 붙들고 있을 수 있어 다음 사건을 넣지 않고
+      (관람객 신고가 스크립트 사건 두 건 뒤로 밀리지 않게) 직원에게 알리기만 한다. 직원이 컨테이너를 다시 켜면 'agent_restarted'.
+    표식을 읽지 못했으면(None) 다시 켜졌다고 보지 않는다."""
+    if seen and current and current != seen:
+        return "agent_restarted"
+    if running_s >= slow_s:
+        return "slow"
+    return None
+
+
+class CaseWatch:
+    """스크립트 사건 1건이 조사 중일 때 조사 컨테이너를 지켜본다. update 는 'agent_restarted'·'slow'(사건마다 한 번) 또는 None.
+    조사 시작을 처음 본 순간의 컨테이너 표식을 기준으로 삼는다: 대기(QUEUED) 중에 컨테이너가 다시 켜졌다면 새 워커가 그 사건을
+    처음부터 조사하므로 끊긴 것이 아니다."""
+
+    def __init__(self, marker=None, check_s: float = AGENT_CHECK_S, slow_s: float = SLOW_S):
+        self.marker, self.check_s, self.slow_s = marker or agent_marker, check_s, slow_s
+        self.run_at: float | None = None
+        self.seen: str | None = None
+        self.check_at = 0.0
+        self.slow_told = False
+
+    def update(self, status: object, now: float) -> str | None:
+        if status != "RUNNING":
+            return None
+        if self.run_at is None:
+            self.run_at, self.seen, self.check_at = now, self.marker(), now + self.check_s
+            return None
+        if now < self.check_at:
+            return None
+        self.check_at = now + self.check_s
+        current = self.marker()
+        if self.seen is None:  # 시작할 때 읽지 못했으면 지금 것을 기준으로(그 사이 다시 켜진 것은 놓칠 수 있다)
+            self.seen = current
+        why = stuck_reason(self.seen, current, now - self.run_at, self.slow_s)
+        if why == "slow":
+            if self.slow_told:
+                return None
+            self.slow_told = True
+        return why
+
+
+def testpages_state() -> str:
+    """시험 페이지 서버 컨테이너 상태: 'ok' · 'stopped'(꺼짐) · 'no_ip'(실행 중인데 내부망 IP 가 없음 — Docker 엔진이 다시 켜진 뒤
+    남는 모양, 2026-11-16 17:17) · 'missing'(컨테이너 없음) · 'unknown'(Docker 에 접속하지 못함 — 판단하지 않는다)."""
+    try:
+        r = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}|{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}",
+                            TESTPAGES_CONTAINER], capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    if r.returncode != 0:
+        return "missing" if "no such" in (r.stderr or "").lower() else "unknown"
+    running, _, ips = r.stdout.strip().partition("|")
+    if running != "true":
+        return "stopped"
+    if not any(re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", ip) for ip in ips.split()):
+        return "no_ip"
+    return "ok"
+
+
+def testpages_resolves() -> bool | None:
+    """조사 경로 그대로 확인: 검문 프록시(egress) 안에서 시험 서버 이름이 풀리는지. 실행하지 못하면 None(판단하지 않는다)."""
+    try:
+        r = subprocess.run(["docker", "compose", "exec", "-T", "egress", "python", "-I", "-c",
+                            "import socket; socket.getaddrinfo('testpages', 8900)"],
+                           cwd=ROOT, capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.returncode == 0
+
+
+def recover_testpages(state: str) -> bool:
+    """시험 페이지 서버를 다시 켠다: 컨테이너가 없으면 만들고(up -d), 꺼졌거나 IP 를 잃었으면 다시 시작한다(restart —
+    'IP 없이 실행 중'은 up -d 가 이미 실행 중이라며 그대로 둔다). 명령이 성공하면 True."""
+    cmd = ["docker", "compose", "--profile", "demo"] + (["up", "-d", "testpages"] if state == "missing"
+                                                        else ["restart", "testpages"])
+    try:
+        r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=120, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
+class TestpagesGuard:
+    """시험 페이지 서버를 점검하고 이상하면 다시 켠다. check 는 지금 쓸 수 있으면 True.
+    deep=True 면 컨테이너 상태에 더해 검문 프록시에서 이름이 풀리는지까지 본다(시작할 때, 시험 페이지가 접속 불가로 끝났을 때).
+    다시 켜기는 min_gap_s 에 한 번까지. Docker 상태를 읽지 못하면(unknown) 판단하지 않고 한 번만 알린다."""
+
+    __test__ = False  # pytest 가 이름(Test…) 때문에 시험 묶음으로 모으지 않게
+
+    def __init__(self, log, state=None, resolves=None, recover=None,
+                 min_gap_s: float = TESTPAGES_FIX_GAP_S, settle_s: float = 3.0, sleep=None):
+        # 기본값은 만들 때 모듈에서 찾는다(시험이 모듈 함수를 바꿔 끼울 수 있게)
+        self.log = log
+        self.state, self.resolves = state or testpages_state, resolves or testpages_resolves
+        self.recover, self.sleep = recover or recover_testpages, sleep or time.sleep
+        self.min_gap_s, self.settle_s = min_gap_s, settle_s
+        self.last_fix = -1e18
+        self.unknown_told = False
+
+    def health(self, deep: bool) -> str:
+        st = self.state()
+        if st == "ok" and deep and self.resolves() is False:
+            return "dns_failure"
+        return st
+
+    def check(self, now: float, why: str, deep: bool = False) -> bool:
+        st = self.health(deep)
+        if st == "ok":
+            return True
+        if st == "unknown":
+            if not self.unknown_told:
+                self.unknown_told = True
+                self.log.write("testpages_unknown", why=why)
+                print("주의: Docker 상태를 읽지 못해 시험 페이지 서버를 점검하지 못합니다 — Docker Desktop 이 켜져 있는지 보세요",
+                      flush=True)
+            return True
+        if now - self.last_fix < self.min_gap_s:
+            return False
+        self.last_fix = now
+        print(f"[{datetime.now():%H:%M}] 시험 페이지 서버 이상({st}) — 다시 켭니다", flush=True)
+        ok = self.recover(st)
+        self.sleep(self.settle_s)
+        after = self.health(True)
+        self.log.write("testpages_recover", why=why, before=st, after=after, command_ok=ok)
+        if after == "ok":
+            print(f"[{datetime.now():%H:%M}] 시험 페이지 서버를 다시 켰습니다", flush=True)
+        else:
+            print(f"[{datetime.now():%H:%M}] 시험 페이지 서버를 다시 켜지 못했습니다({after}) — "
+                  "docker compose --profile demo restart testpages 를 실행하고 콘솔에서 smish 로 확인하세요", flush=True)
+        return after == "ok"
+
+
 def docker_stats() -> dict:
     """조사 컨테이너·API 의 CPU·메모리, 증거 폴더 크기(MB). 리허설에서 3시간 동안 늘어나는지 본다."""
     out: dict = {}
@@ -366,8 +534,14 @@ def run(args) -> int:
         print("시험 페이지만 넣습니다(자체 제작 모의 사이트 — 실제 피드를 받지 않음)")
     else:
         threading.Thread(target=feed.run, daemon=True).start()
+    guard = TestpagesGuard(log)
+    if not guard.check(time.monotonic(), "start", deep=True):
+        log.write("end", feed=0, ratio=0, fill=0, testpages_unavailable=True)
+        raise SystemExit("시험 페이지 서버(testpages)에 닿지 않아 시작하지 않습니다 — "
+                         "docker compose --profile demo restart testpages 를 실행하고 콘솔에서 smish 로 확인한 뒤 다시 시작하세요")
     print(f"기록: {log.path}  (Ctrl+C 또는 tools/booth_stop.cmd 로 멈춤 — 조사 중인 사건은 그대로 끝난다)")
-    n = {"feed": 0, "ratio": 0, "fill": 0}
+    n = {"feed": 0, "ratio": 0, "fill": 0, "abandoned": 0, "unreachable": 0}
+    hold_until = 0.0  # 시험 페이지 서버를 고치지 못했을 때 새 사건을 넣지 않고 기다리는 시각
     nxt = 0
     mine: dict | None = None  # 지금 대기·조사 중인 스크립트 사건
     t_end = time.monotonic() + args.hours * 3600
@@ -381,13 +555,31 @@ def run(args) -> int:
             now = time.monotonic()
             if mine is not None:
                 st, c = api.call("GET", f"/api/cases/{mine['id']}")
-                if st == 200 and isinstance(c, dict) and c.get("status") in TERMINAL:
+                status = c.get("status") if st == 200 and isinstance(c, dict) else None
+                if status in TERMINAL:
                     th = c.get("threat") if isinstance(c.get("threat"), dict) else {}
                     log.write("done", id=mine["id"], kind=mine["kind"], status=c["status"],
                               reason=c.get("finish_reason"), threat=th.get("threat"),
                               seconds=round(now - mine["at"], 1))
+                    if c["status"] == "UNREACHABLE" and mine["kind"] != "feed":
+                        n["unreachable"] += 1  # 시험 페이지는 늘 열려야 한다: 시험 서버부터 본다
+                        if not guard.check(now, "unreachable_case", deep=True):
+                            hold_until = now + HOLD_S  # 고치지 못했으면 접속 불가 사건으로 콘솔을 채우지 않게 잠시 쉰다
                     mine = None
-            if mine is None:
+                else:
+                    why = mine["watch"].update(status, now)
+                    if why == "agent_restarted":
+                        log.write("abandon", id=mine["id"], kind=mine["kind"], why=why, seconds=round(now - mine["at"], 1))
+                        print(f"[{datetime.now():%H:%M}] 조사 컨테이너가 다시 켜졌습니다 — 조사 중이던 사건은 약 7분 뒤 "
+                              "'실패'로 정리됩니다. 기다리지 않고 다음 사건을 넣습니다.", flush=True)
+                        n["abandoned"] += 1
+                        mine = None
+                    elif why == "slow":
+                        log.write("slow", id=mine["id"], kind=mine["kind"], seconds=round(now - mine["at"], 1))
+                        print(f"[{datetime.now():%H:%M}] 사건이 {SLOW_S // 60}분 넘게 '조사 중'입니다. 멈췄으면 "
+                              "docker compose restart agent 로 조사 컨테이너를 다시 켜세요(다시 켜지면 다음 사건으로 넘어갑니다).",
+                              flush=True)
+            if mine is None and now >= hold_until:
                 kind = next_kind(n["feed"], n["ratio"], args.ratio, feed.ready(now))
                 url = feed.pop(now) if kind == "feed" else None
                 if kind == "feed" and url is None:
@@ -398,7 +590,7 @@ def run(args) -> int:
                 st, c = api.call("POST", "/api/cases", {"url": url, "source": "report" if kind == "feed" else "test"})
                 if st == 201 and isinstance(c, dict) and isinstance(c.get("id"), str):
                     n[kind] += 1
-                    mine = {"id": c["id"], "kind": kind, "at": now}
+                    mine = {"id": c["id"], "kind": kind, "at": now, "watch": CaseWatch()}
                     log.write("submit", id=c["id"], kind=kind, url=url)
                 else:
                     log.write("submit_failed", kind=kind, status=st, url=url)
@@ -407,8 +599,10 @@ def run(args) -> int:
                 log.write("stats", **docker_stats())
                 t_stats = now + 300
             if now >= t_print:
+                extra = (f" · 접속 불가 {n['unreachable']}" if n["unreachable"] else "") + \
+                    (f" · 끊겨 넘긴 사건 {n['abandoned']}" if n["abandoned"] else "")
                 if tests_only:
-                    print(f"[{datetime.now():%H:%M}] 시험 페이지 {n['ratio']}건", flush=True)
+                    print(f"[{datetime.now():%H:%M}] 시험 페이지 {n['ratio']}건{extra}", flush=True)
                     st, ik = api.call("GET", "/api/intake")
                     if st == 200 and isinstance(ik, dict) and ik.get("enabled"):
                         print("경고: 자동 수집이 켜졌습니다 — 실제 피싱 사이트를 조사하니 콘솔에서 바로 끄세요", flush=True)
@@ -417,8 +611,10 @@ def run(args) -> int:
                     total = n["feed"] + n["ratio"]
                     share = f"{n['feed'] / total:.0%}" if total else "-"
                     print(f"[{datetime.now():%H:%M}] 피드 {n['feed']} · 시험 {n['ratio'] + n['fill']}"
-                          f"(비율 {n['ratio']}·채움 {n['fill']}) · 피드 몫 {share} · 살아 있는 피드 대기 {len(feed.q)}",
+                          f"(비율 {n['ratio']}·채움 {n['fill']}) · 피드 몫 {share} · 살아 있는 피드 대기 {len(feed.q)}{extra}",
                           flush=True)
+                if not guard.check(now, "periodic"):
+                    hold_until = now + HOLD_S
                 t_print = now + 60
             time.sleep(POLL_S)
     except KeyboardInterrupt:
@@ -453,6 +649,9 @@ def summary(path: Path) -> dict:
             "collect_rounds": len(col), "probed": sum(e.get("probed", 0) for e in col),
             "alive": sum(e.get("alive", 0) for e in col),
             "submit_failed": sum(1 for e in evs if e["ev"] == "submit_failed"),
+            "abandoned": sum(1 for e in evs if e["ev"] == "abandon"), "slow": sum(1 for e in evs if e["ev"] == "slow"),
+            "tests_unreachable": sum(1 for e in tests if e["status"] == "UNREACHABLE"),
+            "testpages_recover": sum(1 for e in evs if e["ev"] == "testpages_recover"),
             "stats_first": stats[0] if stats else None, "stats_last": stats[-1] if stats else None}
 
 

@@ -242,9 +242,17 @@ class _FakeApi:
         return 200, {"status": "COMPLETED", "threat": {"threat": "phishing"}}
 
 
-def _run_tests_only(tmp_path, monkeypatch, api, loops=8):
+def _run_tests_only(tmp_path, monkeypatch, api, loops=8, testpages=("ok",), recover_ok=True):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     (tmp_path / ".env").write_text('ST_API_TOKENS=["a1:admin"]\n', encoding="utf-8")
     monkeypatch.setattr(booth_feed, "ROOT", tmp_path)
+    # 시험에서는 Docker 를 부르지 않는다: 시험 서버 상태·이름 확인·다시 켜기·조사 컨테이너 표식을 가짜로
+    states = list(testpages)
+    monkeypatch.setattr(booth_feed, "testpages_state", lambda: states.pop(0) if len(states) > 1 else states[0])
+    monkeypatch.setattr(booth_feed, "testpages_resolves", lambda: True)
+    api.recovered = []
+    monkeypatch.setattr(booth_feed, "recover_testpages", lambda st: api.recovered.append(st) or recover_ok)
+    monkeypatch.setattr(booth_feed, "agent_marker", lambda: "a|t1")
     monkeypatch.setattr(booth_feed, "Api", api)
     monkeypatch.setattr(booth_feed, "load_pages", lambda seed: ["http://testpages:8900/staged/s001/",
                                                                 "http://testpages:8900/staged_b/s002/"])
@@ -273,6 +281,21 @@ def test_tests_only_run_never_touches_feeds(tmp_path, monkeypatch):
     assert {e["kind"] for e in evs if e["ev"] == "submit"} == {"ratio"}
 
 
+def test_run_fixes_test_server_before_start_or_refuses(tmp_path, monkeypatch):
+    # 2026-11-16 리허설: 시험 서버가 꺼진 채 시작해 3시간 1,670건이 모두 접속 불가. 시작 전에 점검해 다시 켜고, 안 되면 시작하지 않는다
+    api = _FakeApi()
+    assert _run_tests_only(tmp_path / "a", monkeypatch, api, testpages=("stopped", "ok")) == 0
+    assert api.recovered == ["stopped"] and len(api.posts) >= 4
+    api = _FakeApi()
+    try:
+        _run_tests_only(tmp_path / "b", monkeypatch, api, testpages=("no_ip",), recover_ok=False)
+    except SystemExit as e:
+        assert "testpages" in str(e)
+    else:
+        raise AssertionError("시험 서버에 닿지 않으면 시작하지 않는다")
+    assert api.recovered == ["no_ip"] and api.posts == []
+
+
 def test_tests_only_refuses_when_intake_is_on(tmp_path, monkeypatch):
     # 자동 수집은 실제 피드 주소를 조사한다: 켜져 있으면 부스 재생을 시작하지 않는다
     api = _FakeApi(intake_on=True)
@@ -297,3 +320,199 @@ def test_ratio_bounds(monkeypatch):
         except SystemExit:
             continue
         raise AssertionError(bad)
+
+
+class _Markers:
+    """조사 컨테이너 표식을 차례로 돌려주는 가짜(마지막 값은 계속)."""
+
+    def __init__(self, *vals):
+        self.vals, self.calls = list(vals), 0
+
+    def __call__(self):
+        self.calls += 1
+        return self.vals.pop(0) if len(self.vals) > 1 else self.vals[0]
+
+
+def test_restarted_agent_is_not_waited_for():
+    # 2026-11-15 부스 노트북: 조사 중 워커가 메모리 한도로 죽어 컨테이너가 다시 켜졌는데, 끊긴 사건이 7분 뒤 '실패'로 정리될
+    # 때까지 다음 사건을 넣지 않았다. 조사를 시작할 때의 컨테이너와 지금 컨테이너가 다르면 바로 넘긴다
+    w = booth_feed.CaseWatch(marker=_Markers("a|t1", "a|t2"), check_s=5, slow_s=330)
+    assert w.update("RUNNING", 0.0) is None  # 조사 시작을 처음 봄: 기준 표식 a|t1
+    assert w.update("RUNNING", 3.0) is None  # 확인 간격 전에는 Docker 를 부르지 않는다
+    assert w.update("RUNNING", 5.0) == "agent_restarted"
+    # 다시 만든 컨테이너(ID 가 바뀜)도 같다
+    w = booth_feed.CaseWatch(marker=_Markers("a|t1", "b|t1"), check_s=5)
+    w.update("RUNNING", 0.0)
+    assert w.update("RUNNING", 5.0) == "agent_restarted"
+
+
+def test_same_agent_waits_and_warns_once_when_slow():
+    # 컨테이너가 그대로면 다음 사건을 넣지 않는다(관람객 신고가 스크립트 사건 두 건 뒤로 밀리지 않게) — 정상 조사 시간을
+    # 넘기면 직원에게 한 번만 알린다
+    m = _Markers("a|t1")
+    w = booth_feed.CaseWatch(marker=m, check_s=5, slow_s=330)
+    assert [w.update("RUNNING", float(t)) for t in range(0, 330, 5)] == [None] * 66
+    assert m.calls == 66  # 처음 한 번 + 5초마다 65번
+    assert w.update("RUNNING", 330.0) == "slow"
+    assert w.update("RUNNING", 335.0) is None and w.update("RUNNING", 400.0) is None
+
+
+def test_restart_while_queued_is_not_a_cut_case():
+    # 대기(QUEUED) 중에 컨테이너가 다시 켜졌다면 새 워커가 처음부터 조사하므로 끊긴 사건이 아니다: 조사 시작을 처음 본 순간이 기준
+    m = _Markers("b|t2")
+    w = booth_feed.CaseWatch(marker=m, check_s=5)
+    assert w.update("QUEUED", 0.0) is None and w.update(None, 1.0) is None  # 대기·조회 실패에는 Docker 를 부르지 않는다
+    assert m.calls == 0
+    assert w.update("RUNNING", 10.0) is None
+    assert w.update("RUNNING", 15.0) is None
+
+
+def test_unknown_marker_never_counts_as_restart():
+    # Docker 에 접속하지 못하면(None) 다시 켜졌다고 보지 않는다. 처음에 못 읽었으면 다음에 읽은 것을 기준으로 삼는다
+    assert booth_feed.stuck_reason(None, "a|t1", 10) is None
+    assert booth_feed.stuck_reason("a|t1", None, 10) is None
+    w = booth_feed.CaseWatch(marker=_Markers(None, "a|t1", "a|t1", "a|t2"), check_s=5)
+    w.update("RUNNING", 0.0)
+    assert w.update("RUNNING", 5.0) is None  # 기준이 이제 a|t1
+    assert w.update("RUNNING", 10.0) is None
+    assert w.update("RUNNING", 15.0) == "agent_restarted"
+
+
+def test_agent_marker_reads_running_container(monkeypatch):
+    class R:
+        def __init__(self, out, rc=0):
+            self.stdout, self.returncode = out, rc
+
+    cid = "0d664e9674eabf510fae4aa75f0c8f0abb7f5905a1a27027bce264451643d7f6"
+    for out, rc, want in ((f"{cid}|true|2026-11-14T14:55:22.926159578Z\n", 0, "0d664e9674ea|2026-11-14T14:55:22.926159578Z"),
+                          (f"{cid}|false|2026-11-14T14:55:22Z\n", 0, None),  # 다시 켜지는 중
+                          ("", 1, None),  # 컨테이너 없음
+                          ("not-an-id|true|x\n", 0, None)):
+        monkeypatch.setattr(booth_feed.subprocess, "run", lambda *a, _o=out, _r=rc, **k: R(_o, _r))
+        assert booth_feed.agent_marker() == want
+
+    def missing(*a, **k):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(booth_feed.subprocess, "run", missing)
+    assert booth_feed.agent_marker() is None
+
+
+def test_slow_threshold_covers_longest_normal_investigation():
+    # 워커가 끊긴 작업을 정리하는 기준(min_idle_ms)과 같은 식: 원래 조사 + 연관 후보 하위 조사. 기본값이 바뀌면 여기서 알린다
+    from safetrace.config import Settings
+
+    f = Settings.model_fields
+    longest = f["max_seconds"].default + f["candidate_max"].default * (f["candidate_max_seconds"].default + 20)
+    assert booth_feed.AGENT_MAX_S == longest
+    assert longest < booth_feed.SLOW_S < longest + 120  # 정상 조사는 넘기지 않고, 워커가 '실패'로 정리하기 전에 알린다
+
+
+def test_summary_counts_abandoned_and_slow(tmp_path):
+    evs = [{"t": "2026-11-15T00:00:00", "ev": "start"},
+           {"t": "2026-11-15T00:01:00", "ev": "submit", "id": "f0", "kind": "feed", "url": "u"},
+           {"t": "2026-11-15T00:02:00", "ev": "abandon", "id": "f0", "kind": "feed", "why": "agent_restarted", "seconds": 40.0},
+           {"t": "2026-11-15T00:03:00", "ev": "submit", "id": "t0", "kind": "ratio", "url": "u"},
+           {"t": "2026-11-15T00:09:00", "ev": "slow", "id": "t0", "kind": "ratio", "seconds": 331.0}]
+    p = tmp_path / "log.jsonl"
+    p.write_text("".join(json.dumps(e) + "\n" for e in evs), encoding="utf-8")
+    s = booth_feed.summary(p)
+    assert (s["abandoned"], s["slow"], s["feed"], s["tests_ratio"]) == (1, 1, 1, 1)
+
+
+class _R:
+    def __init__(self, out="", rc=0, err=""):
+        self.stdout, self.returncode, self.stderr = out, rc, err
+
+
+def test_testpages_state_reads_container(monkeypatch):
+    # 2026-11-16 부스 노트북: Docker Desktop 이 다시 켜진 뒤 시험 서버가 꺼지거나(exited) IP 없이 '실행 중'으로 남았다
+    for r, want in ((_R("true|172.18.0.4 \n"), "ok"),
+                    (_R("false|invalid IP \n"), "stopped"),
+                    (_R("true| \n"), "no_ip"),
+                    (_R("true|invalid IP \n"), "no_ip"),
+                    (_R("", 1, "Error: No such object: safetrace_v1-testpages-1"), "missing"),
+                    (_R("", 1, "failed to connect to the docker API"), "unknown")):
+        monkeypatch.setattr(booth_feed.subprocess, "run", lambda *a, _r=r, **k: _r)
+        assert booth_feed.testpages_state() == want
+
+    def missing(*a, **k):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(booth_feed.subprocess, "run", missing)
+    assert booth_feed.testpages_state() == "unknown"
+
+
+def test_recover_restarts_or_creates(monkeypatch):
+    # 'IP 없이 실행 중'은 up -d 가 그대로 두므로 restart, 컨테이너가 없을 때만 up -d
+    calls = []
+    monkeypatch.setattr(booth_feed.subprocess, "run", lambda cmd, **k: calls.append(cmd) or _R())
+    assert booth_feed.recover_testpages("no_ip") and booth_feed.recover_testpages("stopped")
+    assert booth_feed.recover_testpages("missing")
+    assert [c[-2:] for c in calls] == [["restart", "testpages"], ["restart", "testpages"], ["-d", "testpages"]]
+    assert all(c[:4] == ["docker", "compose", "--profile", "demo"] for c in calls)
+
+
+class _Seq:
+    def __init__(self, *vals):
+        self.vals, self.calls = list(vals), 0
+
+    def __call__(self, *a):
+        self.calls += 1
+        return self.vals.pop(0) if len(self.vals) > 1 else self.vals[0]
+
+
+def _guard(states, resolves=(True,), recover_ok=True):
+    log, fixed = _Log(), []
+    g = booth_feed.TestpagesGuard(log, state=_Seq(*states), resolves=_Seq(*resolves),
+                                  recover=lambda st: fixed.append(st) or recover_ok, min_gap_s=60, sleep=lambda s: None)
+    return g, log, fixed
+
+
+def test_guard_leaves_healthy_server_alone():
+    g, log, fixed = _guard(["ok"])
+    assert g.check(0.0, "start", deep=True) and g.check(60.0, "periodic")
+    assert fixed == [] and log.evs == []
+
+
+def test_guard_restarts_broken_server_and_rate_limits():
+    g, log, fixed = _guard(["no_ip", "ok"])
+    assert g.check(0.0, "periodic") is True  # 다시 켠 뒤 정상
+    assert fixed == ["no_ip"]
+    assert log.evs[-1] == {"ev": "testpages_recover", "why": "periodic", "before": "no_ip", "after": "ok", "command_ok": True}
+    # 다시 켜도 안 되면 False, 1분 안에는 다시 켜지 않는다
+    g, log, fixed = _guard(["stopped"], recover_ok=False)
+    assert g.check(0.0, "unreachable_case") is False
+    assert g.check(30.0, "unreachable_case") is False and fixed == ["stopped"]
+    assert g.check(61.0, "periodic") is False and fixed == ["stopped", "stopped"]
+
+
+def test_guard_deep_check_catches_name_lookup_failure():
+    # 컨테이너는 정상으로 보여도 검문 프록시에서 이름이 안 풀리면(조사 경로 그대로) 다시 켠다
+    g, _log, fixed = _guard(["ok"], resolves=(False, True))
+    assert g.check(0.0, "start", deep=True) is True
+    assert fixed == ["dns_failure"]
+    g, _log, fixed = _guard(["ok"], resolves=(False,))
+    assert g.check(0.0, "periodic") is True and fixed == []  # 1분마다는 컨테이너 상태만(가볍게)
+
+
+def test_guard_does_not_act_when_docker_is_unreadable():
+    g, log, fixed = _guard(["unknown"])
+    assert g.check(0.0, "start", deep=True) and g.check(70.0, "periodic")
+    assert fixed == [] and [e["ev"] for e in log.evs] == ["testpages_unknown"]  # 한 번만 알린다
+
+
+def test_summary_counts_unreachable_tests_and_recoveries(tmp_path):
+    evs = [{"t": "2026-11-17T09:00:00", "ev": "start"},
+           {"t": "2026-11-17T09:00:01", "ev": "submit", "id": "t0", "kind": "ratio", "url": "u"},
+           {"t": "2026-11-17T09:00:07", "ev": "done", "id": "t0", "kind": "ratio", "status": "UNREACHABLE",
+            "reason": "goto_failed", "threat": None, "seconds": 6.0},
+           {"t": "2026-11-17T09:00:11", "ev": "testpages_recover", "why": "unreachable_case", "before": "stopped",
+            "after": "ok", "command_ok": True},
+           {"t": "2026-11-17T09:00:12", "ev": "submit", "id": "t1", "kind": "ratio", "url": "u"},
+           {"t": "2026-11-17T09:00:20", "ev": "done", "id": "t1", "kind": "ratio", "status": "COMPLETED",
+            "threat": "phishing", "seconds": 8.0}]
+    p = tmp_path / "log.jsonl"
+    p.write_text("".join(json.dumps(e) + "\n" for e in evs), encoding="utf-8")
+    s = booth_feed.summary(p)
+    assert (s["tests_done"], s["tests_unreachable"], s["testpages_recover"], s["tests_threat"]) == (2, 1, 1, 1)
